@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"errors"
+	"log"
 	"strings"
 	"unipool-backend/database"
 	"unipool-backend/initializer"
@@ -24,6 +25,7 @@ func Authenticate(c *fiber.Ctx) error {
 	}
 	client, err := initializer.FirebaseApp.Auth(context.Background())
 	if err != nil {
+		log.Println(err)
 		return &fiber.Error{Code: 500, Message: "Firebase Auth error"}
 	}
 	decodedToken, err := client.VerifyIDToken(context.Background(), token)
@@ -35,7 +37,7 @@ func Authenticate(c *fiber.Ctx) error {
 	}
 	email := decodedToken.Claims["email"].(string)
 	var user models.User
-	if err := database.Database.Db.Preload("Team").Where("email = ?", email).First(&user).Error; err != nil {
+	if err := database.Database.Db.Where("email = ?", email).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			if decodedToken.Claims["name"] == nil {
 				user = models.User{
@@ -48,6 +50,7 @@ func Authenticate(c *fiber.Ctx) error {
 					Name:  decodedToken.Claims["name"].(string),
 				}
 			}
+			//CHANGE THIS LINE WHOEVER DOES CREATE USER
 			if err := database.Database.Db.Create(&user).Error; err != nil {
 				return &fiber.Error{Code: 500, Message: "Database error"}
 			}
