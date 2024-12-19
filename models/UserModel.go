@@ -1,10 +1,8 @@
 package models
 
-import "gorm.io/gorm"
-
 // User struct
 type User struct {
-	gorm.Model
+	BaseModel
 	Name              string `gorm:"type:varchar(100);not null;" json:"name" valid:"required~Name is required,matches(^[a-zA-Z ]+$)~Name must be alphabetic"`
 	Email             string `gorm:"type:varchar(100);not null;unique_index" json:"email" valid:"required~Email is required,email~Email is not valid"`
 	ProfilePictureURL string `gorm:"type:text" json:"profile_picture_url" valid:"url~URL is not valid"`

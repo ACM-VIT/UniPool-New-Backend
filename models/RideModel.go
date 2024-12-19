@@ -3,13 +3,13 @@ package models
 import (
 	"time"
 
-	"gorm.io/gorm"
+	"github.com/google/uuid"
 )
 
 // Ride struct
 type Ride struct {
-	gorm.Model
-	HostUserID    uint      `gorm:"not null" json:"host_user_id" valid:"required~Host user ID is required"`
+	BaseModel
+	HostUserID    uuid.UUID `gorm:"not null" json:"host_user_id" valid:"required~Host user ID is required"`
 	HostUser      User      `gorm:"foreignKey:HostUserID;references:ID" json:"host_user" valid:"-"`
 	StartLocation string    `gorm:"size:255;not null;" json:"start_location" valid:"required~Start location is required"`
 	EndLocation   string    `gorm:"size:255;not null;" json:"end_location" valid:"required~End location is required"`
