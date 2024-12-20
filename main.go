@@ -5,6 +5,7 @@ import (
 	"unipool-backend/database"
 	"unipool-backend/initializer"
 	"unipool-backend/middleware"
+	"unipool-backend/routes"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -12,7 +13,17 @@ import (
 
 func SetupRoutes(app *fiber.App) {
 	app.Use(cors.New())
-	// idhar likho
+
+	// Ride CRUD routes
+	app.Post("/ride/create", routes.CreateRide)           // Creates a new ride
+	app.Get("/ride/fetch/:id", routes.GetRideByID)        // Gets details of a ride by it's ID
+	app.Get("/ride/all", routes.GetRides)                 // Gets all rides
+	app.Put("/ride/update/:id", routes.UpdateRideByID)    // Updates a ride by it's ID
+	app.Delete("/ride/delete/:id", routes.DeleteRideByID) // Deletes a ride by it's ID
+
+	// User CRUD routes
+	app.Get("/user/all", routes.GetUsers)          // Gets all users
+	app.Get("/user/fetch/:id", routes.GetUserByID) // Gets details of a user by it's ID
 }
 func main() {
 	initializer.InitFirebase()

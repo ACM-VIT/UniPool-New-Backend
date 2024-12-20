@@ -17,6 +17,6 @@ type Ride struct {
 	TotalSeats    uint      `gorm:"not null;" json:"total_seats" valid:"required~Total seats is required"`
 	BookedSeats   uint      `gorm:"not null;" json:"booked_seats" valid:"required~Booked seats is required"`
 	TotalPrice    uint      `gorm:"not null;" json:"total_price" valid:"required~Total price is required"`
-	RideStatus    string    `gorm:"not null;default:'ongoing'" json:"ride_status"`
-	GenderPref    string    `gorm:"not null;default:'any'" json:"gender_preference"`
+	IsOngoing     uint      `gorm:"not null;default:0" json:"is_ongoing"`
+	IsSameGender  uint      `gorm:"not null;default:0" json:"is_same_gender"`
 }
