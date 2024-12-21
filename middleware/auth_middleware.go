@@ -8,6 +8,7 @@ import (
 	"unipool-backend/database"
 	"unipool-backend/initializer"
 	"unipool-backend/models"
+	"unipool-backend/routes"
 
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
@@ -50,10 +51,7 @@ func Authenticate(c *fiber.Ctx) error {
 					Name:  decodedToken.Claims["name"].(string),
 				}
 			}
-			//CHANGE THIS LINE WHOEVER DOES CREATE USER
-			if err := database.Database.Db.Create(&user).Error; err != nil {
-				return &fiber.Error{Code: 500, Message: "Database error"}
-			}
+			return routes.CreateUser(c)
 		} else {
 			return &fiber.Error{Code: 500, Message: "Database error"}
 		}

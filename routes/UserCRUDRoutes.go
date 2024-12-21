@@ -1,12 +1,14 @@
 package routes
 
 import (
+	"errors"
 	"log"
 	"unipool-backend/database"
 	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // User response model
@@ -16,6 +18,32 @@ type UserResponse struct {
 	Email  string    `json:"email"`
 	Phone  string    `json:"phone"`
 }
+
+//Function to create a user in the DB
+func CreateUser(c *fiber.Ctx) error {
+	user := c.Locals("user").(models.User)
+
+	var existingUser models.User
+
+	if err := database.Database.Db.Where("email = ?", user.Email).First(&existingUser).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			log.Println(err)
+			if err := database.Database.Db.Create(&user).Error; err != nil {
+				log.Println(err)
+				return &fiber.Error{Code: 500, Message: "Database error"}
+			}
+			return c.Status(201).SendString("User created")
+		} else {
+			log.Println(err)
+			return &fiber.Error{Code: 502, Message: "Error Finding User"}
+		}
+	} else {
+		// User already exists
+		log.Println(existingUser)
+		return &fiber.Error{Code: 409, Message: "User already exists"}
+	}
+}
+
 
 // Function to get all users in the DB
 func GetUsers(c *fiber.Ctx) error {
