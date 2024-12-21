@@ -25,6 +25,8 @@ func SetupRoutes(app *fiber.App) {
 	app.Post("/user", middleware.Authenticate, routes.CreateOrUpdateUser) // Create or update a user
 	app.Get("/user/all", routes.GetUsers)          // Gets all users
 	app.Get("/user/fetch/:id", routes.GetUserByID) // Gets details of a user by it's ID
+	app.Put("/user/update/:id", routes.UpdateUserByID)	// Updates a user by it's ID
+	app.Delete("/user/delete/:id", routes.DeleteUserByID) // Deletes a user by it's ID
 }
 func main() {
 	initializer.InitFirebase()
