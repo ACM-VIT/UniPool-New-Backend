@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log"
 	"unipool-backend/database"
+	"unipool-backend/helpers"
 	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
@@ -19,31 +20,84 @@ type UserResponse struct {
 	Phone  string    `json:"phone"`
 }
 
-//Function to create a user in the DB
-func CreateUser(c *fiber.Ctx) error {
-	user := c.Locals("user").(models.User)
+// Function to create or update a user in the DB after authentication
+func CreateOrUpdateUser(c *fiber.Ctx) error {
+	var user models.User
+
+	if err := c.BodyParser(&user); err != nil {
+		return &fiber.Error{Code: 400, Message: "Invalid JSON body"}
+	}
+
+	if err := helpers.ValidateUser(user); err != nil {
+		return &fiber.Error{Code: 400, Message: "Invalid user data"}
+	}
 
 	var existingUser models.User
 
 	if err := database.Database.Db.Where("email = ?", user.Email).First(&existingUser).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			log.Println(err)
-			if err := database.Database.Db.Create(&user).Error; err != nil {
-				log.Println(err)
-				return &fiber.Error{Code: 500, Message: "Database error"}
-			}
-			return c.Status(201).SendString("User created")
-		} else {
-			log.Println(err)
-			return &fiber.Error{Code: 502, Message: "Error Finding User"}
+			return createUser(user, c)
 		}
-	} else {
-		// User already exists
-		log.Println(existingUser)
-		return &fiber.Error{Code: 409, Message: "User already exists"}
+		log.Println(err)
+		return &fiber.Error{Code: 502, Message: "Error finding user"}
 	}
+
+	return updateUser(&existingUser, user, c)
 }
 
+
+// Function to create a new user in the DB
+func createUser(user models.User, c *fiber.Ctx) error {
+
+	if err := database.Database.Db.Create(&user).Error; err != nil {
+		log.Println(err)
+		return &fiber.Error{Code: 500, Message: "Database error"}
+	}
+
+	log.Printf("User created: Name=%s, Email=%s, ContactNumber=%s, Gender=%s, YOB=%d, ProfilePictureURL=%s",user.Name, user.Email, user.ContactNumber, user.Gender, user.YOB, user.ProfilePictureURL)
+	return c.Status(201).SendString("User created")
+}
+
+// Function to update the details of an existing user
+func updateUser(existingUser *models.User, user models.User, c *fiber.Ctx) error {
+	updated := false
+
+	if user.Name != existingUser.Name {
+		existingUser.Name = user.Name
+		updated = true
+	}
+
+	if user.ContactNumber != existingUser.ContactNumber {
+		existingUser.ContactNumber = user.ContactNumber
+		updated = true
+	}
+
+	if user.ProfilePictureURL != existingUser.ProfilePictureURL {
+		existingUser.ProfilePictureURL = user.ProfilePictureURL
+		updated = true
+	}
+
+	if user.Gender != existingUser.Gender {
+		existingUser.Gender = user.Gender
+		updated = true
+	}
+
+	if user.YOB != existingUser.YOB {
+		existingUser.YOB = user.YOB
+		updated = true
+	}
+
+	if updated {
+		if err := database.Database.Db.Save(existingUser).Error; err != nil {
+			log.Println(err)
+			return &fiber.Error{Code: 500, Message: "Database error"}
+		}
+		log.Printf("User updated: Name=%s, Email=%s, ContactNumber=%s, Gender=%s, YOB=%d, ProfilePictureURL=%s",user.Name, user.Email, user.ContactNumber, user.Gender, user.YOB, user.ProfilePictureURL)
+		return c.Status(200).SendString("User updated with new details")
+	}
+
+	return c.Status(409).SendString("User already exists with complete details")
+}
 
 // Function to get all users in the DB
 func GetUsers(c *fiber.Ctx) error {

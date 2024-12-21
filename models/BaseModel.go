@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // BaseModel is the base model for all models
@@ -15,7 +16,7 @@ type BaseModel struct {
 }
 
 // BeforeCreate will set a UUID rather than numeric ID.
-func (base *BaseModel) BeforeCreate() (err error) {
+func (base *BaseModel) BeforeCreate(tx *gorm.DB) (err error) {
 	uuid, err := uuid.NewUUID()
 	if err != nil {
 		return err
