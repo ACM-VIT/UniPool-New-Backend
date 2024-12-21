@@ -116,11 +116,10 @@ func updateUser(existingUser *models.User, user models.User, c *fiber.Ctx) error
 // Function to get all users in the DB
 func GetUsers(c *fiber.Ctx) error {
 	var users []models.User
-	result := database.Database.Db.Find(&users)
 
-	if result.Error != nil {
-		log.Printf("Error finding users: %v\n", result.Error)
-		return c.Status(502).SendString("Error finding users")
+	if err := database.Database.Db.Find(&users).Error; err != nil {
+		log.Println(err)
+		return &fiber.Error{Code: 502, Message: "Error finding users"}
 	}
 
 	usersResponse := make([]UserResponse, len(users))
@@ -139,13 +138,19 @@ func GetUsers(c *fiber.Ctx) error {
 
 // Function to get a user by their ID
 func GetUserByID(c *fiber.Ctx) error {
-	id := c.Params("id")
-	var user models.User
-	result := database.Database.Db.First(&user, id)
+	idStr := c.Params("id")
 
-	if result.Error != nil {
-		log.Printf("Error finding user: %v\n", result.Error)
-		return c.Status(502).SendString("Error finding user")
+	_, err := uuid.Parse(idStr)
+	if err != nil {
+		log.Println(err)
+		return &fiber.Error{Code: 400, Message: "Invalid user ID format"}
+	}
+
+	var user models.User
+
+	if err := database.Database.Db.First(&user, "id = ?", idStr).Error; err != nil {
+		log.Println(err)
+		return &fiber.Error{Code: 502, Message: "Error finding user"}
 	}
 
 	userResponse := UserResponse{
@@ -156,4 +161,105 @@ func GetUserByID(c *fiber.Ctx) error {
 	}
 
 	return c.Status(200).JSON(userResponse)
+}
+
+
+// Function to delete a user by their ID
+func DeleteUserByID(c *fiber.Ctx) error {
+	idStr := c.Params("id")
+
+	_, err := uuid.Parse(idStr)
+	if err != nil {
+		log.Println(err)
+		return &fiber.Error{Code: 400, Message: "Invalid user ID format"}
+	}
+
+	var user models.User
+
+	if err := database.Database.Db.First(&user, "id = ?", idStr).Error; err != nil {
+		log.Println(err)
+		return &fiber.Error{Code: 502, Message: "Error finding user"}
+	}
+
+
+	if err := database.Database.Db.Delete(&user). Error; err != nil {
+		log.Println(err)
+		return &fiber.Error{Code: 500, Message: "Database error"}
+	}
+	
+
+	log.Printf("User with id %v deleted\n", user.ID)
+	return c.Status(200).SendString("User deleted")
+}
+
+// Function to update user by their ID
+func UpdateUserByID(c *fiber.Ctx) error {
+	idStr := c.Params("id")
+
+	_, err := uuid.Parse(idStr)
+	if err != nil {
+		log.Println(err)
+		return &fiber.Error{Code: 400, Message: "Invalid user ID format"}
+	}
+
+	var user models.User
+	if err := c.BodyParser(&user); err != nil {
+		return &fiber.Error{Code: 400, Message: "Invalid JSON body"}
+	}
+
+	if err := helpers.ValidateUser(user); err != nil {
+		return &fiber.Error{Code: 400, Message: "Invalid user data"}
+	}
+
+	var existingUser models.User
+	if err := database.Database.Db.First(&existingUser, "id = ?", idStr).Error; err != nil {
+		log.Println(err)
+		return &fiber.Error{Code: 502, Message: "Error finding user"}
+	}
+
+	updated := false
+
+	if user.Name != existingUser.Name {
+		existingUser.Name = user.Name
+		updated = true
+	}
+
+	if user.ContactNumber != existingUser.ContactNumber {
+		existingUser.ContactNumber = user.ContactNumber
+		updated = true
+	}
+
+	if user.ProfilePictureURL != existingUser.ProfilePictureURL {
+		existingUser.ProfilePictureURL = user.ProfilePictureURL
+		updated = true
+	}
+
+	if user.Gender != existingUser.Gender {
+		existingUser.Gender = user.Gender
+		updated = true
+	}
+
+	if user.YOB != existingUser.YOB {
+		existingUser.YOB = user.YOB
+		updated = true
+	}
+
+	if updated {
+		if err := database.Database.Db.Save(&existingUser).Error; err != nil {
+			log.Println(err)
+			return &fiber.Error{Code: 500, Message: "Database error"}
+		}
+
+		userResponse := UserResponse{
+			UserID: existingUser.ID,
+			Name:   existingUser.Name,
+			Email:  existingUser.Email,
+			Phone:  existingUser.ContactNumber,
+		}
+
+		log.Printf("User with id %v updated\n", existingUser.ID)
+		return c.Status(200).JSON(userResponse)
+	}
+
+	return c.Status(409).SendString("User already has the same details")
 }
