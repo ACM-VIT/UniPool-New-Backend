@@ -54,8 +54,15 @@ func createUser(user models.User, c *fiber.Ctx) error {
 		return &fiber.Error{Code: 500, Message: "Database error"}
 	}
 
-	log.Printf("User created: Name=%s, Email=%s, ContactNumber=%s, Gender=%s, YOB=%d, ProfilePictureURL=%s",user.Name, user.Email, user.ContactNumber, user.Gender, user.YOB, user.ProfilePictureURL)
-	return c.Status(201).SendString("User created")
+	userResponse := UserResponse{
+		UserID: user.ID,
+		Name:   user.Name,
+		Email:  user.Email,
+		Phone:  user.ContactNumber,
+	}
+
+	log.Printf("User with id %v created\n", user.ID)
+	return c.Status(201).JSON(userResponse)
 }
 
 // Function to update the details of an existing user
@@ -92,8 +99,15 @@ func updateUser(existingUser *models.User, user models.User, c *fiber.Ctx) error
 			log.Println(err)
 			return &fiber.Error{Code: 500, Message: "Database error"}
 		}
-		log.Printf("User updated: Name=%s, Email=%s, ContactNumber=%s, Gender=%s, YOB=%d, ProfilePictureURL=%s",user.Name, user.Email, user.ContactNumber, user.Gender, user.YOB, user.ProfilePictureURL)
-		return c.Status(200).SendString("User updated with new details")
+		userResponse := UserResponse{
+			UserID: existingUser.ID,
+			Name:   existingUser.Name,
+			Email:  existingUser.Email,
+			Phone:  existingUser.ContactNumber,
+		}
+
+		log.Printf("User with id %v updated\n", existingUser.ID)
+		return c.Status(200).JSON(userResponse)
 	}
 
 	return c.Status(409).SendString("User already exists with complete details")
