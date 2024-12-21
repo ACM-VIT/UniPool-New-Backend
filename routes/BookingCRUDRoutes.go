@@ -29,7 +29,6 @@ func CreateBooking(c *fiber.Ctx) error {
 		return &fiber.Error{Code: 400, Message: "Invalid JSON body"}
 	}
 
-	// Optionally, validate the booking fields (similar to ValidateUser)
 	if err := helpers.ValidateBooking(booking); err != nil {
 		return &fiber.Error{Code: 400, Message: err.Error()}
 	}
@@ -90,7 +89,6 @@ func GetBookings(c *fiber.Ctx) error {
 func GetBookingByID(c *fiber.Ctx) error {
 	idParam := c.Params("id")
 
-	// Convert string to UUID
 	bookingID, err := uuid.Parse(idParam)
 	if err != nil {
 		return &fiber.Error{Code: 400, Message: "Invalid booking ID format"}
@@ -127,7 +125,6 @@ func UpdateBooking(c *fiber.Ctx) error {
 		return &fiber.Error{Code: 400, Message: "Invalid JSON body"}
 	}
 
-	// Optionally, validate the updated booking fields
 	if err := helpers.ValidateBooking(bookingPayload); err != nil {
 		return &fiber.Error{Code: 400, Message: err.Error()}
 	}
