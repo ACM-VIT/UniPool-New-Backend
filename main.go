@@ -6,6 +6,7 @@ import (
 	"unipool-backend/initializer"
 	"unipool-backend/middleware"
 	"unipool-backend/routes"
+	"unipool-backend/routes/users"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -22,7 +23,7 @@ func SetupRoutes(app *fiber.App) {
 	app.Delete("/ride/delete/:id", routes.DeleteRideByID) // Deletes a ride by it's ID
 
 	// User CRUD routes
-	app.Post("/user", routes.CreateOrUpdateUser)          // Create or update a user
+	app.Post("/user", users.CreateOrUpdateUser)           // Create or update a user
 	app.Get("/user/all", routes.GetUsers)                 // Gets all users
 	app.Get("/user/fetch/:id", routes.GetUserByID)        // Gets details of a user by it's ID
 	app.Put("/user/update/:id", routes.UpdateUserByID)    // Updates a user by it's ID
