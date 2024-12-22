@@ -1,7 +1,6 @@
 package routes
 
 import (
-	"errors"
 	"log"
 	"unipool-backend/database"
 	"unipool-backend/helpers"
@@ -9,7 +8,6 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 )
 
 // User response model
@@ -22,29 +20,85 @@ type UserResponse struct {
 
 // Function to create or update a user in the DB after authentication
 func CreateOrUpdateUser(c *fiber.Ctx) error {
-	var user models.User
-
-	if err := c.BodyParser(&user); err != nil {
-		return &fiber.Error{Code: 400, Message: "Invalid JSON body"}
-	}
-
-	if err := helpers.ValidateUser(user); err != nil {
-		return &fiber.Error{Code: 400, Message: "Invalid user data"}
-	}
-
+	// Extract user info from locals
+	localUser, ok := c.Locals("newuser").(map[string]interface{})
 	var existingUser models.User
 
-	if err := database.Database.Db.Where("email = ?", user.Email).First(&existingUser).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return createUser(user, c)
+	if ok {
+		// Parse the request body for additional fields
+		var requestBody struct {
+			ContactNumber string `json:"contact_number"`
+			Gender        string `json:"gender"`
+			YOB           uint   `json:"yob"`
 		}
-		log.Println(err)
-		return &fiber.Error{Code: 502, Message: "Error finding user"}
+
+		if err := c.BodyParser(&requestBody); err != nil {
+			return &fiber.Error{Code: 400, Message: "Invalid JSON body"}
+		}
+
+		// Combine data from locals and request body to create a new user object
+		newUser := models.User{
+			Name:              localUser["name"].(string),
+			Email:             localUser["email"].(string),
+			ProfilePictureURL: localUser["profile_picture_url"].(string),
+			ContactNumber:     requestBody.ContactNumber,
+			Gender:            requestBody.Gender,
+			YOB:               requestBody.YOB,
+		}
+
+		log.Println("User to be created:", newUser)
+		UserFCM := c.Get("FCMToken")
+
+		var userMetadata models.UserMetadata
+
+		tx := database.Database.Db.Begin()
+		if err := database.Database.Db.Create(&newUser).Error; err != nil {
+			log.Println("Error creating user:", err)
+			tx.Rollback()
+			return &fiber.Error{Code: 500, Message: "Error creating user"}
+		}
+
+		// Create user metadata with FCM token
+		userMetadata = models.UserMetadata{
+			UserID:   newUser.ID,
+			FCMToken: UserFCM,
+		}
+
+		if err := database.Database.Db.Create(&userMetadata).Error; err != nil {
+			log.Println("Error creating user metadata:", err)
+			tx.Rollback()
+			return &fiber.Error{Code: 500, Message: "Error creating user metadata"}
+		}
+		tx.Commit()
+
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"message": "User created successfully", "user": newUser})
 	}
 
-	return updateUser(&existingUser, user, c)
-}
+	if user, ok := c.Locals("user").(models.User); ok {
+		existingUser = user
+		UserFCM := c.Get("FCMToken")
 
+		// Update user metadata with the new FCM token
+		existingUserMetadata := models.UserMetadata{
+			UserID:   existingUser.ID,
+			FCMToken: UserFCM,
+		}
+
+		// Save the FCM token update for existing user
+		if err := database.Database.Db.Where("user_id = ?", existingUser.ID).Save(&existingUserMetadata).Error; err != nil {
+			log.Println("Error updating user metadata:", err)
+			return &fiber.Error{Code: 500, Message: "Error updating user metadata"}
+		}
+
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"message": "User FCM token updated successfully",
+			"user":    existingUser,
+		})
+	}
+
+	// If neither newuser nor user exists in locals, return an error
+	return &fiber.Error{Code: 400, Message: "User data not found in locals"}
+}
 
 // Function to create a new user in the DB
 func createUser(user models.User, c *fiber.Ctx) error {
@@ -163,7 +217,6 @@ func GetUserByID(c *fiber.Ctx) error {
 	return c.Status(200).JSON(userResponse)
 }
 
-
 // Function to delete a user by their ID
 func DeleteUserByID(c *fiber.Ctx) error {
 	idStr := c.Params("id")
@@ -181,12 +234,10 @@ func DeleteUserByID(c *fiber.Ctx) error {
 		return &fiber.Error{Code: 502, Message: "Error finding user"}
 	}
 
-
-	if err := database.Database.Db.Delete(&user). Error; err != nil {
+	if err := database.Database.Db.Delete(&user).Error; err != nil {
 		log.Println(err)
 		return &fiber.Error{Code: 500, Message: "Database error"}
 	}
-	
 
 	log.Printf("User with id %v deleted\n", user.ID)
 	return c.Status(200).SendString("User deleted")
