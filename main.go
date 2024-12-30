@@ -23,11 +23,11 @@ func SetupRoutes(app *fiber.App) {
 	app.Delete("/ride/delete/:id", routes.DeleteRideByID) // Deletes a ride by it's ID
 
 	// User CRUD routes
-	app.Post("/user", users.CreateOrUpdateUser)            // Create or update a user
-	app.Get("/user/details", users.GetUser)                // Gets user details
-	app.Get("/user/all", users.GetAllUsers)        // Gets all users
-	app.Delete("/user/delete", users.DeleteUser)           // Deletes a user
-	app.Get(("/user/:id/rides"), routes.FetchUserRides)    //Gets all the rides of a particular user
+	app.Post("/user", users.CreateOrUpdateUser)     // Create or update a user
+	app.Get("/user/details", users.GetUser)         // Gets user details
+	app.Get("/user/all", users.GetAllUsers)         // Gets all users
+	app.Delete("/user/delete", users.DeleteUser)    // Deletes a user
+	app.Get(("/user/rides"), routes.FetchUserRides) //Gets all the rides of a particular user
 
 	//Booking CRUD routes
 	app.Post("/booking/create", routes.CreateBooking)       // Creates a new booking
