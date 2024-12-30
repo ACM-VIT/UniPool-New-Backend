@@ -40,7 +40,7 @@ func CreateBooking(c *fiber.Ctx) error {
 	if err == nil {
 		// Found an existing booking -> conflict
 		return c.Status(409).SendString("Booking already exists for this ride and passenger")
-	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		log.Println(err)
 		return &fiber.Error{Code: 502, Message: "Error checking existing booking"}
 	}
@@ -148,7 +148,6 @@ func UpdateBooking(c *fiber.Ctx) error {
 		updated = true
 	}
 
-
 	if updated {
 		if err := database.Database.Db.Save(&existingBooking).Error; err != nil {
 			log.Println(err)
@@ -194,5 +193,5 @@ func DeleteBooking(c *fiber.Ctx) error {
 	}
 
 	log.Printf("Booking with id %v deleted\n", booking.ID)
-	return c.SendStatus(204) 
+	return c.SendStatus(204)
 }

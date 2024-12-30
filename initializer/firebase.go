@@ -19,9 +19,9 @@ func InitFirebase() {
 		log.Fatal("Error loading .env file")
 	}
 
-	credentialsPath := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+	credentialsVal := os.Getenv("SERVICE_CREDS")
 
-	opt := option.WithCredentialsJSON([]byte(credentialsPath))
+	opt := option.WithCredentialsJSON([]byte(credentialsVal))
 	// log.Println(opt)
 	app, err := firebase.NewApp(context.Background(), nil, opt)
 	if err != nil {
