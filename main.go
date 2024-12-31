@@ -6,6 +6,7 @@ import (
 	"unipool-backend/initializer"
 	"unipool-backend/middleware"
 	"unipool-backend/routes"
+	"unipool-backend/routes/bookings"
 	"unipool-backend/routes/users"
 
 	"github.com/gofiber/fiber/v2"
@@ -30,11 +31,14 @@ func SetupRoutes(app *fiber.App) {
 	app.Get(("/user/rides"), users.FetchUserRides) //Gets all the rides of a particular user
 
 	//Booking CRUD routes
-	app.Post("/booking/create", routes.CreateBooking)       // Creates a new booking
-	app.Get("/booking/list", routes.GetBookings)            // Retrieves all bookings
-	app.Get("/booking/:id", routes.GetBookingByID)          // Retrieves a specific booking by its ID
-	app.Patch("/booking/update/:id", routes.UpdateBooking)  // Updates an existing booking
-	app.Delete("/booking/delete/:id", routes.DeleteBooking) // Deletes a booking
+	app.Post("/booking/create", routes.CreateBooking)            // Creates a new booking
+	app.Get("/booking/list", routes.GetBookings)                 // Retrieves all bookings
+	app.Get("/booking/:id", routes.GetBookingByID)               // Retrieves a specific booking by its ID
+	app.Patch("/booking/update/:id", routes.UpdateBooking)       // Updates an existing booking
+	app.Delete("/booking/delete/:id", routes.DeleteBooking)      // Deletes a booking
+	app.Put("/bookings/accept/:bookingID", bookings.AcceptRoute) // Accepts a booking
+	app.Post("/bookings/request", bookings.Request)              // Requests a booking aka Create a booking
+
 }
 
 func main() {
