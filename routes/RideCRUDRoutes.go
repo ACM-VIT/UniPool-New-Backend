@@ -147,24 +147,26 @@ func GetRides(c *fiber.Ctx) error {
 
 // Function to get a ride by ID
 func GetRideByID(c *fiber.Ctx) error {
-	rideID := c.Params("id")
+	rideID := c.Params("rideID")
+
+	// Start a database transaction
+	tx := database.Database.Db.Begin()
 
 	var ride models.Ride
-	result := database.Database.Db.First(&ride, rideID)
-
-	if result.Error == gorm.ErrRecordNotFound {
-		log.Printf("Ride with id %v not found\n", rideID)
+	
+	if err := tx.First(&ride, rideID).Error; err != nil {
+		// Rollback the transaction in case of an error
+		tx.Rollback()
+		log.Printf("Ride does not exist")
 		return c.Status(404).SendString("Ride not found")
-	} else if result.Error != nil {
-		log.Printf("Error finding ride: %v\n", result.Error)
-		return c.Status(500).SendString("Error finding ride")
 	}
 
 	// Find the host user
 	var hostUser models.User
-	result = database.Database.Db.First(&hostUser, ride.HostUserID)
-	if result.Error != nil {
-		log.Printf("Error finding host user: %v\n", result.Error)
+	if err := tx.First(&hostUser, ride.HostUserID).Error; err != nil {
+		// Rollback the transaction in case of an error
+		tx.Rollback()
+		log.Printf("Host user not found")
 		return c.Status(502).SendString("Error finding host user")
 	}
 
