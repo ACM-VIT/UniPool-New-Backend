@@ -1,125 +1,250 @@
 package routes
 
 import (
+	"log"
+	"time"
 	"unipool-backend/database"
-	"unipool-backend/helpers"
 	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+type MessageResponse struct {
+	ID        uuid.UUID `json:"id"`
+	RideID    uuid.UUID `json:"ride_id"`
+	SenderID  uuid.UUID `json:"sender_id"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// isUserPartOfRide checks if a user is either the host or a passenger of a ride
+func isUserPartOfRide(db *gorm.DB, rideID uuid.UUID, userID uuid.UUID) (bool, error) {
+	var ride models.Ride
+
+	// First check if user is the host
+	result := db.First(&ride, rideID)
+	if result.Error != nil {
+		if result.Error == gorm.ErrRecordNotFound {
+			return false, nil
+		}
+		return false, result.Error
+	}
+
+	if ride.HostUserID == userID {
+		return true, nil
+	}
+
+	// If not host, check if user is a passenger
+	// This assumes passengers are tracked in the Ride table
+	var passengerRide models.Ride
+	result = db.Where("id = ? AND host_user_id <> ? AND booked_seats > 0", rideID, userID).
+		First(&passengerRide)
+
+	return result.Error != gorm.ErrRecordNotFound, nil
+}
 
 func CreateMessage(c *fiber.Ctx) error {
 	var message models.Message
 
+	// Get user from context
+	user := c.Locals("user").(models.User)
+
+	// Parse request body
 	if err := c.BodyParser(&message); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Unable to parse message data"})
+		log.Printf("Error parsing JSON: %v\n", err)
+		return c.Status(400).SendString("Error parsing JSON")
 	}
 
-	// Validate message data using helper
-	if err := helpers.ValidateMessages(message); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
+	// Validate RideID
+	if message.RideID == uuid.Nil {
+		return c.Status(400).SendString("Invalid RideID")
 	}
 
-	// Extract the user ID from locals (set by the authentication middleware)
-	user, ok := c.Locals("user").(models.User)
-	if !ok {
-		return c.Status(401).JSON(fiber.Map{"error": "User not authenticated"})
+	// Check if user is part of the ride
+	isPartOfRide, err := isUserPartOfRide(database.Database.Db, message.RideID, user.ID)
+	if err != nil {
+		log.Printf("Error checking ride participation: %v\n", err)
+		return c.Status(500).SendString("Error checking ride participation")
 	}
 
-	// Set the sender ID from the authenticated user
+	if !isPartOfRide {
+		return c.Status(403).SendString("You must be a participant of this ride to send messages")
+	}
+
+	// Set sender ID
 	message.SenderID = user.ID
 
+	// Create message
 	if err := database.Database.Db.Create(&message).Error; err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed to create message"})
+		log.Printf("Error creating message: %v\n", err)
+		return c.Status(500).SendString("Error creating message")
 	}
 
-	return c.Status(201).JSON(fiber.Map{"status": "Message created successfully", "message": message})
+	// Load sender information for response
+	if err := database.Database.Db.Preload("Sender").First(&message, message.ID).Error; err != nil {
+		log.Printf("Error loading message relationships: %v\n", err)
+		return c.Status(500).SendString("Error loading message data")
+	}
+
+	return c.Status(201).JSON(message)
 }
 
-func GetMessageByID(c *fiber.Ctx) error {
-	messageID := c.Params("id")
-	var message models.Message
+func GetRideMessages(c *fiber.Ctx) error {
+	rideIDParam := c.Params("id")
+	user := c.Locals("user").(models.User)
 
-	// Find message in DB
-	if err := database.Database.Db.First(&message, "id = ?", messageID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return c.Status(404).JSON(fiber.Map{"error": "Message not found"})
-		}
-		return c.Status(500).JSON(fiber.Map{"error": "Database error"})
+	rideID, err := uuid.Parse(rideIDParam)
+	if err != nil {
+		log.Printf("Invalid RideID UUID: %v\n", err)
+		return c.Status(400).SendString("Invalid RideID format")
 	}
 
-	return c.Status(200).JSON(fiber.Map{"message": message})
+	// Verify the ride exists
+	var ride models.Ride
+	if err := database.Database.Db.First(&ride, rideID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return c.Status(404).SendString("Ride not found")
+		}
+		return c.Status(500).SendString("Error finding ride")
+	}
+
+	// Check if user is host or passenger
+	isHost := ride.HostUserID == user.ID
+	var passengerRide models.Ride
+	result := database.Database.Db.Where("id = ? AND host_user_id <> ? AND booked_seats > 0", rideID, user.ID).
+		First(&passengerRide)
+	isPassenger := result.Error == nil
+
+	if !isHost && !isPassenger {
+		return c.Status(403).SendString("You must be a participant of this ride to view messages")
+	}
+
+	// Get all messages with sender information
+	var messages []models.Message
+	if err := database.Database.Db.Where("ride_id = ?", rideID).
+		Preload("Sender").
+		Order("created_at asc").
+		Find(&messages).Error; err != nil {
+		log.Printf("Error fetching messages: %v\n", err)
+		return c.Status(500).SendString("Error fetching messages")
+	}
+
+	return c.Status(200).JSON(messages)
+}
+
+// GetSpecificMessage gets a specific message by ID
+func GetSpecificMessage(c *fiber.Ctx) error {
+	messageIDParam := c.Params("id")
+	user := c.Locals("user").(models.User)
+
+	messageID, err := uuid.Parse(messageIDParam)
+	if err != nil {
+		log.Printf("Invalid MessageID UUID: %v\n", err)
+		return c.Status(400).SendString("Invalid MessageID format")
+	}
+
+	// Get message with sender information
+	var message models.Message
+	if err := database.Database.Db.Preload("Sender").First(&message, messageID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return c.Status(404).SendString("Message not found")
+		}
+		return c.Status(500).SendString("Error finding message")
+	}
+
+	// Get the ride to check if user is participant
+	var ride models.Ride
+	if err := database.Database.Db.First(&ride, message.RideID).Error; err != nil {
+		return c.Status(500).SendString("Error finding associated ride")
+	}
+
+	// Check if user is host or passenger
+	isHost := ride.HostUserID == user.ID
+	var passengerRide models.Ride
+	result := database.Database.Db.Where("id = ? AND host_user_id <> ? AND booked_seats > 0", message.RideID, user.ID).
+		First(&passengerRide)
+	isPassenger := result.Error == nil
+
+	if !isHost && !isPassenger {
+		return c.Status(403).SendString("You must be a participant of this ride to view this message")
+	}
+
+	return c.Status(200).JSON(message)
 }
 
 func UpdateMessage(c *fiber.Ctx) error {
-	messageID := c.Params("id")
+	messageIDParam := c.Params("id")
+	user := c.Locals("user").(models.User)
+
+	messageID, err := uuid.Parse(messageIDParam)
+	if err != nil {
+		return c.Status(400).SendString("Invalid MessageID format")
+	}
+
 	var message models.Message
-
-	// Find existing message in DB
-	if err := database.Database.Db.First(&message, "id = ?", messageID).Error; err != nil {
+	if err := database.Database.Db.First(&message, messageID).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return c.Status(404).JSON(fiber.Map{"error": "Message not found"})
+			return c.Status(404).SendString("Message not found")
 		}
-		return c.Status(500).JSON(fiber.Map{"error": "Database error"})
+		return c.Status(500).SendString("Error finding message")
 	}
 
-	// Extract the user ID from locals (set by the authentication middleware)
-	user, ok := c.Locals("user").(models.User)
-	if !ok {
-		return c.Status(401).JSON(fiber.Map{"error": "User not authenticated"})
-	}
-
-	// Check if the message sender matches the authenticated user
+	// Verify ownership
 	if message.SenderID != user.ID {
-		return c.Status(403).JSON(fiber.Map{"error": "You can only update your own messages"})
+		return c.Status(403).SendString("You can only update your own messages")
 	}
 
-	// Parse updated data
-	if err := c.BodyParser(&message); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": "Unable to parse message data"})
+	// Parse update body
+	var updateData struct {
+		Content string `json:"content"`
+	}
+	if err := c.BodyParser(&updateData); err != nil {
+		return c.Status(400).SendString("Invalid request body")
 	}
 
-	// Validate updated message data using helper
-	if err := helpers.ValidateMessages(message); err != nil {
-		return c.Status(400).JSON(fiber.Map{"error": err.Error()})
-	}
+	message.Content = updateData.Content
 
-	// Save updated message in DB
 	if err := database.Database.Db.Save(&message).Error; err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed to update message"})
+		log.Printf("Error updating message: %v\n", err)
+		return c.Status(500).SendString("Error updating message")
 	}
 
-	return c.Status(200).JSON(fiber.Map{"status": "Message updated successfully", "message": message})
+	// Reload message with sender information
+	if err := database.Database.Db.Preload("Sender").First(&message, messageID).Error; err != nil {
+		return c.Status(500).SendString("Error loading updated message")
+	}
+
+	return c.Status(200).JSON(message)
 }
 
 func DeleteMessage(c *fiber.Ctx) error {
-	messageID := c.Params("id")
+	messageIDParam := c.Params("id")
+	user := c.Locals("user").(models.User)
+
+	messageID, err := uuid.Parse(messageIDParam)
+	if err != nil {
+		return c.Status(400).SendString("Invalid MessageID format")
+	}
+
 	var message models.Message
-
-	// Find the message in the DB
-	if err := database.Database.Db.First(&message, "id = ?", messageID).Error; err != nil {
+	if err := database.Database.Db.First(&message, messageID).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			return c.Status(404).JSON(fiber.Map{"error": "Message not found"})
+			return c.Status(404).SendString("Message not found")
 		}
-		return c.Status(500).JSON(fiber.Map{"error": "Database error"})
+		return c.Status(500).SendString("Error finding message")
 	}
 
-	// Extract the user ID from locals (set by the authentication middleware)
-	user, ok := c.Locals("user").(models.User)
-	if !ok {
-		return c.Status(401).JSON(fiber.Map{"error": "User not authenticated"})
-	}
-
-	// Check if the message sender matches the authenticated user
+	// Verify ownership
 	if message.SenderID != user.ID {
-		return c.Status(403).JSON(fiber.Map{"error": "You can only delete your own messages"})
+		return c.Status(403).SendString("You can only delete your own messages")
 	}
 
-	// Delete the message
-	if err := database.Database.Db.Delete(&models.Message{}, "id = ?", messageID).Error; err != nil {
-		return c.Status(500).JSON(fiber.Map{"error": "Failed to delete message"})
+	if err := database.Database.Db.Delete(&message).Error; err != nil {
+		log.Printf("Error deleting message: %v\n", err)
+		return c.Status(500).SendString("Error deleting message")
 	}
 
-	return c.Status(200).JSON(fiber.Map{"message": "Message deleted successfully"})
+	return c.Status(200).SendString("Message deleted successfully")
 }

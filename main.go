@@ -38,9 +38,10 @@ func SetupRoutes(app *fiber.App) {
 
 	// Messaging CRUD routes
 	app.Post("/messages", routes.CreateMessage)
-	app.Get("/messages", routes.GetMessageByID)
-	app.Put("/messages/:id", routes.UpdateMessage)
-	app.Delete("/messages/:id", routes.DeleteMessage)
+	app.Get("/messages/fetch/ride/:id", routes.GetRideMessages)
+	app.Get("/messages/fetch/:id", routes.GetSpecificMessage)
+	app.Put("/messages/update/:id", routes.UpdateMessage)
+	app.Delete("/messages/delete/:id", routes.DeleteMessage)
 }
 
 func main() {
