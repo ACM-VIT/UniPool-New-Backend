@@ -39,6 +39,13 @@ func SetupRoutes(app *fiber.App) {
 	app.Put("/bookings/accept/:bookingID", bookings.AcceptRoute) // Accepts a booking
 	app.Post("/bookings/request", bookings.Request)              // Requests a booking aka Create a booking
 
+	//Messaging CRUD routes
+	app.Post("/booking/create", routes.CreateBooking)       // Creates a new booking
+	app.Get("/booking/list", routes.GetBookings)            // Retrieves all bookings
+	app.Get("/booking/:id", routes.GetBookingByID)          // Retrieves a specific booking by its ID
+	app.Patch("/booking/update/:id", routes.UpdateBooking)  // Updates an existing booking
+	app.Delete("/booking/delete/:id", routes.DeleteBooking) // Deletes a booking
+
 }
 
 func main() {
