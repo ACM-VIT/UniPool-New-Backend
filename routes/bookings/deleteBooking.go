@@ -6,7 +6,7 @@ import (
 	"unipool-backend/database"
 	"unipool-backend/models"
 
-	"github.com/gofiber/fiber"
+	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
