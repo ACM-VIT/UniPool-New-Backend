@@ -153,7 +153,7 @@ func GetRideByID(c *fiber.Ctx) error {
 	tx := database.Database.Db.Begin()
 
 	var ride models.Ride
-	
+
 	if err := tx.First(&ride, rideID).Error; err != nil {
 		// Rollback the transaction in case of an error
 		tx.Rollback()
