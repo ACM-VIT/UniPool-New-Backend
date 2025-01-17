@@ -7,6 +7,7 @@ import (
 	"unipool-backend/middleware"
 	"unipool-backend/routes"
 	"unipool-backend/routes/bookings"
+	"unipool-backend/routes/rides"
 	"unipool-backend/routes/users"
 
 	"github.com/gofiber/fiber/v2"
@@ -17,7 +18,7 @@ func SetupRoutes(app *fiber.App) {
 	app.Use(cors.New())
 
 	// Ride CRUD routes
-	app.Post("/ride/create", routes.CreateRide)           // Creates a new ride
+	app.Post("/ride/create", rides.CreateRide)            // Creates a new ride
 	app.Get("/ride/fetch/:id", routes.GetRideByID)        // Gets details of a ride by it's ID
 	app.Get("/ride/all", routes.GetRides)                 // Gets all rides
 	app.Put("/ride/update/:id", routes.UpdateRideByID)    // Updates a ride by it's ID
