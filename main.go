@@ -5,7 +5,7 @@ import (
 	"unipool-backend/database"
 	"unipool-backend/initializer"
 	"unipool-backend/middleware"
-	"unipool-backend/routes"
+	"unipool-backend/routes/CRUD"
 	"unipool-backend/routes/bookings"
 	"unipool-backend/routes/rides"
 	"unipool-backend/routes/users"
@@ -18,11 +18,11 @@ func SetupRoutes(app *fiber.App) {
 	app.Use(cors.New())
 
 	// Ride CRUD routes
-	app.Post("/ride/create", rides.CreateRide)            // Creates a new ride
-	app.Get("/ride/fetch/:id", routes.GetRideByID)        // Gets details of a ride by it's ID
-	app.Get("/ride/all", routes.GetRides)                 // Gets all rides
-	app.Put("/ride/update/:id", routes.UpdateRideByID)    // Updates a ride by it's ID
-	app.Delete("/ride/delete/:id", routes.DeleteRideByID) // Deletes a ride by it's ID
+	app.Post("/ride/create", rides.CreateRide)          // Creates a new ride
+	app.Get("/ride/fetch/:id", CRUD.GetRideByID)        // Gets details of a ride by it's ID
+	app.Get("/ride/all", CRUD.GetRides)                 // Gets all rides
+	app.Put("/ride/update/:id", CRUD.UpdateRideByID)    // Updates a ride by it's ID
+	app.Delete("/ride/delete/:id", CRUD.DeleteRideByID) // Deletes a ride by it's ID
 
 	// User CRUD routes
 	app.Post("/user", users.CreateOrUpdateUser)    // Create or update a user
@@ -32,20 +32,20 @@ func SetupRoutes(app *fiber.App) {
 	app.Get(("/user/rides"), users.FetchUserRides) //Gets all the rides of a particular user
 
 	//Booking CRUD routes
-	app.Post("/booking/create", routes.CreateBooking)            // Creates a new booking
-	app.Get("/booking/list", routes.GetBookings)                 // Retrieves all bookings
-	app.Get("/booking/:id", routes.GetBookingByID)               // Retrieves a specific booking by its ID
-	app.Patch("/booking/update/:id", routes.UpdateBooking)       // Updates an existing booking
-	app.Delete("/booking/delete/:id", routes.DeleteBooking)      // Deletes a booking
+	app.Post("/booking/create", CRUD.CreateBooking)              // Creates a new booking
+	app.Get("/booking/list", CRUD.GetBookings)                   // Retrieves all bookings
+	app.Get("/booking/:id", CRUD.GetBookingByID)                 // Retrieves a specific booking by its ID
+	app.Patch("/booking/update/:id", CRUD.UpdateBooking)         // Updates an existing booking
+	app.Delete("/booking/delete/:id", CRUD.DeleteBooking)        // Deletes a booking
 	app.Put("/bookings/accept/:bookingID", bookings.AcceptRoute) // Accepts a booking
 	app.Post("/bookings/request", bookings.Request)              // Requests a booking aka Create a booking
 
 	//Messaging CRUD routes
-	app.Post("/booking/create", routes.CreateBooking)       // Creates a new booking
-	app.Get("/booking/list", routes.GetBookings)            // Retrieves all bookings
-	app.Get("/booking/:id", routes.GetBookingByID)          // Retrieves a specific booking by its ID
-	app.Patch("/booking/update/:id", routes.UpdateBooking)  // Updates an existing booking
-	app.Delete("/booking/delete/:id", routes.DeleteBooking) // Deletes a booking
+	app.Post("/booking/create", CRUD.CreateBooking)           // Creates a new booking
+	app.Get("/booking/list", CRUD.GetBookings)                // Retrieves all bookings
+	app.Get("/booking/:id", CRUD.GetBookingByID)              // Retrieves a specific booking by its ID
+	app.Patch("/booking/update/:id", CRUD.UpdateBooking)      // Updates an existing booking
+	app.Delete("/booking/delete/:id", bookings.DeleteBooking) // Deletes a booking
 
 }
 
