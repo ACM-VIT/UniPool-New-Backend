@@ -33,7 +33,7 @@ func SearchRides(c *fiber.Ctx) error {
 	startLocation := c.Query("start_location")
 	endLocation := c.Query("end_location")
 	date := c.Query("date")
-	userid := c.Locals("user").(*models.User).ID
+	userid := c.Locals("user").(models.User).ID
 
 	// Retrieve rides from the database
 	var rides []models.Ride

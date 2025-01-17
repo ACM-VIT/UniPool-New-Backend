@@ -23,6 +23,7 @@ func SetupRoutes(app *fiber.App) {
 	app.Get("/ride/all", CRUD.GetRides)                 // Gets all rides
 	app.Put("/ride/update/:id", CRUD.UpdateRideByID)    // Updates a ride by it's ID
 	app.Delete("/ride/delete/:id", CRUD.DeleteRideByID) // Deletes a ride by it's ID
+	app.Get("ride/search", rides.SearchRides)           // Search for rides
 
 	// User CRUD routes
 	app.Post("/user", users.CreateOrUpdateUser)    // Create or update a user
