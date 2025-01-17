@@ -36,15 +36,10 @@ func Request(c *fiber.Ctx) error {
 	}
 
 	// Associate the PassengerID with the booking
-	// Add PassengerID indirectly by creating a mapping or storing it in the database
-	bookingMap := map[string]interface{}{
-		"ride_id":        booking.RideID,
-		"request_status": booking.RequestStatus,
-		"passenger_id":   PassengerID,
-	}
+	booking.PassengerID = PassengerID
 
-	// Insert the booking record
-	if err := database.Database.Db.Model(&models.Booking{}).Create(bookingMap).Error; err != nil {
+	// Insert the booking record using the models.Booking struct
+	if err := database.Database.Db.Create(&booking).Error; err != nil {
 		log.Println("Error creating booking:", err)
 		return c.Status(500).SendString("Database error")
 	}

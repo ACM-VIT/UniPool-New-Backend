@@ -13,50 +13,56 @@ func AcceptRoute(c *fiber.Ctx) error {
 
 	// Start a database transaction
 	tx := database.Database.Db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
 
+	// Retrieve the booking
+	// Ensure the bookingID is being treated as UUID in the query
 	var booking models.Booking
-
-	if err := tx.First(&booking, bookingID).Error; err != nil {
-		// Rollback the transaction in case of an error
+	if err := tx.First(&booking, "id = ?", bookingID).Error; err != nil {
+		log.Printf("Error finding booking with ID %v: %v\n", bookingID, err)
 		tx.Rollback()
-		log.Printf("Booking does not exist")
 		return c.Status(404).SendString("Booking not found")
 	}
 
+	// Update the booking status to "accepted"
 	if err := tx.Model(&booking).Update("request_status", "accepted").Error; err != nil {
-		// Rollback the transaction in case of an error
+		log.Printf("Error updating booking status for ID %v: %v\n", bookingID, err)
 		tx.Rollback()
-		log.Printf("Error updating booking status: %v\n", err)
 		return c.Status(500).SendString("Error updating booking status")
 	}
 
+	// Retrieve the associated ride
 	var ride models.Ride
-	RideID := booking.RideID
-	if err := tx.First(&ride, RideID).Error; err != nil {
-		// Rollback the transaction in case of an error
+	if err := tx.First(&ride, booking.RideID).Error; err != nil {
+		log.Printf("Error finding ride with ID %v: %v\n", booking.RideID, err)
 		tx.Rollback()
-		log.Printf("Ride not Found")
-		return c.Status(404).SendString("Ride not Found")
+		return c.Status(404).SendString("Ride not found")
 	}
 
+	// Check if there are available seats for the ride
 	if ride.BookedSeats >= ride.TotalSeats {
-		// Rollback the transaction in case of an error
+		log.Printf("No available seats for ride with ID %v\n", booking.RideID)
 		tx.Rollback()
-		log.Println("No available seats for this ride")
 		return c.Status(400).SendString("No available seats for this ride")
 	}
 
 	// Increment the booked seats count
 	if err := tx.Model(&ride).Update("booked_seats", ride.BookedSeats+1).Error; err != nil {
-		// Rollback the transaction in case of an error
+		log.Printf("Error updating booked seats for ride with ID %v: %v\n", ride.ID, err)
 		tx.Rollback()
-		log.Printf("Error updating booked seats for ride: %v\n", err)
 		return c.Status(500).SendString("Error updating booked seats for ride")
 	}
 
-	// Commit the transaction if all operations are successful
-	tx.Commit()
+	// Commit the transaction after all successful updates
+	if err := tx.Commit().Error; err != nil {
+		log.Printf("Error committing transaction: %v\n", err)
+		return c.Status(500).SendString("Error committing transaction")
+	}
 
-	log.Printf("Booking with ID %v accepted\n", bookingID)
+	log.Printf("Booking with ID %v accepted successfully\n", bookingID)
 	return c.Status(200).SendString("Booking accepted")
 }
