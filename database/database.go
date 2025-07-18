@@ -24,13 +24,13 @@ func ConnectToDB() {
 	connectionString := os.Getenv("DB_URL")
 
 	log.Println("Connecting to database...")
-	db, err := gorm.Open(postgres.Open(connectionString), &gorm.Config{})
+	db, err := gorm.Open(postgres.Open(connectionString), &gorm.Config{
+		PrepareStmt: false,
+	})
 
 	if err != nil {
 		log.Fatal("Error connecting to database")
 	}
-
-	db.Scopes(GlobalActivationScope)
 
 	log.Println("Connected to database")
 

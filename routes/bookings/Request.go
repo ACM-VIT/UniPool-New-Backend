@@ -19,8 +19,21 @@ type BookingResponse struct {
 func Request(c *fiber.Ctx) error {
 	var booking models.Booking
 
-	// Retrieve PassengerID (user ID) from the local context
-	PassengerID := c.Locals("user").(models.User).ID
+	userInterface := c.Locals("user")
+	if userInterface == nil {
+		return c.Status(401).JSON(fiber.Map{
+			"error": "User not authenticated",
+		})
+	}
+
+	user, ok := userInterface.(models.User)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{
+			"error": "Invalid user data",
+		})
+	}
+
+	PassengerID := user.ID
 
 	// Parse the request body to fill booking fields
 	if err := c.BodyParser(&booking); err != nil {

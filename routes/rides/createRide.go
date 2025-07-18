@@ -28,8 +28,21 @@ type RideResponse struct {
 func CreateRide(c *fiber.Ctx) error {
 	var ride models.Ride
 
-	// Extract host user ID from locals
-	hostUserID := c.Locals("user").(models.User).ID
+	userInterface := c.Locals("user")
+	if userInterface == nil {
+		return c.Status(401).JSON(fiber.Map{
+			"error": "User not authenticated",
+		})
+	}
+
+	user, ok := userInterface.(models.User)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{
+			"error": "Invalid user data",
+		})
+	}
+
+	hostUserID := user.ID
 
 	// Parse the request body into a Ride struct
 	err := c.BodyParser(&ride)

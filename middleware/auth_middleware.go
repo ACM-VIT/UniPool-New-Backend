@@ -53,11 +53,10 @@ func Authenticate(c *fiber.Ctx) error {
 		profilePicture = "" // INSERT PLACEHOLDER IMAGE URL HERE (@JUXTARYCT - pleaj give image)
 	}
 
-	// Check if the user exists in the database (optional step)
+	// Check if the user exists in the database (without global activation scope)
 	var user models.User
-	if err := database.Database.Db.Where("email = ?", email).First(&user).Error; err != nil {
+	if err := database.Database.Db.Unscoped().Where("email = ?", email).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			// User does not exist; set new user data
 			c.Locals("newuser", map[string]interface{}{
 				"email":               email,
 				"name":                name,
