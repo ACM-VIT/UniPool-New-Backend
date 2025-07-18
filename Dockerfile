@@ -1,35 +1,29 @@
-# Step 1: Build the Go application
-FROM golang:1.20-alpine as builder
+FROM golang:1.21-alpine AS builder
 
-# Set the working directory inside the container
 WORKDIR /app
 
-# Copy the Go module files (go.mod and go.sum) to the container
+RUN apk add --no-cache git
+
 COPY go.mod go.sum ./
 
-# Download the Go dependencies
-RUN go mod tidy
+RUN go mod download && go mod verify
 
-# Copy the rest of the application source code to the container
 COPY . .
 
-# Build the Go application
-RUN go build -o /go-app .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /go-app .
 
-# Step 2: Set up a minimal image for running the app
 FROM alpine:latest
 
-# Install required libraries (e.g., ca-certificates)
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates tzdata
 
-# Set the working directory inside the container
-WORKDIR /root/
+WORKDIR /app
 
-# Copy the Go app from the builder stage
 COPY --from=builder /go-app .
 
-# Expose the port your Go app will run on (3000 as per your main function)
-EXPOSE 3000
+ENV DB_URL=""
+ENV SERVICE_CREDS=""
+ENV SHOULD_MIGRATE="FALSE"
 
-# Run the Go application
+EXPOSE $PORT
+
 CMD ["./go-app"]
