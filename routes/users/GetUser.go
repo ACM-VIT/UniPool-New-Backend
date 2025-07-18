@@ -15,6 +15,17 @@ func GetUser(c *fiber.Ctx) error {
 		})
 	}
 
+	if newUser, ok := c.Locals("newuser").(map[string]interface{}); ok {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"newUser": newUser,
+			"error":   false,
+			"message": "User not found in database, signup required",
+		})
+	}
+
 	// If user is not found in locals, return an error
-	return &fiber.Error{Code: 400, Message: "User data not found in locals"}
+	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+		"error":   true,
+		"message": "User data not found in locals",
+	})
 }
