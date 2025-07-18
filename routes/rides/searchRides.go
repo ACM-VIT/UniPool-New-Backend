@@ -33,7 +33,22 @@ func SearchRides(c *fiber.Ctx) error {
 	startLocation := c.Query("start_location")
 	endLocation := c.Query("end_location")
 	date := c.Query("date")
-	userid := c.Locals("user").(models.User).ID
+	
+	userInterface := c.Locals("user")
+	if userInterface == nil {
+		return c.Status(401).JSON(fiber.Map{
+			"error": "User not authenticated",
+		})
+	}
+
+	user, ok := userInterface.(models.User)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{
+			"error": "Invalid user data",
+		})
+	}
+
+	userid := user.ID
 
 	// Retrieve rides from the database
 	var rides []models.Ride

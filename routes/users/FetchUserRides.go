@@ -28,8 +28,21 @@ type UserRidesResponse struct {
 }
 
 func FetchUserRides(c *fiber.Ctx) error {
-	userUUID := c.Locals("user").(models.User).ID
+	userInterface := c.Locals("user")
+	if userInterface == nil {
+		return c.Status(401).JSON(fiber.Map{
+			"error": "User not authenticated or not found",
+		})
+	}
 
+	user, ok := userInterface.(models.User)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{
+			"error": "Invalid user data",
+		})
+	}
+
+	userUUID := user.ID
 	userRides := make([]UserRidesResponse, 0)
 
 	if err := database.Database.Db.
