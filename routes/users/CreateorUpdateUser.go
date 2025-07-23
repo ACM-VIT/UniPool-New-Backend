@@ -87,5 +87,8 @@ func CreateOrUpdateUser(c *fiber.Ctx) error {
 	}
 
 	// If neither newuser nor user exists in locals, return an error
-	return &fiber.Error{Code: 400, Message: "User data not found in locals"}
+	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+		"error":   true,
+		"message": "User data not found in locals",
+	})
 }
