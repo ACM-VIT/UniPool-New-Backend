@@ -9,10 +9,10 @@ import (
 
 // BaseModel is the base model for all models
 type BaseModel struct {
-	ID        uuid.UUID  `gorm:"primary_key;type:uuid;" json:"id"`
-	CreatedAt time.Time  `json:"created_at" sql:"index"`
+	ID        uuid.UUID  `gorm:"type:uuid;primary_key;default:gen_random_uuid()" json:"id"`
+	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
-	DeletedAt *time.Time `json:"deleted_at"`
+	DeletedAt *time.Time `json:"deleted_at" gorm:"index"`
 }
 
 // BeforeCreate will set a UUID rather than numeric ID.
