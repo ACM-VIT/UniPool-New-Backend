@@ -55,7 +55,7 @@ func Authenticate(c *fiber.Ctx) error {
 
 	// Check if the user exists in the database (without global activation scope)
 	var user models.User
-	log.Printf("Searching for user with email: %s", email)
+	//log.Printf("Searching for user with email: %s", email)
 	if err := database.Database.Db.Unscoped().Where("email = ?", email).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Printf("User not found in database, creating new user entry for: %s", email)
@@ -72,7 +72,7 @@ func Authenticate(c *fiber.Ctx) error {
 		}
 	} else {
 		// User exists; set existing user in locals
-		log.Printf("Found existing user: %s (ID: %s)", user.Email, user.ID)
+		// log.Printf("Found existing user: %s (ID: %s)", user.Email, user.ID)
 		c.Locals("user", user)
 		// log.Println("Authenticated existing user:", c.Locals("user"))
 	}

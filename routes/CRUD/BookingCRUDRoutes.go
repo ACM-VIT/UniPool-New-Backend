@@ -67,22 +67,32 @@ func CreateBooking(c *fiber.Ctx) error {
 func GetBookings(c *fiber.Ctx) error {
 	var bookings []models.Booking
 
-	if err := database.Database.Db.Find(&bookings).Error; err != nil {
+\	if err := database.Database.Db.Preload("Ride").Preload("Passenger").Find(&bookings).Error; err != nil {
 		log.Printf("Error finding bookings: %v\n", err)
 		return c.Status(502).SendString("Error finding bookings")
 	}
 
-	bookingsResponse := make([]BookingResponse, len(bookings))
+	type BookingWithRideDetails struct {
+		ID            string      `json:"id"`
+		RideID        string      `json:"ride_id"`
+		PassengerID   string      `json:"passenger_id"`
+		RequestStatus string      `json:"request_status"`
+		RideDetails   interface{} `json:"ride_details"`
+	}
+
+	bookingsResponse := make([]BookingWithRideDetails, len(bookings))
 	for i, b := range bookings {
-		bookingsResponse[i] = BookingResponse{
-			ID:            b.ID,
-			RideID:        b.RideID,
-			PassengerID:   b.PassengerID,
+		bookingsResponse[i] = BookingWithRideDetails{
+			ID:            b.ID.String(),
+			RideID:        b.RideID.String(),
+			PassengerID:   b.PassengerID.String(),
 			RequestStatus: b.RequestStatus,
+			RideDetails:   b.Ride, // This will include all ride fields
 		}
 	}
 
-	return c.Status(200).JSON(bookingsResponse)
+	log.Printf("Returning %d bookings: %+v\n", len(bookingsResponse), bookingsResponse)
+	return c.Status(200).JSON(fiber.Map{"bookings": bookingsResponse})
 }
 
 // GetBookingByID retrieves a single booking by its UUID
