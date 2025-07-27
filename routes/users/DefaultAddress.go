@@ -36,9 +36,9 @@ if !ok {
 	}
 
 if err := database.Database.Db.Model(&models.User{}).Where("id = ?", user.ID).Update("default_address", payload.Address).Error; err != nil {
-	log.Printf("Error updating address: %v\n", err)
-	return c.Status(500).SendString("Failed to update address")
+ log.Printf("Error updating address: %v\n", err)
+ return c.Status(500).SendString("Failed to update address")
 }
 
-return c.SendStatus(200)
+return c.Status(200).JSON(fiber.Map{"status": "OK"})
 }
