@@ -67,7 +67,7 @@ func CreateBooking(c *fiber.Ctx) error {
 func GetBookings(c *fiber.Ctx) error {
 	var bookings []models.Booking
 
-\	if err := database.Database.Db.Preload("Ride").Preload("Passenger").Find(&bookings).Error; err != nil {
+	if err := database.Database.Db.Preload("Ride").Preload("Passenger").Find(&bookings).Error; err != nil {
 		log.Printf("Error finding bookings: %v\n", err)
 		return c.Status(502).SendString("Error finding bookings")
 	}
