@@ -16,36 +16,36 @@ import (
 func Authenticate(c *fiber.Ctx) error {
 	authHeader := c.Get("Authorization")
 	if authHeader == "" {
-		return &fiber.Error{Code: 401, Message: "Authorization header not found"}
+		return c.Status(401).JSON(fiber.Map{"error": "Authorization header not found"})
 	}
 
 	token := strings.TrimSpace(strings.Replace(authHeader, "Bearer", "", 1))
 	if token == "" {
-		return &fiber.Error{Code: 401, Message: "Token not found"}
+		return c.Status(401).JSON(fiber.Map{"error": "Token not found"})
 	}
 
 	// Verify the token using Firebase
 	client, err := initializer.FirebaseApp.Auth(context.Background())
 	if err != nil {
 		log.Println("Firebase Auth error:", err)
-		return &fiber.Error{Code: 500, Message: "Firebase Auth error"}
+		return c.Status(500).JSON(fiber.Map{"error": "Firebase Auth error"})
 	}
 	decodedToken, err := client.VerifyIDToken(context.Background(), token)
 	if err != nil {
 		log.Println("Invalid token:", err)
-		return &fiber.Error{Code: 401, Message: "Invalid token"}
+		return c.Status(401).JSON(fiber.Map{"error": "Invalid token"})
 	}
 
 	// Extract necessary claims from the token
 	if decodedToken == nil || decodedToken.Claims == nil || decodedToken.Claims["email"] == nil {
-		return &fiber.Error{Code: 401, Message: "Invalid token"}
+		return c.Status(401).JSON(fiber.Map{"error": "Invalid token"})
 	}
 
 	email := decodedToken.Claims["email"].(string)
 
 	name, nameOk := decodedToken.Claims["name"].(string)
 	if !nameOk {
-		return &fiber.Error{Code: 401, Message: "Please check your privacy settings and allow us to access your name"}
+		return c.Status(401).JSON(fiber.Map{"error": "Please check your privacy settings and allow us to access your name"})
 	}
 
 	profilePicture, picOk := decodedToken.Claims["picture"].(string)
@@ -55,8 +55,10 @@ func Authenticate(c *fiber.Ctx) error {
 
 	// Check if the user exists in the database (without global activation scope)
 	var user models.User
+	//log.Printf("Searching for user with email: %s", email)
 	if err := database.Database.Db.Unscoped().Where("email = ?", email).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			log.Printf("User not found in database, creating new user entry for: %s", email)
 			c.Locals("newuser", map[string]interface{}{
 				"email":               email,
 				"name":                name,
@@ -66,10 +68,11 @@ func Authenticate(c *fiber.Ctx) error {
 		} else {
 			// Database error
 			log.Println("Database error:", err)
-			return &fiber.Error{Code: 500, Message: "Database error"}
+			return c.Status(500).JSON(fiber.Map{"error": "Database error"})
 		}
 	} else {
 		// User exists; set existing user in locals
+		// log.Printf("Found existing user: %s (ID: %s)", user.Email, user.ID)
 		c.Locals("user", user)
 		// log.Println("Authenticated existing user:", c.Locals("user"))
 	}

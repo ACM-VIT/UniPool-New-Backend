@@ -31,7 +31,11 @@ func SetupRoutes(app *fiber.App) {
 	app.Get("/user/details", users.GetUser)        // Gets user details
 	app.Get("/user/all", users.GetAllUsers)        // Gets all users
 	app.Delete("/user/delete", users.DeleteUser)   // Deletes a user
-	app.Get(("/user/rides"), users.FetchUserRides) //Gets all the rides of a particular user
+	app.Get("/user/rides", users.FetchUserRides)   // Gets all the rides of a particular user
+	app.Get("/user/passengers", users.GetPassengers) // Gets all passengers the user has travelled with
+	app.Get("/user/default-address", users.GetDefaultAddress) // Gets user's default start address
+	app.Post("/user/default-address", users.SetDefaultAddress) // Sets user's default start address
+	app.Patch("/user/default-address", users.SetDefaultAddress) // PATCH also sets user's default start address
 
 	//Booking CRUD routes
 	app.Post("/booking/create", CRUD.CreateBooking)              // Creates a new booking
