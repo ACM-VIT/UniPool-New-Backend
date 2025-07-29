@@ -30,53 +30,53 @@ func GetRideMessages(c *fiber.Ctx) error {
 }
 
 func SendMessage(c *fiber.Ctx) error {
-    rideID := c.Params("ride_id")
-    rideUUID, err := uuid.Parse(rideID)
-    if err != nil {
-        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid ride id"})
-    }
+	rideID := c.Params("ride_id")
+	rideUUID, err := uuid.Parse(rideID)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid ride id"})
+	}
 
-    var body struct {
-        Content  string `json:"content"`
-        SenderID string `json:"sender_id"`
-    }
-    if err := c.BodyParser(&body); err != nil {
-        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
-    }
-    senderUUID, err := uuid.Parse(body.SenderID)
-    if err != nil {
-        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid sender id"})
-    }
+	user, ok := c.Locals("user").(models.User)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "User not authenticated or found"})
+	}
 
-    msg := models.Message{RideID: rideUUID, SenderID: senderUUID, Content: body.Content}
-    if err := database.Database.Db.Create(&msg).Error; err != nil {
-        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to save message"})
-    }
-    database.Database.Db.Preload("Sender").First(&msg, msg.ID)
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
 
-    chatMsg := initializer.ChatMessage{
-        Type:      "message",
-        RoomID:    rideID,
-        SenderID:  body.SenderID,
-        Content:   body.Content,
-        Timestamp: time.Now().Format(time.RFC3339),
-        MessageID: msg.ID.String(),
-    }
-    if hub := initializer.GetChatHub(); hub != nil {
-        if b, err := json.Marshal(chatMsg); err == nil {
-            hub.BroadcastToRoom(rideID, b)
-        }
-    }
+	msg := models.Message{RideID: rideUUID, SenderID: user.ID, Content: body.Content}
+	if err := database.Database.Db.Create(&msg).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to save message"})
+	}
+	database.Database.Db.Preload("Sender").First(&msg, msg.ID)
 
-    return c.Status(fiber.StatusCreated).JSON(fiber.Map{"message": msg})
+	chatMsg := initializer.ChatMessage{
+		Type:      "message",
+		RoomID:    rideID,
+		SenderID:  user.ID.String(),
+		Content:   body.Content,
+		Timestamp: msg.CreatedAt.Format(time.RFC3339),
+		MessageID: msg.ID.String(),
+	}
+	if hub := initializer.GetChatHub(); hub != nil {
+		if b, err := json.Marshal(chatMsg); err == nil {
+			hub.BroadcastToRoom(rideID, b)
+		}
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"message": msg})
 }
 
 func GetUserChats(c *fiber.Ctx) error {
-    userID := c.Params("user_id")
-    userUUID, err := uuid.Parse(userID)
-    if err != nil {
-        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid user id"})
-    }
+	user, ok := c.Locals("user").(models.User)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "User not authenticated or found"})
+	}
+	userUUID := user.ID
 
     var rides []models.Ride
     if err := database.Database.Db.Preload("HostUser").Where("host_user_id = ?", userUUID).
