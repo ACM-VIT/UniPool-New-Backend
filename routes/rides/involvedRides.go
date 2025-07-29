@@ -47,15 +47,15 @@ func GetAllPassengers(c *fiber.Ctx) error {
 		rideIDs = append(rideIDs, ride.ID)
 	}
 
-	var passengers []models.User
-	if len(rideIDs) > 0 {
-		if err := database.Database.Db.Model(&models.User{}).Distinct().
-			Joins("JOIN bookings ON bookings.passenger_id = users.id").
-			Where("bookings.ride_id IN (?)", rideIDs).
-			Find(&passengers).Error; err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch passengers"})
-		}
-	}
+   var passengers []models.User
+   if len(rideIDs) > 0 {
+	   if err := database.Database.Db.Model(&models.User{}).Distinct().
+		   Joins("JOIN bookings ON bookings.passenger_id = users.id").
+		   Where("bookings.ride_id IN (?)", rideIDs).
+		   Find(&passengers).Error; err != nil {
+		   return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch passengers"})
+	   }
+   }
 
 	return c.JSON(fiber.Map{"passengers": passengers, "count": len(passengers)})
 }
