@@ -6,7 +6,6 @@ import (
 	websocket "github.com/gofiber/websocket/v2"
 )
 
-
 type Hub struct {
 	Clients    map[*Client]bool
 	Broadcast  chan []byte

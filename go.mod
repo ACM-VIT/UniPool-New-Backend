@@ -5,7 +5,6 @@ go 1.21.5
 require (
 	github.com/gin-gonic/gin v1.10.1
 	github.com/gofiber/websocket/v2 v2.2.1
-	github.com/gorilla/websocket v1.5.3
 	google.golang.org/api v0.170.0
 	gorm.io/driver/postgres v1.5.11
 )

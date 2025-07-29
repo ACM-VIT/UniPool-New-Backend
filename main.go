@@ -55,12 +55,13 @@ func SetupRoutes(app *fiber.App) {
 
 	// WebSocket endpoint (upgrade)
 	app.Use("/ws", func(c *fiber.Ctx) error {
+        //log.Println("/ws middleware reached; checking upgrade...")
 		if websocket.IsWebSocketUpgrade(c) {
 			return c.Next()
 		}
 		return fiber.ErrUpgradeRequired
 	})
-	app.Get("/ws", websocket.New(chat.WebSocketHandler))
+	app.Get("/ws", websocket.New(chat.WebSocketHandler, websocket.Config{}))
 
 	// Ride and Passenger Info routes
 	app.Get("/rides/involved", rides.GetInvolvedRides)

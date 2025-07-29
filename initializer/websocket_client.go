@@ -6,6 +6,10 @@ import (
 	"time"
 
 	websocket "github.com/gofiber/websocket/v2"
+	"github.com/google/uuid"
+
+	"unipool-backend/database"
+	"unipool-backend/models"
 )
 
 const (
@@ -34,8 +38,9 @@ func (c *Client) readPump() {
 	for {
 		_, message, err := c.Conn.ReadMessage()
 		if err != nil {
+			log.Printf("readPump error for user %s room %s: %v", c.UserID, c.RoomID, err)
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+				log.Printf("unexpected close error: %v", err)
 			}
 			break
 		}
@@ -49,6 +54,32 @@ func (c *Client) readPump() {
 		chatMsg.SenderID = c.UserID
 		chatMsg.RoomID = c.RoomID
 		chatMsg.Timestamp = time.Now().Format(time.RFC3339)
+		if chatMsg.MessageID == "" {
+			chatMsg.MessageID = uuid.New().String()
+		}
+
+		go func(m ChatMessage) {
+			rideUUID, err1 := uuid.Parse(m.RoomID)
+			var senderUUID uuid.UUID
+			senderUUID, err2 := uuid.Parse(m.SenderID)
+			if err2 != nil {
+				log.Printf("invalid sender UUID: %v", err2)
+				return
+			}
+			if err1 != nil {
+				log.Printf("ride uuid parse error: %v", err1)
+				return
+			}
+
+			msg := models.Message{
+				RideID:   rideUUID,
+				SenderID: senderUUID,
+				Content:  m.Content,
+			}
+			if err := database.Database.Db.Create(&msg).Error; err != nil {
+				log.Printf("DB save error: %v", err)
+			}
+		}(chatMsg)
 
 		updatedMessage, err := json.Marshal(chatMsg)
 		if err != nil {

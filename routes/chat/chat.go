@@ -110,6 +110,7 @@ func GetUserChats(c *fiber.Ctx) error {
 }
 
 func WebSocketHandler(c *websocket.Conn) {
+    log.Printf("WebSocketHandler invoked. Query: %s", c.Query(""))
     userID := c.Query("user_id")
     roomID := c.Query("room_id")
 
@@ -121,4 +122,5 @@ func WebSocketHandler(c *websocket.Conn) {
     }
 
     initializer.NewClient(c, userID, roomID)
+    select {}
 }
