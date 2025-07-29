@@ -20,7 +20,7 @@ func GetInvolvedRides(c *fiber.Ctx) error {
 	bookedRidesSubQuery := database.Database.Db.Model(&models.Booking{}).Select("ride_id").Where("passenger_id = ? AND request_status IN (?)", userUUID, []string{"pending", "accepted"})
 
 	   if err := database.Database.Db.Preload("HostUser").
-			   Where("(host_user_id = ? OR id IN (?)) AND (is_ongoing = ? OR start_time > ?)", userUUID, bookedRidesSubQuery, 1, models.BaseModel{}.Now()).
+			   Where("(host_user_id = ? OR id IN (?)) AND (is_ongoing = ? OR start_time > ?)", userUUID, bookedRidesSubQuery, 1, time.Now().UTC()).
 			   Order("start_time desc").
 			   Find(&rides).Error; err != nil {
 			   return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch involved rides"})
