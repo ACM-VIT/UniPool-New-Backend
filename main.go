@@ -9,6 +9,8 @@ import (
 	"unipool-backend/routes/CRUD"
 	"unipool-backend/routes/bookings"
 	"unipool-backend/routes/rides"
+	"unipool-backend/routes/chat"
+	"github.com/gofiber/websocket/v2"
 	"unipool-backend/routes/users"
 
 	"github.com/gofiber/fiber/v2"
@@ -46,7 +48,25 @@ func SetupRoutes(app *fiber.App) {
 	app.Put("/bookings/accept/:bookingID", bookings.AcceptRoute) // Accepts a booking
 	app.Post("/bookings/request", bookings.Request)              // Requests a booking aka Create a booking
 
-	//Messaging CRUD routes
+	// Chat routes
+	app.Get("/chats/:user_id", chat.GetUserChats)
+	app.Get("/chat/:ride_id/messages", chat.GetRideMessages)
+	app.Post("/chat/:ride_id/message", chat.SendMessage)
+
+	// WebSocket endpoint (upgrade)
+	app.Use("/ws", func(c *fiber.Ctx) error {
+        //log.Println("/ws middleware reached; checking upgrade...")
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/ws", websocket.New(chat.WebSocketHandler, websocket.Config{}))
+
+	// Ride and Passenger Info routes
+	app.Get("/rides/involved", rides.GetInvolvedRides)
+	app.Get("/passengers/all", rides.GetAllPassengers)
+
 	app.Post("/booking/create", CRUD.CreateBooking)           // Creates a new booking
 	app.Get("/booking/list", CRUD.GetBookings)                // Retrieves all bookings
 	app.Get("/booking/:id", CRUD.GetBookingByID)              // Retrieves a specific booking by its ID
@@ -57,6 +77,7 @@ func SetupRoutes(app *fiber.App) {
 
 func main() {
 	initializer.InitFirebase()
+	initializer.InitializeWebsocket()
 	app := fiber.New()
 
 	database.ConnectToDB()

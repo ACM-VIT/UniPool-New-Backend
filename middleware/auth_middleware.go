@@ -14,6 +14,10 @@ import (
 )
 
 func Authenticate(c *fiber.Ctx) error {
+    // Skip authentication for WebSocket handshake – token will be validated inside chat logic.
+    if c.Path() == "/ws" {
+        return c.Next()
+    }
 	authHeader := c.Get("Authorization")
 	if authHeader == "" {
 		return c.Status(401).JSON(fiber.Map{"error": "Authorization header not found"})
