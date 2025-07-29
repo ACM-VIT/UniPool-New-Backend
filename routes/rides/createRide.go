@@ -46,10 +46,12 @@ func CreateRide(c *fiber.Ctx) error {
 
 	// Parse the request body into a Ride struct
 	err := c.BodyParser(&ride)
-	if err != nil {
-		log.Printf("Error parsing JSON: %v\n", err)
-		return c.Status(400).SendString("Error parsing JSON (body parser)")
-	}
+	   if err != nil {
+			   log.Printf("Error parsing JSON: %v\n", err)
+			   return c.Status(400).JSON(fiber.Map{
+					   "error": "Error parsing JSON (body parser)",
+			   })
+	   }
 
 	// Set the host user ID from locals into the Ride struct
 	ride.HostUserID = hostUserID
@@ -57,25 +59,33 @@ func CreateRide(c *fiber.Ctx) error {
 	// Fetch the host user from the database
 	var hostUser models.User
 	result := database.Database.Db.First(&hostUser, hostUserID)
-	if result.Error == gorm.ErrRecordNotFound {
-		log.Printf("Host user ID does not exist")
-		return c.Status(400).SendString("Host user ID does not exist")
-	} else if result.Error != nil {
-		log.Printf("Error finding host user: %v\n", result.Error)
-		return c.Status(502).SendString("Error finding host user")
-	}
+	   if result.Error == gorm.ErrRecordNotFound {
+			   log.Printf("Host user ID does not exist")
+			   return c.Status(400).JSON(fiber.Map{
+					   "error": "Host user ID does not exist",
+			   })
+	   } else if result.Error != nil {
+			   log.Printf("Error finding host user: %v\n", result.Error)
+			   return c.Status(502).JSON(fiber.Map{
+					   "error": "Error finding host user",
+			   })
+	   }
 
 	// Check if start time is in the future
-	if ride.StartTime.Before(time.Now()) {
-		log.Printf("Start time is in the past")
-		return c.Status(400).SendString("Start time is in the past")
-	}
+	   if ride.StartTime.Before(time.Now().UTC()) {
+			   log.Printf("Start time is in the past")
+			   return c.Status(400).JSON(fiber.Map{
+					   "error": "Start time is in the past",
+			   })
+	   }
 
 	// Check if the host user has enough seats
-	if ride.TotalSeats <= ride.BookedSeats {
-		log.Printf("Total seats available should be more than booked seats")
-		return c.Status(400).SendString("Total seats available should be more than booked seats")
-	}
+	   if ride.TotalSeats <= ride.BookedSeats {
+			   log.Printf("Total seats available should be more than booked seats")
+			   return c.Status(400).JSON(fiber.Map{
+					   "error": "Total seats available should be more than booked seats",
+			   })
+	   }
 
 	// Log gender-specific ride information
 	if ride.IsSameGender == 1 {
@@ -85,17 +95,21 @@ func CreateRide(c *fiber.Ctx) error {
 	}
 
 	// Validate ride price
-	if ride.TotalPrice < 25 || ride.TotalPrice > 10000 {
-		log.Printf("Price too low")
-		return c.Status(400).SendString("Price too low!")
-	}
+	   if ride.TotalPrice < 25 || ride.TotalPrice > 10000 {
+			   log.Printf("Price too low")
+			   return c.Status(400).JSON(fiber.Map{
+					   "error": "Price too low!",
+			   })
+	   }
 
 	// Create the ride in the database
 	result = database.Database.Db.Create(&ride)
-	if result.Error != nil {
-		log.Printf("Error creating ride: %v\n", result.Error)
-		return c.Status(500).SendString("Error creating ride - (database creation error)")
-	}
+	   if result.Error != nil {
+			   log.Printf("Error creating ride: %v\n", result.Error)
+			   return c.Status(500).JSON(fiber.Map{
+					   "error": "Error creating ride - (database creation error)",
+			   })
+	   }
 
 	// Create the ride response
 	rideResponse := RideResponse{
