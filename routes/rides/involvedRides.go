@@ -1,11 +1,12 @@
 package rides
 
 import (
-	"unipool-backend/database"
-	"unipool-backend/models"
+   "unipool-backend/database"
+   "unipool-backend/models"
+   "time"
 
-	"github.com/gofiber/fiber/v2"
-	"github.com/google/uuid"
+   "github.com/gofiber/fiber/v2"
+   "github.com/google/uuid"
 )
 
 func GetInvolvedRides(c *fiber.Ctx) error {
