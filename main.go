@@ -43,6 +43,7 @@ func SetupRoutes(app *fiber.App) {
 	app.Post("/booking/create", CRUD.CreateBooking)              // Creates a new booking
 	app.Get("/booking/list", CRUD.GetBookings)                   // Retrieves all bookings
 	app.Get("/booking/:id", CRUD.GetBookingByID)                 // Retrieves a specific booking by its ID
+	app.Get("/booking/ride/:ride_id", CRUD.GetBookingsByRideID)  // Retrieves all bookings for a specific ride
 	app.Patch("/booking/update/:id", CRUD.UpdateBooking)         // Updates an existing booking
 	app.Delete("/booking/delete/:id", CRUD.DeleteBooking)        // Deletes a booking
 	app.Put("/bookings/accept/:bookingID", bookings.AcceptRoute) // Accepts a booking
@@ -55,7 +56,7 @@ func SetupRoutes(app *fiber.App) {
 
 	// WebSocket endpoint (upgrade)
 	app.Use("/ws", func(c *fiber.Ctx) error {
-        //log.Println("/ws middleware reached; checking upgrade...")
+		//log.Println("/ws middleware reached; checking upgrade...")
 		if websocket.IsWebSocketUpgrade(c) {
 			return c.Next()
 		}
