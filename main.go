@@ -10,6 +10,8 @@ import (
 	"unipool-backend/routes/bookings"
 	"unipool-backend/routes/rides"
 	"unipool-backend/routes/chat"
+	"unipool-backend/routes/notifications"
+	"unipool-backend/services"
 	"github.com/gofiber/websocket/v2"
 	"unipool-backend/routes/users"
 
@@ -38,6 +40,10 @@ func SetupRoutes(app *fiber.App) {
 	app.Get("/user/default-address", users.GetDefaultAddress) // Gets user's default start address
 	app.Post("/user/default-address", users.SetDefaultAddress) // Sets user's default start address
 	app.Patch("/user/default-address", users.SetDefaultAddress) // PATCH also sets user's default start address
+	
+	// User token management routes
+	app.Post("/users/me/token", users.UpdateUserToken) // Update user's FCM token
+	app.Delete("/users/me/token", users.RemoveUserToken) // Remove user's FCM token
 
 	//Booking CRUD routes
 	app.Post("/booking/create", CRUD.CreateBooking)              // Creates a new booking
@@ -47,12 +53,17 @@ func SetupRoutes(app *fiber.App) {
 	app.Patch("/booking/update/:id", CRUD.UpdateBooking)         // Updates an existing booking
 	app.Delete("/booking/delete/:id", CRUD.DeleteBooking)        // Deletes a booking
 	app.Put("/bookings/accept/:bookingID", bookings.AcceptRoute) // Accepts a booking
+	app.Put("/bookings/reject/:bookingID", bookings.RejectRoute) // Rejects a booking
 	app.Post("/bookings/request", bookings.Request)              // Requests a booking aka Create a booking
 
 	// Chat routes
 	app.Get("/chats/:user_id", chat.GetUserChats)
 	app.Get("/chat/:ride_id/messages", chat.GetRideMessages)
 	app.Post("/chat/:ride_id/message", chat.SendMessage)
+
+	// Notification routes
+	app.Post("/notifications/send", notifications.SendNotification) // Send FCM notification
+	app.Post("/notifications/send-to-user", notifications.SendNotificationToUser) // Send notification to specific user
 
 	// WebSocket endpoint (upgrade)
 	app.Use("/ws", func(c *fiber.Ctx) error {
@@ -78,10 +89,24 @@ func SetupRoutes(app *fiber.App) {
 
 func main() {
 	initializer.InitFirebase()
+	
+	// Initialize FCM service
+	if err := services.InitFCMService(); err != nil {
+		log.Fatalf("Failed to initialize FCM service: %v", err)
+	}
+	
+	// Initialize notification scheduler
+	services.InitNotificationScheduler()
+	
 	initializer.InitializeWebsocket()
 	app := fiber.New()
 
 	database.ConnectToDB()
+	
+	// Run database migrations
+	if err := database.InitializeMigrations(); err != nil {
+		log.Fatalf("Failed to run migrations: %v", err)
+	}
 
 	app.Use(middleware.Authenticate)
 	app.Get("/", func(c *fiber.Ctx) error {
