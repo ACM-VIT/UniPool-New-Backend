@@ -17,7 +17,7 @@ type Booking struct {
 	ID string `gorm:"type:uuid;primaryKey"`
 }
 
-func main() {
+func main2() {
 	if err := godotenv.Load(".env"); err != nil {
 		log.Fatalf("Error loading .env file: %v", err)
 	}

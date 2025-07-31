@@ -102,7 +102,7 @@ func main() {
 	app := fiber.New()
 
 	database.ConnectToDB()
-	
+
 	// Run database migrations
 	// if err := database.InitializeMigrations(); err != nil {
 	// 	log.Fatalf("Failed to run migrations: %v", err)
