@@ -95,6 +95,42 @@ func GetBookings(c *fiber.Ctx) error {
 	return c.Status(200).JSON(fiber.Map{"bookings": bookingsResponse})
 }
 
+func GetBookingsByRideID(c *fiber.Ctx) error {
+	rideIDParam := c.Params("ride_id")
+	rideID, err := uuid.Parse(rideIDParam)
+	if err != nil {
+		return &fiber.Error{Code: 400, Message: "Invalid ride ID format"}
+	}
+
+	var bookings []models.Booking
+	if err := database.Database.Db.Preload("Ride").Preload("Passenger").Where("ride_id = ?", rideID).Find(&bookings).Error; err != nil {
+		log.Printf("Error finding bookings for ride %v: %v\n", rideID, err)
+		return c.Status(502).SendString("Error finding bookings for ride")
+	}
+
+	type BookingWithRideDetails struct {
+		ID            string      `json:"id"`
+		RideID        string      `json:"ride_id"`
+		PassengerID   string      `json:"passenger_id"`
+		RequestStatus string      `json:"request_status"`
+		RideDetails   interface{} `json:"ride_details"`
+	}
+
+	bookingsResponse := make([]BookingWithRideDetails, len(bookings))
+	for i, b := range bookings {
+		bookingsResponse[i] = BookingWithRideDetails{
+			ID:            b.ID.String(),
+			RideID:        b.RideID.String(),
+			PassengerID:   b.PassengerID.String(),
+			RequestStatus: b.RequestStatus,
+			RideDetails:   b.Ride,
+		}
+	}
+
+	log.Printf("Returning %d bookings for ride %v\n", len(bookingsResponse), rideID)
+	return c.Status(200).JSON(fiber.Map{"bookings": bookingsResponse})
+}
+
 // GetBookingByID retrieves a single booking by its UUID
 func GetBookingByID(c *fiber.Ctx) error {
 	idParam := c.Params("id")
