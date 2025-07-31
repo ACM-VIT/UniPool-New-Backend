@@ -167,7 +167,7 @@ func GetRides(c *fiber.Ctx) error {
 
 // Function to get a ride by ID
 func GetRideByID(c *fiber.Ctx) error {
-	rideID := c.Params("rideID")
+	rideID := c.Params("id")
 
 	// Start a database transaction
 	tx := database.Database.Db.Begin()
