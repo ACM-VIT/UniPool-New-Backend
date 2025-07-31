@@ -167,6 +167,7 @@ func GetRides(c *fiber.Ctx) error {
 
 // Function to get a ride by ID
 func GetRideByID(c *fiber.Ctx) error {
+
 	rideID := c.Params("id")
 
 	// Start a database transaction
@@ -174,14 +175,21 @@ func GetRideByID(c *fiber.Ctx) error {
 
 	var ride models.Ride
 
-	   if err := tx.First(&ride, rideID).Error; err != nil {
-			   // Rollback the transaction in case of an error
-			   tx.Rollback()
-			   log.Printf("Ride does not exist")
-			   return c.Status(404).JSON(fiber.Map{
-					   "error": "Ride not found",
-			   })
-	   }
+	parsedID, err := uuid.Parse(rideID)
+	if err != nil {
+		tx.Rollback()
+		log.Printf("Invalid rideID format: %v", rideID)
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Invalid ride ID format",
+		})
+	}
+	if err := tx.First(&ride, "id = ?", parsedID).Error; err != nil {
+		tx.Rollback()
+		log.Printf("Ride does not exist")
+		return c.Status(404).JSON(fiber.Map{
+			"error": "Ride not found",
+		})
+	}
 
 	// Find the host user
 	var hostUser models.User
