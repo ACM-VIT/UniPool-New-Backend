@@ -103,11 +103,6 @@ func main() {
 
 	database.ConnectToDB()
 	
-	// Run database migrations
-	if err := database.InitializeMigrations(); err != nil {
-		log.Fatalf("Failed to run migrations: %v", err)
-	}
-
 	app.Use(middleware.Authenticate)
 	app.Get("/", func(c *fiber.Ctx) error {
 		return c.SendString("Scared of Women✌️!")
