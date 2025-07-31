@@ -10,4 +10,7 @@ type User struct {
 	Gender            string `gorm:"type:varchar(10)" json:"gender" valid:"in(male|female|other)~Gender must be male female or other"`
 	YOB               uint   `json:"yob" valid:"range(1900|2100)~Year of birth must be between 1900 and 2100"`
 	DefaultAddress    string `gorm:"type:varchar(255)" json:"default_address"`
+	FCMToken          string `gorm:"type:varchar(500)" json:"fcm_token,omitempty"`
+	Platform          string `gorm:"type:varchar(20)" json:"platform,omitempty"`
+	DeviceID          string `gorm:"type:varchar(255)" json:"device_id,omitempty"`
 }

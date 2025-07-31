@@ -12,6 +12,7 @@ import (
     "unipool-backend/database"
     "unipool-backend/initializer"
     "unipool-backend/models"
+    "unipool-backend/services"
 )
 
 func GetRideMessages(c *fiber.Ctx) error {
@@ -66,6 +67,44 @@ func SendMessage(c *fiber.Ctx) error {
 		if b, err := json.Marshal(chatMsg); err == nil {
 			hub.BroadcastToRoom(rideID, b)
 		}
+	}
+
+	// Send FCM notifications to other participants
+	fcmService := services.GetFCMService()
+	if fcmService != nil {
+		go func() {
+			// Get ride details
+			var ride models.Ride
+			if err := database.Database.Db.Preload("HostUser").First(&ride, rideUUID).Error; err != nil {
+				log.Printf("Error fetching ride for notifications: %v", err)
+				return
+			}
+
+			// Get all bookings for this ride
+			var bookings []models.Booking
+			if err := database.Database.Db.Preload("Passenger").Where("ride_id = ? AND request_status = ?", rideUUID, "accepted").Find(&bookings).Error; err != nil {
+				log.Printf("Error fetching bookings for notifications: %v", err)
+				return
+			}
+
+			rideRoute := ride.StartLocation + " to " + ride.EndLocation
+			
+			// Notify ride host if the sender is not the host
+			if ride.HostUserID != user.ID {
+				if err := fcmService.SendChatMessageNotification(ride.HostUserID, user.Name, body.Content, rideRoute, rideUUID); err != nil {
+					log.Printf("Error sending chat notification to host: %v", err)
+				}
+			}
+
+			// Notify all passengers except the sender
+			for _, booking := range bookings {
+				if booking.PassengerID != user.ID {
+					if err := fcmService.SendChatMessageNotification(booking.PassengerID, user.Name, body.Content, rideRoute, rideUUID); err != nil {
+						log.Printf("Error sending chat notification to passenger %s: %v", booking.PassengerID, err)
+					}
+				}
+			}
+		}()
 	}
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"message": msg})

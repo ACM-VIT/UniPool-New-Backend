@@ -4,6 +4,7 @@ import (
 	"log"
 	"unipool-backend/database"
 	"unipool-backend/models"
+	"unipool-backend/services"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -55,6 +56,21 @@ func Request(c *fiber.Ctx) error {
 	if err := database.Database.Db.Create(&booking).Error; err != nil {
 		log.Println("Error creating booking:", err)
 		return c.Status(500).SendString("Database error")
+	}
+
+	// Get ride details for notification
+	var ride models.Ride
+	if err := database.Database.Db.First(&ride, booking.RideID).Error; err == nil {
+		// Send FCM notification to the ride owner
+		fcmService := services.GetFCMService()
+		if fcmService != nil {
+			rideRoute := ride.StartLocation + " to " + ride.EndLocation
+			go func() {
+				if err := fcmService.SendBookingRequestNotification(ride.HostUserID, user.Name, rideRoute, booking.ID); err != nil {
+					log.Printf("Error sending booking request notification: %v", err)
+				}
+			}()
+		}
 	}
 
 	// Create the response
