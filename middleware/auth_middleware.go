@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"time"
 	"unipool-backend/database"
 	"unipool-backend/initializer"
 	"unipool-backend/models"
@@ -14,10 +15,11 @@ import (
 )
 
 func Authenticate(c *fiber.Ctx) error {
-    // Skip authentication for WebSocket handshake – token will be validated inside chat logic.
-    if c.Path() == "/ws" {
-        return c.Next()
-    }
+	// Skip authentication for WebSocket handshake – token will be validated inside chat logic.
+	if c.Path() == "/ws" {
+		return c.Next()
+	}
+
 	authHeader := c.Get("Authorization")
 	if authHeader == "" {
 		return c.Status(401).JSON(fiber.Map{"error": "Authorization header not found"})
@@ -60,7 +62,12 @@ func Authenticate(c *fiber.Ctx) error {
 	// Check if the user exists in the database (without global activation scope)
 	var user models.User
 	//log.Printf("Searching for user with email: %s", email)
-	if err := database.Database.Db.Unscoped().Where("email = ?", email).First(&user).Error; err != nil {
+
+	// Use a more efficient query with context timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := database.Database.Db.WithContext(ctx).Unscoped().Where("email = ?", email).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Printf("User not found in database, creating new user entry for: %s", email)
 			c.Locals("newuser", map[string]interface{}{
