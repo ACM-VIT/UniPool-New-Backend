@@ -19,16 +19,10 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/gofiber/fiber/v2/middleware/timeout"
 )
 
 func SetupRoutes(app *fiber.App) {
 	app.Use(cors.New())
-
-	// Add timeout middleware for all routes (30 seconds)
-	app.Use(timeout.New(func(c *fiber.Ctx) error {
-		return c.Next()
-	}, 30*time.Second))
 
 	// Ride CRUD routes
 	app.Post("/ride/create", rides.CreateRide)          // Creates a new ride
@@ -39,16 +33,16 @@ func SetupRoutes(app *fiber.App) {
 	app.Get("ride/search", rides.SearchRides)           // Search for rides
 
 	// User CRUD routes
-	app.Post("/user", users.CreateOrUpdateUser)    // Create or update a user
-	app.Get("/user/details", users.GetUser)        // Gets user details
-	app.Get("/user/:id", users.GetUserByID)        // Gets user details by ID
-	app.Get("/user/all", users.GetAllUsers)        // Gets all users
-	app.Delete("/user/delete", users.DeleteUser)   // Deletes a user
-	app.Get("/user/rides", users.FetchUserRides)   // Gets all the rides of a particular user
-	app.Get("/user/passengers", users.GetPassengers) // Gets all passengers the user has travelled with
-	app.Get("/user/default-address", users.GetDefaultAddress) // Gets user's default start address
-	app.Post("/user/default-address", users.SetDefaultAddress) // Sets user's default start address
+	app.Post("/user", users.CreateOrUpdateUser)                 // Create or update a user
+	app.Get("/user/details", users.GetUser)                     // Gets user details
+	app.Get("/user/all", users.GetAllUsers)                     // Gets all users
+	app.Delete("/user/delete", users.DeleteUser)                // Deletes a user
+	app.Get("/user/rides", users.FetchUserRides)                // Gets all the rides of a particular user
+	app.Get("/user/passengers", users.GetPassengers)            // Gets all passengers the user has travelled with
+	app.Get("/user/default-address", users.GetDefaultAddress)   // Gets user's default start address
+	app.Post("/user/default-address", users.SetDefaultAddress)  // Sets user's default start address
 	app.Patch("/user/default-address", users.SetDefaultAddress) // PATCH also sets user's default start address
+	app.Get("/user/:id", users.GetUserByID)                     // Gets user details by ID - MUST BE LAST in /user/* routes
 
 	// User token management routes
 	app.Post("/users/me/token", users.UpdateUserToken)   // Update user's FCM token
@@ -87,13 +81,6 @@ func SetupRoutes(app *fiber.App) {
 	// Ride and Passenger Info routes
 	app.Get("/rides/involved", rides.GetInvolvedRides)
 	app.Get("/passengers/all", rides.GetAllPassengers)
-
-	app.Post("/booking/create", CRUD.CreateBooking)           // Creates a new booking
-	app.Get("/booking/list", CRUD.GetBookings)                // Retrieves all bookings
-	app.Get("/booking/:id", CRUD.GetBookingByID)              // Retrieves a specific booking by its ID
-	app.Patch("/booking/update/:id", CRUD.UpdateBooking)      // Updates an existing booking
-	app.Delete("/booking/delete/:id", bookings.DeleteBooking) // Deletes a booking
-
 }
 
 func main() {
