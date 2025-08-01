@@ -3,7 +3,7 @@ package database
 import (
 	"log"
 	"os"
-	"runtime"
+	// "runtime"
 	"time"
 
 	"unipool-backend/models"
@@ -28,7 +28,7 @@ func ConnectToDB() {
 
 	log.Println("Connecting to database...")
 	db, err := gorm.Open(postgres.Open(connectionString), &gorm.Config{
-		PrepareStmt: true,
+		PrepareStmt: false,
 	})
 	if err != nil {
 		log.Fatalf("Error connecting to database: %v", err)
@@ -39,7 +39,7 @@ func ConnectToDB() {
 		log.Fatalf("Error getting generic DB: %v", err)
 	}
 
-	poolSize := runtime.NumCPU() * 4
+	poolSize := 4
 	sqlDB.SetMaxOpenConns(poolSize)        
 	sqlDB.SetMaxIdleConns(poolSize)        
 	sqlDB.SetConnMaxLifetime(15 * time.Minute)   
