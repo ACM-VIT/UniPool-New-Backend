@@ -53,12 +53,12 @@ func ConnectToDB() {
 		log.Fatalf("Error getting generic DB: %v", err)
 	}
 
-	// Improved connection pool settings for better performance
-	poolSize := 25
-	sqlDB.SetMaxOpenConns(poolSize)            // Increased from 4 to 25
-	sqlDB.SetMaxIdleConns(poolSize / 2)        // 12 idle connections
-	sqlDB.SetConnMaxLifetime(30 * time.Minute) // Increased from 15 to 30 minutes
-	sqlDB.SetConnMaxIdleTime(5 * time.Minute)  // Reduced from 10 to 5 minutes
+	// Supabase-optimized connection pool settings
+	poolSize := 8                              // Reduced for Supabase limits
+	sqlDB.SetMaxOpenConns(poolSize)            // Conservative limit for Supabase
+	sqlDB.SetMaxIdleConns(2)                   // Keep minimal idle connections
+	sqlDB.SetConnMaxLifetime(10 * time.Minute) // Shorter lifetime for pooled connections
+	sqlDB.SetConnMaxIdleTime(2 * time.Minute)  // Release idle connections quickly
 
 	log.Println("Connected to database")
 

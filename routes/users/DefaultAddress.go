@@ -1,9 +1,7 @@
 package users
 
 import (
-	"context"
 	"log"
-	"time"
 	"unipool-backend/database"
 	"unipool-backend/models"
 
@@ -38,11 +36,7 @@ func SetDefaultAddress(c *fiber.Ctx) error {
 		return c.Status(400).SendString("Address cannot be empty")
 	}
 
-	// Add context timeout for database operations
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := database.Database.Db.WithContext(ctx).Model(&models.User{}).Where("id = ?", user.ID).Update("default_address", payload.Address).Error; err != nil {
+	if err := database.Database.Db.Model(&models.User{}).Where("id = ?", user.ID).Update("default_address", payload.Address).Error; err != nil {
 		log.Printf("Error updating address: %v\n", err)
 		return c.Status(500).SendString("Failed to update address")
 	}

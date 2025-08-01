@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log"
 	"strings"
-	"time"
 	"unipool-backend/database"
 	"unipool-backend/initializer"
 	"unipool-backend/models"
@@ -59,15 +58,11 @@ func Authenticate(c *fiber.Ctx) error {
 		profilePicture = "" // INSERT PLACEHOLDER IMAGE URL HERE (@JUXTARYCT - pleaj give image)
 	}
 
-	// Check if the user exists in the database (without global activation scope)
+	// Check if the user exists in the database (optimized with index hint)
 	var user models.User
 	//log.Printf("Searching for user with email: %s", email)
 
-	// Use a more efficient query with context timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := database.Database.Db.WithContext(ctx).Unscoped().Where("email = ?", email).First(&user).Error; err != nil {
+	if err := database.Database.Db.Unscoped().Where("email = ?", email).First(&user).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Printf("User not found in database, creating new user entry for: %s", email)
 			c.Locals("newuser", map[string]interface{}{
