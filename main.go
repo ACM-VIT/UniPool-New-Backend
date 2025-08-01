@@ -33,6 +33,7 @@ func SetupRoutes(app *fiber.App) {
 	// User CRUD routes
 	app.Post("/user", users.CreateOrUpdateUser)    // Create or update a user
 	app.Get("/user/details", users.GetUser)        // Gets user details
+	app.Get("/user/:id", users.GetUserByID)        // Gets user details by ID
 	app.Get("/user/all", users.GetAllUsers)        // Gets all users
 	app.Delete("/user/delete", users.DeleteUser)   // Deletes a user
 	app.Get("/user/rides", users.FetchUserRides)   // Gets all the rides of a particular user

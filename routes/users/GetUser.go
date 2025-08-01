@@ -27,7 +27,6 @@ func GetUser(c *fiber.Ctx) error {
 				"default_address": user.DefaultAddress,
 				"created_at": user.CreatedAt,
 				"updated_at": user.UpdatedAt,
-				// ...other fields as needed...
 				"total_hosted_rides": totalHostedRides,
 			},
 		})
