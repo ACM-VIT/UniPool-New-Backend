@@ -154,7 +154,7 @@ func (f *FCMService) SendChatMessageNotification(userID uuid.UUID, senderName, m
 
 func (f *FCMService) SendRideReminderNotification(userID uuid.UUID, rideRoute string, timeUntilRide string, rideID uuid.UUID) error {
 	title := "Ride Reminder"
-	body := fmt.Sprintf("Your ride to %s starts in %s", rideRoute, timeUntilRide)
+	body := fmt.Sprintf("Your ride from %s starts in %s", rideRoute, timeUntilRide)
 	data := map[string]string{
 		"type":    "ride_reminder",
 		"ride_id": rideID.String(),
