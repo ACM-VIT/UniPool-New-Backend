@@ -1,8 +1,10 @@
 package CRUD
 
 import (
+	"context"
 	"errors"
 	"log"
+	"time"
 	"unipool-backend/database"
 	"unipool-backend/helpers"
 	"unipool-backend/models"
@@ -102,8 +104,12 @@ func GetBookingsByRideID(c *fiber.Ctx) error {
 		return &fiber.Error{Code: 400, Message: "Invalid ride ID format"}
 	}
 
+	// Add context timeout for database operations
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	var bookings []models.Booking
-	if err := database.Database.Db.Preload("Ride").Preload("Passenger").Where("ride_id = ?", rideID).Find(&bookings).Error; err != nil {
+	if err := database.Database.Db.WithContext(ctx).Preload("Ride").Preload("Passenger").Where("ride_id = ?", rideID).Find(&bookings).Error; err != nil {
 		log.Printf("Error finding bookings for ride %v: %v\n", rideID, err)
 		return c.Status(502).SendString("Error finding bookings for ride")
 	}
