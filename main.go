@@ -3,24 +3,32 @@ package main
 import (
 	"log"
 	"os"
+	"time"
 	"unipool-backend/database"
 	"unipool-backend/initializer"
 	"unipool-backend/middleware"
 	"unipool-backend/routes/CRUD"
 	"unipool-backend/routes/bookings"
-	"unipool-backend/routes/rides"
 	"unipool-backend/routes/chat"
 	"unipool-backend/routes/notifications"
-	"unipool-backend/services"
-	"github.com/gofiber/websocket/v2"
+	"unipool-backend/routes/rides"
 	"unipool-backend/routes/users"
+	"unipool-backend/services"
+
+	"github.com/gofiber/websocket/v2"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/fiber/v2/middleware/timeout"
 )
 
 func SetupRoutes(app *fiber.App) {
 	app.Use(cors.New())
+
+	// Add timeout middleware for all routes (30 seconds)
+	app.Use(timeout.New(func(c *fiber.Ctx) error {
+		return c.Next()
+	}, 30*time.Second))
 
 	// Ride CRUD routes
 	app.Post("/ride/create", rides.CreateRide)          // Creates a new ride
@@ -31,18 +39,18 @@ func SetupRoutes(app *fiber.App) {
 	app.Get("ride/search", rides.SearchRides)           // Search for rides
 
 	// User CRUD routes
-	app.Post("/user", users.CreateOrUpdateUser)    // Create or update a user
-	app.Get("/user/details", users.GetUser)        // Gets user details
-	app.Get("/user/all", users.GetAllUsers)        // Gets all users
-	app.Delete("/user/delete", users.DeleteUser)   // Deletes a user
-	app.Get("/user/rides", users.FetchUserRides)   // Gets all the rides of a particular user
-	app.Get("/user/passengers", users.GetPassengers) // Gets all passengers the user has travelled with
-	app.Get("/user/default-address", users.GetDefaultAddress) // Gets user's default start address
-	app.Post("/user/default-address", users.SetDefaultAddress) // Sets user's default start address
+	app.Post("/user", users.CreateOrUpdateUser)                 // Create or update a user
+	app.Get("/user/details", users.GetUser)                     // Gets user details
+	app.Get("/user/all", users.GetAllUsers)                     // Gets all users
+	app.Delete("/user/delete", users.DeleteUser)                // Deletes a user
+	app.Get("/user/rides", users.FetchUserRides)                // Gets all the rides of a particular user
+	app.Get("/user/passengers", users.GetPassengers)            // Gets all passengers the user has travelled with
+	app.Get("/user/default-address", users.GetDefaultAddress)   // Gets user's default start address
+	app.Post("/user/default-address", users.SetDefaultAddress)  // Sets user's default start address
 	app.Patch("/user/default-address", users.SetDefaultAddress) // PATCH also sets user's default start address
-	
+
 	// User token management routes
-	app.Post("/users/me/token", users.UpdateUserToken) // Update user's FCM token
+	app.Post("/users/me/token", users.UpdateUserToken)   // Update user's FCM token
 	app.Delete("/users/me/token", users.RemoveUserToken) // Remove user's FCM token
 
 	//Booking CRUD routes
@@ -62,7 +70,7 @@ func SetupRoutes(app *fiber.App) {
 	app.Post("/chat/:ride_id/message", chat.SendMessage)
 
 	// Notification routes
-	app.Post("/notifications/send", notifications.SendNotification) // Send FCM notification
+	app.Post("/notifications/send", notifications.SendNotification)               // Send FCM notification
 	app.Post("/notifications/send-to-user", notifications.SendNotificationToUser) // Send notification to specific user
 
 	// WebSocket endpoint (upgrade)
@@ -89,17 +97,33 @@ func SetupRoutes(app *fiber.App) {
 
 func main() {
 	initializer.InitFirebase()
-	
+
 	// Initialize FCM service
 	if err := services.InitFCMService(); err != nil {
 		log.Fatalf("Failed to initialize FCM service: %v", err)
 	}
-	
+
 	// Initialize notification scheduler
 	services.InitNotificationScheduler()
-	
+
 	initializer.InitializeWebsocket()
-	app := fiber.New()
+
+	// Configure Fiber with better settings for performance
+	app := fiber.New(fiber.Config{
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+		ErrorHandler: func(c *fiber.Ctx, err error) error {
+			code := fiber.StatusInternalServerError
+			if e, ok := err.(*fiber.Error); ok {
+				code = e.Code
+			}
+			log.Printf("Request error: %v", err)
+			return c.Status(code).JSON(fiber.Map{
+				"error": err.Error(),
+			})
+		},
+	})
 
 	database.ConnectToDB()
 
@@ -114,11 +138,11 @@ func main() {
 	})
 
 	SetupRoutes(app)
-	
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "3000"
 	}
-	
+
 	log.Fatal(app.Listen(":" + port))
 }

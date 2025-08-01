@@ -1,6 +1,7 @@
 package users
 
 import (
+	"context"
 	"log"
 	"time"
 	"unipool-backend/database"
@@ -45,9 +46,14 @@ func FetchUserRides(c *fiber.Ctx) error {
 	userUUID := user.ID
 	userRides := make([]UserRidesResponse, 0)
 
-	if err := database.Database.Db.
+	// Add context timeout for the query
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Optimized query with proper indexing
+	if err := database.Database.Db.WithContext(ctx).
 		Table("rides").
-		Select(`rides.id AS ride_id,
+		Select(`DISTINCT rides.id AS ride_id,
 				rides.host_user_id,
 				rides.start_location,
 				rides.end_location,
@@ -60,6 +66,7 @@ func FetchUserRides(c *fiber.Ctx) error {
 				bookings.passenger_id`).
 		Joins("LEFT JOIN bookings ON bookings.ride_id = rides.id").
 		Where("(rides.host_user_id = ? OR bookings.passenger_id = ?)", userUUID, userUUID).
+		Order("rides.start_time DESC").
 		Scan(&userRides).Error; err != nil {
 		log.Printf("Error finding user rides: %v\n", err)
 		return c.Status(fiber.StatusBadGateway).SendString("Error finding rides for user")
