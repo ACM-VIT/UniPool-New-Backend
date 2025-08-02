@@ -19,16 +19,15 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
-	"github.com/gofiber/fiber/v2/middleware/timeout"
 )
 
 func SetupRoutes(app *fiber.App) {
-	app.Use(cors.New())
-
-	// Add timeout middleware for all routes (30 seconds)
-	app.Use(timeout.New(func(c *fiber.Ctx) error {
-		return c.Next()
-	}, 30*time.Second))
+	app.Use(cors.New(cors.Config{
+		AllowOrigins: "*",
+		AllowMethods: "GET,POST,HEAD,PUT,DELETE,PATCH,OPTIONS",
+		AllowHeaders: "Origin,Content-Type,Accept,Authorization,X-Requested-With",
+		AllowCredentials: false,
+	}))
 
 	// Ride CRUD routes
 	app.Post("/ride/create", rides.CreateRide)          // Creates a new ride
@@ -110,11 +109,12 @@ func main() {
 
 	initializer.InitializeWebsocket()
 
-	// Configure Fiber with better settings for performance
 	app := fiber.New(fiber.Config{
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  60 * time.Second,  // Increased for WebSocket connections
+		WriteTimeout: 60 * time.Second,  // Increased for WebSocket connections
+		IdleTimeout:  120 * time.Second, // Increased for long-lived connections
+		BodyLimit:    10 * 1024 * 1024,  // 10MB body limit
+		Immutable:    true,              // Better performance
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			code := fiber.StatusInternalServerError
 			if e, ok := err.(*fiber.Error); ok {
