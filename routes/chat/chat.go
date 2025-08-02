@@ -4,6 +4,7 @@ import (
     "encoding/json"
     "log"
     "strconv"
+    "strings"
     "time"
 
     "github.com/gofiber/fiber/v2"
@@ -102,7 +103,6 @@ func SendMessage(c *fiber.Ctx) error {
 	}
 	database.Database.Db.Preload("Sender").First(&msg, msg.ID)
 
-	// Create enhanced chat message with complete user details
 	chatMsg := initializer.ChatMessage{
 		Type:      "message",
 		RoomID:    rideID,
@@ -123,18 +123,15 @@ func SendMessage(c *fiber.Ctx) error {
 		}
 	}
 
-	// Send FCM notifications to other participants
 	fcmService := services.GetFCMService()
 	if fcmService != nil {
 		go func() {
-			// Get ride details
 			var ride models.Ride
 			if err := database.Database.Db.Preload("HostUser").First(&ride, rideUUID).Error; err != nil {
 				log.Printf("Error fetching ride for notifications: %v", err)
 				return
 			}
 
-			// Get all bookings for this ride
 			var bookings []models.Booking
 			if err := database.Database.Db.Preload("Passenger").Where("ride_id = ? AND request_status = ?", rideUUID, "accepted").Find(&bookings).Error; err != nil {
 				log.Printf("Error fetching bookings for notifications: %v", err)
@@ -143,14 +140,12 @@ func SendMessage(c *fiber.Ctx) error {
 
 			rideRoute := ride.StartLocation + " to " + ride.EndLocation
 			
-			// Notify ride host if the sender is not the host
 			if ride.HostUserID != user.ID {
 				if err := fcmService.SendChatMessageNotification(ride.HostUserID, user.Name, body.Content, rideRoute, rideUUID); err != nil {
 					log.Printf("Error sending chat notification to host: %v", err)
 				}
 			}
 
-			// Notify all passengers except the sender
 			for _, booking := range bookings {
 				if booking.PassengerID != user.ID {
 					if err := fcmService.SendChatMessageNotification(booking.PassengerID, user.Name, body.Content, rideRoute, rideUUID); err != nil {
@@ -161,13 +156,100 @@ func SendMessage(c *fiber.Ctx) error {
 		}()
 	}
 
-	// Return enhanced message structure
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"message": fiber.Map{
 			"id":         msg.ID.String(),
 			"content":    msg.Content,
 			"sender_id":  msg.SenderID.String(),
 			"ride_id":    msg.RideID.String(),
+			"timestamp":  msg.CreatedAt.Format(time.RFC3339),
+			"sender": fiber.Map{
+				"name":                user.Name,
+				"profile_picture_url": user.ProfilePictureURL,
+			},
+		},
+	})
+}
+
+func SendDMMessage(c *fiber.Ctx) error {
+	dmRoomID := c.Params("dm_room_id")
+	
+	if !strings.HasPrefix(dmRoomID, "dm_") {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid dm room id format"})
+	}
+
+	user, ok := c.Locals("user").(models.User)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "User not authenticated or found"})
+	}
+
+	var body struct {
+		Content string `json:"content"`
+		TempID  string `json:"temp_id,omitempty"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
+	}
+
+	msg := models.Message{
+		DMRoomID: &dmRoomID,
+		SenderID: user.ID,
+		Content:  body.Content,
+	}
+	if err := database.Database.Db.Create(&msg).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to save message"})
+	}
+	database.Database.Db.Preload("Sender").First(&msg, msg.ID)
+
+	chatMsg := initializer.ChatMessage{
+		Type:      "message",
+		RoomID:    dmRoomID,
+		SenderID:  user.ID.String(),
+		Content:   body.Content,
+		Timestamp: msg.CreatedAt.Format(time.RFC3339),
+		MessageID: msg.ID.String(),
+		TempID:    body.TempID,
+		Sender: &initializer.UserInfo{
+			Name:              user.Name,
+			ProfilePictureURL: user.ProfilePictureURL,
+		},
+	}
+
+	if hub := initializer.GetChatHub(); hub != nil {
+		if b, err := json.Marshal(chatMsg); err == nil {
+			hub.BroadcastToRoom(dmRoomID, b)
+		}
+	}
+
+	fcmService := services.GetFCMService()
+	if fcmService != nil {
+		go func() {
+			dmRoomPart := strings.TrimPrefix(dmRoomID, "dm_")
+			userIds := strings.Split(dmRoomPart, "_")
+			
+			if len(userIds) == 2 {
+				var otherUserID string
+				if userIds[0] == user.ID.String() {
+					otherUserID = userIds[1]
+				} else {
+					otherUserID = userIds[0]
+				}
+				
+				if otherUUID, err := uuid.Parse(otherUserID); err == nil {
+					if err := fcmService.SendDirectMessageNotification(otherUUID, user.Name, body.Content); err != nil {
+						log.Printf("Error sending DM notification to user %s: %v", otherUserID, err)
+					}
+				}
+			}
+		}()
+	}
+
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"message": fiber.Map{
+			"id":         msg.ID.String(),
+			"content":    msg.Content,
+			"sender_id":  msg.SenderID.String(),
+			"dm_room_id": *msg.DMRoomID,
 			"timestamp":  msg.CreatedAt.Format(time.RFC3339),
 			"sender": fiber.Map{
 				"name":                user.Name,
@@ -235,30 +317,10 @@ func WebSocketHandler(c *websocket.Conn) {
         return
     }
 
-    // Validate room ID - can be either a UUID (for ride rooms) or dm_* format (for DM rooms)
-    if len(roomID) > 3 && roomID[:3] == "dm_" {
-        // DM room format: dm_userId1_userId2 - validate that it contains valid UUIDs
-        parts := roomID[3:] // Remove "dm_" prefix
-        userIds := []string{}
-        if len(parts) > 0 {
-            // Split by underscores to get the two user IDs
-            underscoreCount := 0
-            for _, char := range parts {
-                if char == '_' {
-                    underscoreCount++
-                }
-            }
-            // Should have exactly 7 underscores (4 per UUID - 1 = 7 total)
-            if underscoreCount == 7 {
-                // Extract the two UUIDs (each UUID has 4 dashes, so we split differently)
-                // Format: dm_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-                if len(parts) == 73 { // 36 + 1 + 36 = 73 characters for two UUIDs with underscore
-                    userId1 := parts[:36]
-                    userId2 := parts[37:]
-                    userIds = []string{userId1, userId2}
-                }
-            }
-        }
+    if strings.HasPrefix(roomID, "dm_") {
+        dmRoomPart := strings.TrimPrefix(roomID, "dm_")
+        
+        userIds := strings.Split(dmRoomPart, "_")
         
         if len(userIds) != 2 {
             log.Printf("WebSocket connection rejected: invalid DM room_id format: %s", roomID)
@@ -267,7 +329,6 @@ func WebSocketHandler(c *websocket.Conn) {
             return
         }
         
-        // Validate both user IDs are valid UUIDs
         for _, uid := range userIds {
             if _, err := uuid.Parse(uid); err != nil {
                 log.Printf("WebSocket connection rejected: invalid user ID in DM room: %s", uid)
@@ -276,9 +337,8 @@ func WebSocketHandler(c *websocket.Conn) {
                 return
             }
         }
-        log.Printf("Valid DM room ID: %s", roomID)
+        log.Printf("Valid DM room ID: %s with users: %s, %s", roomID, userIds[0], userIds[1])
     } else {
-        // Regular ride room - must be a valid UUID
         if _, err := uuid.Parse(roomID); err != nil {
             log.Printf("WebSocket connection rejected: invalid room_id format")
             c.WriteMessage(websocket.CloseMessage, []byte("invalid room_id format"))
@@ -292,7 +352,6 @@ func WebSocketHandler(c *websocket.Conn) {
     select {}
 }
 
-// Debug endpoint to check active connections
 func GetActiveConnections(c *fiber.Ctx) error {
     hub := initializer.GetChatHub()
     if hub == nil {
