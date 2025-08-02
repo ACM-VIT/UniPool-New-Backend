@@ -140,7 +140,7 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 
 	hostHasBooking := false
 	for _, booking := range bookingDetails {
-		if booking.PassengerID == ride.HostUserID {
+		if booking.PassengerID == ride.HostUserID.String() {
 			hostHasBooking = true
 			break
 		}
@@ -149,11 +149,11 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 	if !hostHasBooking {
 		hostBooking := BookingDetail{
 			ID:            "host-booking",
-			PassengerID:   ride.HostUserID,
+			PassengerID:   ride.HostUserID.String(),
 			RequestStatus: "accepted",
 			CreatedAt:     ride.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 			Passenger: PassengerDetail{
-				ID:                host.ID,
+				ID:                host.ID.String(),
 				Name:              host.Name,
 				Email:             host.Email,
 				ProfilePictureURL: host.ProfilePictureURL,
@@ -171,20 +171,20 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 	}
 
 	response := RideDetailsComplete{
-		ID:            ride.ID,
-		HostUserID:    ride.HostUserID,
+		ID:            ride.ID.String(),
+		HostUserID:    ride.HostUserID.String(),
 		HostUserName:  host.Name,
 		StartLocation: ride.StartLocation,
 		EndLocation:   ride.EndLocation,
 		StartTime:     ride.StartTime.Format("2006-01-02T15:04:05Z07:00"),
-		TotalPrice:    ride.TotalPrice,
-		TotalSeats:    ride.TotalSeats,
+		TotalPrice:    int(ride.TotalPrice),
+		TotalSeats:    int(ride.TotalSeats),
 		BookedSeats:   bookedSeats,
-		IsOngoing:     ride.IsOngoing,
+		IsOngoing:     ride.IsOngoing > 0,
 		CreatedAt:     ride.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 		IsUserHost:    user.ID == ride.HostUserID,
 		Host: PassengerDetail{
-			ID:                host.ID,
+			ID:                host.ID.String(),
 			Name:              host.Name,
 			Email:             host.Email,
 			ProfilePictureURL: host.ProfilePictureURL,
