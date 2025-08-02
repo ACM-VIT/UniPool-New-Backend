@@ -63,11 +63,14 @@ func Authenticate(c *fiber.Ctx) error {
 	var user models.User
 	//log.Printf("Searching for user with email: %s", email)
 
-	// Use a more efficient query with context timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	if err := database.Database.Db.WithContext(ctx).Unscoped().Where("email = ?", email).First(&user).Error; err != nil {
+	if err := database.Database.Db.WithContext(ctx).
+		Select("id", "email", "name", "profile_picture_url", "contact_number", "gender", "yob", "default_address", "created_at", "updated_at").
+		Where("email = ?", email).
+		First(&user).Error; err != nil {
+		
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Printf("User not found in database, creating new user entry for: %s", email)
 			c.Locals("newuser", map[string]interface{}{
@@ -75,17 +78,16 @@ func Authenticate(c *fiber.Ctx) error {
 				"name":                name,
 				"profile_picture_url": profilePicture,
 			})
-			// log.Println("New user to be created:", c.Locals("newuser"))
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			log.Printf("Database query timeout for user: %s", email)
+			return c.Status(500).JSON(fiber.Map{"error": "Database timeout - please try again"})
 		} else {
-			// Database error
-			log.Println("Database error:", err)
+			log.Printf("Database error for user %s: %v", email, err)
 			return c.Status(500).JSON(fiber.Map{"error": "Database error"})
 		}
 	} else {
-		// User exists; set existing user in locals
-		// log.Printf("Found existing user: %s (ID: %s)", user.Email, user.ID)
+		log.Printf("Found existing user: %s (ID: %s)", user.Email, user.ID)
 		c.Locals("user", user)
-		// log.Println("Authenticated existing user:", c.Locals("user"))
 	}
 
 	return c.Next()

@@ -134,7 +134,33 @@ func main() {
 	// 	log.Fatalf("Failed to run migrations: %v", err)
 	// }
 
+	app.Get("/health", func(c *fiber.Ctx) error {
+		sqlDB, err := database.Database.Db.DB()
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{
+				"status": "unhealthy",
+				"database": "error getting db instance",
+				"error": err.Error(),
+			})
+		}
+		
+		if err := sqlDB.Ping(); err != nil {
+			return c.Status(500).JSON(fiber.Map{
+				"status": "unhealthy", 
+				"database": "ping failed",
+				"error": err.Error(),
+			})
+		}
+		
+		return c.JSON(fiber.Map{
+			"status": "healthy",
+			"database": "connected",
+			"timestamp": time.Now().UTC(),
+		})
+	})
+
 	app.Use(middleware.Authenticate)
+	
 	app.Get("/", func(c *fiber.Ctx) error {
 		return c.SendString("Scared of Women✌️!")
 	})
