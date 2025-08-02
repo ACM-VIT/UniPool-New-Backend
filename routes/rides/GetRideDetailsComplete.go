@@ -17,11 +17,14 @@ type PassengerDetail struct {
 }
 
 type BookingDetail struct {
-	ID            string          `json:"id"`
-	PassengerID   string          `json:"passenger_id"`
-	RequestStatus string          `json:"request_status"`
-	CreatedAt     string          `json:"created_at"`
-	Passenger     PassengerDetail `json:"passenger"`
+	ID                            string `json:"id"`
+	PassengerID                   string `json:"passenger_id"`
+	RequestStatus                 string `json:"request_status"`
+	CreatedAt                     string `json:"booking_created_at"`
+	PassengerName                 string `json:"passenger_name"`
+	PassengerEmail                string `json:"passenger_email"`
+	PassengerProfilePictureURL    string `json:"passenger_profile_picture_url"`
+	PassengerContactNumber        string `json:"passenger_contact_number"`
 }
 
 type RideDetailsComplete struct {
@@ -104,17 +107,14 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 		}
 
 		bookingDetails = append(bookingDetails, BookingDetail{
-			ID:            booking.ID.String(),
-			PassengerID:   booking.PassengerID.String(),
-			RequestStatus: booking.RequestStatus,
-			CreatedAt:     booking.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-			Passenger: PassengerDetail{
-				ID:                passenger.ID.String(),
-				Name:              passenger.Name,
-				Email:             passenger.Email,
-				ProfilePictureURL: passenger.ProfilePictureURL,
-				ContactNumber:     passenger.ContactNumber,
-			},
+			ID:                         booking.ID.String(),
+			PassengerID:                booking.PassengerID.String(),
+			RequestStatus:              booking.RequestStatus,
+			CreatedAt:                  booking.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+			PassengerName:              passenger.Name,
+			PassengerEmail:             passenger.Email,
+			PassengerProfilePictureURL: passenger.ProfilePictureURL,
+			PassengerContactNumber:     passenger.ContactNumber,
 		})
 	}
 
@@ -128,17 +128,14 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 
 	if !hostHasBooking {
 		hostBooking := BookingDetail{
-			ID:            "host-booking",
-			PassengerID:   ride.HostUserID.String(),
-			RequestStatus: "accepted",
-			CreatedAt:     ride.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-			Passenger: PassengerDetail{
-				ID:                host.ID.String(),
-				Name:              host.Name,
-				Email:             host.Email,
-				ProfilePictureURL: host.ProfilePictureURL,
-				ContactNumber:     host.ContactNumber,
-			},
+			ID:                         "host-booking",
+			PassengerID:                ride.HostUserID.String(),
+			RequestStatus:              "accepted",
+			CreatedAt:                  ride.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+			PassengerName:              host.Name,
+			PassengerEmail:             host.Email,
+			PassengerProfilePictureURL: host.ProfilePictureURL,
+			PassengerContactNumber:     host.ContactNumber,
 		}
 		bookingDetails = append([]BookingDetail{hostBooking}, bookingDetails...)
 	}
