@@ -64,13 +64,8 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 	var ride models.Ride
 	var host models.User
 	
-	if err := database.Database.Db.
-		Select("rides.*, users.name as host_name, users.email as host_email, users.profile_picture_url as host_profile_picture_url, users.contact_number as host_contact_number").
-		Table("rides").
-		Joins("JOIN users ON users.id = rides.host_user_id").
-		Where("rides.id = ?", rideID).
-		First(&ride).Error; err != nil {
-		log.Printf("Error finding ride with host details for ID %s: %v\n", rideID, err)
+	if err := database.Database.Db.Where("id = ?", rideID).First(&ride).Error; err != nil {
+		log.Printf("Error finding ride for ID %s: %v\n", rideID, err)
 		return c.Status(404).JSON(fiber.Map{
 			"error": "Ride not found",
 		})
@@ -78,62 +73,47 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 
 	if err := database.Database.Db.
 		Select("id, name, email, profile_picture_url, contact_number").
-		First(&host, "id = ?", ride.HostUserID).Error; err != nil {
+		Where("id = ?", ride.HostUserID).
+		First(&host).Error; err != nil {
 		log.Printf("Error finding host with ID %s: %v\n", ride.HostUserID, err)
 		return c.Status(500).JSON(fiber.Map{
 			"error": "Host details not found",
 		})
 	}
 
-	type BookingWithPassenger struct {
-		BookingID     string `json:"booking_id"`
-		PassengerID   string `json:"passenger_id"`
-		RequestStatus string `json:"request_status"`
-		BookingCreatedAt string `json:"booking_created_at"`
-		
-		PassengerName              string `json:"passenger_name"`
-		PassengerEmail             string `json:"passenger_email"`
-		PassengerProfilePictureURL string `json:"passenger_profile_picture_url"`
-		PassengerContactNumber     string `json:"passenger_contact_number"`
-	}
-
-	var bookingsWithPassengers []BookingWithPassenger
-	
+	var bookings []models.Booking
 	if err := database.Database.Db.
-		Table("bookings").
-		Select(`
-			bookings.id as booking_id,
-			bookings.passenger_id,
-			bookings.request_status,
-			bookings.created_at as booking_created_at,
-			users.name as passenger_name,
-			users.email as passenger_email,
-			users.profile_picture_url as passenger_profile_picture_url,
-			users.contact_number as passenger_contact_number
-		`).
-		Joins("JOIN users ON users.id = bookings.passenger_id").
-		Where("bookings.ride_id = ?", rideID).
-		Order("bookings.created_at ASC").
-		Find(&bookingsWithPassengers).Error; err != nil {
-		log.Printf("Error fetching bookings with passengers for ride %s: %v\n", rideID, err)
+		Where("ride_id = ?", rideID).
+		Order("created_at ASC").
+		Find(&bookings).Error; err != nil {
+		log.Printf("Error fetching bookings for ride %s: %v\n", rideID, err)
 		return c.Status(500).JSON(fiber.Map{
 			"error": "Error fetching bookings",
 		})
 	}
 
 	var bookingDetails []BookingDetail
-	for _, bwp := range bookingsWithPassengers {
+	for _, booking := range bookings {
+		var passenger models.User
+		if err := database.Database.Db.
+			Select("id, name, email, profile_picture_url, contact_number").
+			Where("id = ?", booking.PassengerID).
+			First(&passenger).Error; err != nil {
+			log.Printf("Warning: Could not fetch passenger details for booking %s: %v\n", booking.ID, err)
+			continue
+		}
+
 		bookingDetails = append(bookingDetails, BookingDetail{
-			ID:            bwp.BookingID,
-			PassengerID:   bwp.PassengerID,
-			RequestStatus: bwp.RequestStatus,
-			CreatedAt:     bwp.BookingCreatedAt,
+			ID:            booking.ID.String(),
+			PassengerID:   booking.PassengerID.String(),
+			RequestStatus: booking.RequestStatus,
+			CreatedAt:     booking.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 			Passenger: PassengerDetail{
-				ID:                bwp.PassengerID,
-				Name:              bwp.PassengerName,
-				Email:             bwp.PassengerEmail,
-				ProfilePictureURL: bwp.PassengerProfilePictureURL,
-				ContactNumber:     bwp.PassengerContactNumber,
+				ID:                passenger.ID.String(),
+				Name:              passenger.Name,
+				Email:             passenger.Email,
+				ProfilePictureURL: passenger.ProfilePictureURL,
+				ContactNumber:     passenger.ContactNumber,
 			},
 		})
 	}
