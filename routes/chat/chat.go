@@ -46,6 +46,36 @@ func GetRideMessages(c *fiber.Ctx) error {
     return c.JSON(fiber.Map{"messages": transformedMessages, "count": len(transformedMessages)})
 }
 
+func GetDMMessages(c *fiber.Ctx) error {
+    dmRoomID := c.Params("dm_room_id")
+    
+    if len(dmRoomID) < 3 || dmRoomID[:3] != "dm_" {
+        return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid dm room id format"})
+    }
+
+    var messages []models.Message
+    if err := database.Database.Db.Preload("Sender").Where("dm_room_id = ?", dmRoomID).Order("created_at asc").Find(&messages).Error; err != nil {
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch messages"})
+    }
+
+    var transformedMessages []fiber.Map
+    for _, msg := range messages {
+        transformedMessage := fiber.Map{
+            "id":         msg.ID.String(),
+            "content":    msg.Content,
+            "sender_id":  msg.SenderID.String(),
+            "timestamp":  msg.CreatedAt.Format(time.RFC3339),
+            "sender": fiber.Map{
+                "name":                msg.Sender.Name,
+                "profile_picture_url": msg.Sender.ProfilePictureURL,
+            },
+        }
+        transformedMessages = append(transformedMessages, transformedMessage)
+    }
+
+    return c.JSON(fiber.Map{"messages": transformedMessages, "count": len(transformedMessages)})
+}
+
 func SendMessage(c *fiber.Ctx) error {
 	rideID := c.Params("ride_id")
 	rideUUID, err := uuid.Parse(rideID)
@@ -66,7 +96,7 @@ func SendMessage(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	msg := models.Message{RideID: rideUUID, SenderID: user.ID, Content: body.Content}
+	msg := models.Message{RideID: &rideUUID, SenderID: user.ID, Content: body.Content}
 	if err := database.Database.Db.Create(&msg).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to save message"})
 	}
@@ -205,11 +235,56 @@ func WebSocketHandler(c *websocket.Conn) {
         return
     }
 
-    if _, err := uuid.Parse(roomID); err != nil {
-        log.Printf("WebSocket connection rejected: invalid room_id format")
-        c.WriteMessage(websocket.CloseMessage, []byte("invalid room_id format"))
-        c.Close()
-        return
+    // Validate room ID - can be either a UUID (for ride rooms) or dm_* format (for DM rooms)
+    if len(roomID) > 3 && roomID[:3] == "dm_" {
+        // DM room format: dm_userId1_userId2 - validate that it contains valid UUIDs
+        parts := roomID[3:] // Remove "dm_" prefix
+        userIds := []string{}
+        if len(parts) > 0 {
+            // Split by underscores to get the two user IDs
+            underscoreCount := 0
+            for _, char := range parts {
+                if char == '_' {
+                    underscoreCount++
+                }
+            }
+            // Should have exactly 7 underscores (4 per UUID - 1 = 7 total)
+            if underscoreCount == 7 {
+                // Extract the two UUIDs (each UUID has 4 dashes, so we split differently)
+                // Format: dm_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+                if len(parts) == 73 { // 36 + 1 + 36 = 73 characters for two UUIDs with underscore
+                    userId1 := parts[:36]
+                    userId2 := parts[37:]
+                    userIds = []string{userId1, userId2}
+                }
+            }
+        }
+        
+        if len(userIds) != 2 {
+            log.Printf("WebSocket connection rejected: invalid DM room_id format: %s", roomID)
+            c.WriteMessage(websocket.CloseMessage, []byte("invalid DM room_id format"))
+            c.Close()
+            return
+        }
+        
+        // Validate both user IDs are valid UUIDs
+        for _, uid := range userIds {
+            if _, err := uuid.Parse(uid); err != nil {
+                log.Printf("WebSocket connection rejected: invalid user ID in DM room: %s", uid)
+                c.WriteMessage(websocket.CloseMessage, []byte("invalid user ID in DM room"))
+                c.Close()
+                return
+            }
+        }
+        log.Printf("Valid DM room ID: %s", roomID)
+    } else {
+        // Regular ride room - must be a valid UUID
+        if _, err := uuid.Parse(roomID); err != nil {
+            log.Printf("WebSocket connection rejected: invalid room_id format")
+            c.WriteMessage(websocket.CloseMessage, []byte("invalid room_id format"))
+            c.Close()
+            return
+        }
     }
 
     log.Printf("WebSocket connection established for user %s in room %s", userID, roomID)

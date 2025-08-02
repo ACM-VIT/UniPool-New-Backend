@@ -72,6 +72,7 @@ func SetupRoutes(app *fiber.App) {
 	// Chat routes
 	app.Get("/chats/:user_id", chat.GetUserChats)
 	app.Get("/chat/:ride_id/messages", chat.GetRideMessages)
+	app.Get("/dm/:dm_room_id/messages", chat.GetDMMessages)  // New DM messages endpoint
 	app.Post("/chat/:ride_id/message", chat.SendMessage)
 	app.Get("/chat/connections", chat.GetActiveConnections) // Debug endpoint for WebSocket connections
 

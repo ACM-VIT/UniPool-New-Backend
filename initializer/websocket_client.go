@@ -106,18 +106,29 @@ func (c *Client) handleChatMessage(message []byte) {
 	tempID := chatMsg.TempID
 
 	go func(m ChatMessage, tempID string) {
-		rideUUID, err1 := uuid.Parse(m.RoomID)
-		senderUUID, err2 := uuid.Parse(m.SenderID)
-		if err1 != nil || err2 != nil {
-			log.Printf("UUID parse error: ride=%v, sender=%v", err1, err2)
+		senderUUID, err := uuid.Parse(m.SenderID)
+		if err != nil {
+			log.Printf("Invalid sender UUID: %v", err)
 			return
 		}
 
-		msg := models.Message{
-			RideID:   rideUUID,
-			SenderID: senderUUID,
-			Content:  m.Content,
+		var msg models.Message
+		msg.SenderID = senderUUID
+		msg.Content = m.Content
+
+		if len(m.RoomID) > 3 && m.RoomID[:3] == "dm_" {
+			msg.DMRoomID = &m.RoomID
+			log.Printf("Saving DM message to room: %s", m.RoomID)
+		} else {
+			rideUUID, err := uuid.Parse(m.RoomID)
+			if err != nil {
+				log.Printf("Invalid room UUID: %v", err)
+				return
+			}
+			msg.RideID = &rideUUID
+			log.Printf("Saving ride message to ride: %s", m.RoomID)
 		}
+
 		if err := database.Database.Db.Create(&msg).Error; err != nil {
 			log.Printf("DB save error: %v", err)
 			return

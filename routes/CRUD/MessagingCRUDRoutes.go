@@ -58,12 +58,12 @@ func CreateMessage(c *fiber.Ctx) error {
 	}
 
 	// Validate RideID
-	if message.RideID == uuid.Nil {
+	if message.RideID == nil || *message.RideID == uuid.Nil {
 		return c.Status(400).SendString("Invalid RideID")
 	}
 
 	// Check if user is part of the ride
-	isPartOfRide, err := isUserPartOfRide(database.Database.Db, message.RideID, user.ID)
+	isPartOfRide, err := isUserPartOfRide(database.Database.Db, *message.RideID, user.ID)
 	if err != nil {
 		log.Printf("Error checking ride participation: %v\n", err)
 		return c.Status(500).SendString("Error checking ride participation")
