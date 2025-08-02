@@ -24,7 +24,11 @@ func DeleteBooking(c *fiber.Ctx) error {
 	err = database.Database.Db.First(&booking, "id = ?", bookingID).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return c.Status(404).SendString("Booking not found")
+			return c.Status(404).JSON(fiber.Map{
+				"success": false,
+				"error": "Booking not found",
+				"booking_id": bookingID.String(),
+			})
 		}
 		log.Println(err)
 		return &fiber.Error{Code: 502, Message: "Error finding booking"}
@@ -37,5 +41,9 @@ func DeleteBooking(c *fiber.Ctx) error {
 	}
 
 	log.Printf("Booking with id %v deleted\n", booking.ID)
-	return c.SendStatus(204)
+	return c.Status(200).JSON(fiber.Map{
+		"success": true,
+		"message": "Booking deleted successfully",
+		"booking_id": booking.ID.String(),
+	})
 }
