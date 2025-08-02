@@ -123,6 +123,9 @@ func (c *Client) handleChatMessage(message []byte) {
 			return
 		}
 
+		m.MessageID = msg.ID.String()
+		m.Timestamp = msg.CreatedAt.Format(time.RFC3339)
+
 		if tempID != "" {
 			confirmation := ChatMessage{
 				Type:      "message",
@@ -143,15 +146,11 @@ func (c *Client) handleChatMessage(message []byte) {
 				}
 			}
 		}
+
+		if updatedMessage, err := json.Marshal(m); err == nil {
+			c.Hub.BroadcastToRoom(c.RoomID, updatedMessage)
+		}
 	}(chatMsg, tempID)
-
-	updatedMessage, err := json.Marshal(chatMsg)
-	if err != nil {
-		log.Printf("Error marshaling message: %v", err)
-		return
-	}
-
-	c.Hub.BroadcastToRoom(c.RoomID, updatedMessage)
 }
 
 func (c *Client) handleMessageStatus(message []byte) {
