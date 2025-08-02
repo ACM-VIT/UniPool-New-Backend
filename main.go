@@ -69,6 +69,7 @@ func SetupRoutes(app *fiber.App) {
 	app.Get("/chats/:user_id", chat.GetUserChats)
 	app.Get("/chat/:ride_id/messages", chat.GetRideMessages)
 	app.Post("/chat/:ride_id/message", chat.SendMessage)
+	app.Get("/chat/connections", chat.GetActiveConnections) // Debug endpoint for WebSocket connections
 
 	// Notification routes
 	app.Post("/notifications/send", notifications.SendNotification)               // Send FCM notification

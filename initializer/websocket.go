@@ -23,12 +23,41 @@ type Client struct {
 }
 
 type ChatMessage struct {
-	Type      string `json:"type"` 
-	RoomID    string `json:"room_id"`
-	SenderID  string `json:"sender_id"`
-	Content   string `json:"content"`
-	Timestamp string `json:"timestamp"`
+	Type      string      `json:"type"` 
+	RoomID    string      `json:"room_id"`
+	SenderID  string      `json:"sender_id"`
+	Content   string      `json:"content"`
+	Timestamp string      `json:"timestamp"`
+	MessageID string      `json:"message_id"`
+	TempID    string      `json:"temp_id,omitempty"`
+	Sender    *UserInfo   `json:"sender,omitempty"`
+}
+
+type MessageStatusUpdate struct {
+	Type      string `json:"type"`
 	MessageID string `json:"message_id"`
+	UserID    string `json:"user_id"`
+	Status    string `json:"status"` // "delivered" or "seen"
+}
+
+type UserPresenceMessage struct {
+	Type     string `json:"type"` // "user_joined" or "user_left"
+	UserID   string `json:"user_id"`
+	UserName string `json:"user_name"`
+	RoomID   string `json:"room_id"`
+}
+
+type TypingIndicator struct {
+	Type     string `json:"type"` // "typing"
+	UserID   string `json:"user_id"`
+	UserName string `json:"user_name"`
+	RoomID   string `json:"room_id"`
+	IsTyping bool   `json:"is_typing"`
+}
+
+type UserInfo struct {
+	Name               string `json:"name"`
+	ProfilePictureURL  string `json:"profile_picture_url"`
 }
 
 var chatHub *Hub
@@ -111,6 +140,22 @@ func (h *Hub) BroadcastToRoom(roomID string, message []byte) {
 				close(client.Send)
 				delete(h.Clients, client)
 				delete(h.Rooms[roomID], client)
+			}
+		}
+	}
+}
+
+func (h *Hub) BroadcastToRoomExceptSender(roomID string, sender *Client, message []byte) {
+	if clients, ok := h.Rooms[roomID]; ok {
+		for client := range clients {
+			if client != sender {
+				select {
+				case client.Send <- message:
+				default:
+					close(client.Send)
+					delete(h.Clients, client)
+					delete(h.Rooms[roomID], client)
+				}
 			}
 		}
 	}

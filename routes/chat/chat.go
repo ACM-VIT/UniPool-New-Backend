@@ -27,7 +27,23 @@ func GetRideMessages(c *fiber.Ctx) error {
         return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch messages"})
     }
 
-    return c.JSON(fiber.Map{"messages": messages, "count": len(messages)})
+    // Transform messages to include complete user details
+    var transformedMessages []fiber.Map
+    for _, msg := range messages {
+        transformedMessage := fiber.Map{
+            "id":         msg.ID.String(),
+            "content":    msg.Content,
+            "sender_id":  msg.SenderID.String(),
+            "timestamp":  msg.CreatedAt.Format(time.RFC3339),
+            "sender": fiber.Map{
+                "name":                msg.Sender.Name,
+                "profile_picture_url": msg.Sender.ProfilePictureURL,
+            },
+        }
+        transformedMessages = append(transformedMessages, transformedMessage)
+    }
+
+    return c.JSON(fiber.Map{"messages": transformedMessages, "count": len(transformedMessages)})
 }
 
 func SendMessage(c *fiber.Ctx) error {
@@ -44,6 +60,7 @@ func SendMessage(c *fiber.Ctx) error {
 
 	var body struct {
 		Content string `json:"content"`
+		TempID  string `json:"temp_id,omitempty"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
@@ -55,6 +72,7 @@ func SendMessage(c *fiber.Ctx) error {
 	}
 	database.Database.Db.Preload("Sender").First(&msg, msg.ID)
 
+	// Create enhanced chat message with complete user details
 	chatMsg := initializer.ChatMessage{
 		Type:      "message",
 		RoomID:    rideID,
@@ -62,7 +80,13 @@ func SendMessage(c *fiber.Ctx) error {
 		Content:   body.Content,
 		Timestamp: msg.CreatedAt.Format(time.RFC3339),
 		MessageID: msg.ID.String(),
+		TempID:    body.TempID,
+		Sender: &initializer.UserInfo{
+			Name:              user.Name,
+			ProfilePictureURL: user.ProfilePictureURL,
+		},
 	}
+
 	if hub := initializer.GetChatHub(); hub != nil {
 		if b, err := json.Marshal(chatMsg); err == nil {
 			hub.BroadcastToRoom(rideID, b)
@@ -107,7 +131,20 @@ func SendMessage(c *fiber.Ctx) error {
 		}()
 	}
 
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"message": msg})
+	// Return enhanced message structure
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"message": fiber.Map{
+			"id":         msg.ID.String(),
+			"content":    msg.Content,
+			"sender_id":  msg.SenderID.String(),
+			"ride_id":    msg.RideID.String(),
+			"timestamp":  msg.CreatedAt.Format(time.RFC3339),
+			"sender": fiber.Map{
+				"name":                user.Name,
+				"profile_picture_url": user.ProfilePictureURL,
+			},
+		},
+	})
 }
 
 func GetUserChats(c *fiber.Ctx) error {
@@ -160,6 +197,44 @@ func WebSocketHandler(c *websocket.Conn) {
         return
     }
 
+    // Validate user and room IDs
+    if _, err := uuid.Parse(userID); err != nil {
+        log.Printf("WebSocket connection rejected: invalid user_id format")
+        c.WriteMessage(websocket.CloseMessage, []byte("invalid user_id format"))
+        c.Close()
+        return
+    }
+
+    if _, err := uuid.Parse(roomID); err != nil {
+        log.Printf("WebSocket connection rejected: invalid room_id format")
+        c.WriteMessage(websocket.CloseMessage, []byte("invalid room_id format"))
+        c.Close()
+        return
+    }
+
+    log.Printf("WebSocket connection established for user %s in room %s", userID, roomID)
     initializer.NewClient(c, userID, roomID)
     select {}
+}
+
+// Debug endpoint to check active connections
+func GetActiveConnections(c *fiber.Ctx) error {
+    hub := initializer.GetChatHub()
+    if hub == nil {
+        return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WebSocket hub not initialized"})
+    }
+
+    roomStats := make(map[string]int)
+    totalConnections := 0
+
+    for roomID, clients := range hub.Rooms {
+        roomStats[roomID] = len(clients)
+        totalConnections += len(clients)
+    }
+
+    return c.JSON(fiber.Map{
+        "total_connections": totalConnections,
+        "room_stats":       roomStats,
+        "timestamp":        time.Now().Format(time.RFC3339),
+    })
 }
