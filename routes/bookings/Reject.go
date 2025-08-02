@@ -80,17 +80,6 @@ func RejectRoute(c *fiber.Ctx) error {
 		})
 	}
 
-	// Retrieve the associated ride for notification
-	var ride models.Ride
-	if err := tx.First(&ride, booking.RideID).Error; err != nil {
-		log.Printf("Error finding ride with ID %v: %v\n", booking.RideID, err)
-		tx.Rollback()
-		return c.Status(404).JSON(fiber.Map{
-			"success": false,
-			"error": "Ride not found",
-			"booking_id": bookingID,
-		})
-	}
 
 	// Commit the transaction
 	if err := tx.Commit().Error; err != nil {
