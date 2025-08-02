@@ -12,6 +12,22 @@ import (
 func AcceptRoute(c *fiber.Ctx) error {
 	bookingID := c.Params("bookingID")
 
+	userInterface := c.Locals("user")
+	if userInterface == nil {
+		return c.Status(401).JSON(fiber.Map{
+			"success": false,
+			"error": "User not authenticated",
+		})
+	}
+
+	user, ok := userInterface.(models.User)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{
+			"success": false,
+			"error": "Invalid user data",
+		})
+	}
+
 	// Start a database transaction
 	tx := database.Database.Db.Begin()
 	defer func() {
@@ -33,18 +49,6 @@ func AcceptRoute(c *fiber.Ctx) error {
 		})
 	}
 
-	// Update the booking status to "accepted"
-	if err := tx.Model(&booking).Update("request_status", "accepted").Error; err != nil {
-		log.Printf("Error updating booking status for ID %v: %v\n", bookingID, err)
-		tx.Rollback()
-		return c.Status(500).JSON(fiber.Map{
-			"success": false,
-			"error": "Error updating booking status",
-			"booking_id": bookingID,
-		})
-	}
-
-	// Retrieve the associated ride
 	var ride models.Ride
 	if err := tx.First(&ride, booking.RideID).Error; err != nil {
 		log.Printf("Error finding ride with ID %v: %v\n", booking.RideID, err)
@@ -52,6 +56,27 @@ func AcceptRoute(c *fiber.Ctx) error {
 		return c.Status(404).JSON(fiber.Map{
 			"success": false,
 			"error": "Ride not found",
+			"booking_id": bookingID,
+		})
+	}
+
+	if ride.HostUserID != user.ID {
+		log.Printf("User %v is not authorized to accept bookings for ride %v (host: %v)\n", user.ID, ride.ID, ride.HostUserID)
+		tx.Rollback()
+		return c.Status(403).JSON(fiber.Map{
+			"success": false,
+			"error": "Only the ride host can accept booking requests",
+			"booking_id": bookingID,
+		})
+	}
+
+	// Update the booking status to "accepted"
+	if err := tx.Model(&booking).Update("request_status", "accepted").Error; err != nil {
+		log.Printf("Error updating booking status for ID %v: %v\n", bookingID, err)
+		tx.Rollback()
+		return c.Status(500).JSON(fiber.Map{
+			"success": false,
+			"error": "Error updating booking status",
 			"booking_id": bookingID,
 		})
 	}
