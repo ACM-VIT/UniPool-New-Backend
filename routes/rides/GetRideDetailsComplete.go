@@ -97,6 +97,10 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 
 	var bookingDetails []BookingDetail
 	for _, booking := range bookings {
+		if booking.PassengerID.String() == ride.HostUserID.String() {
+			continue
+		}
+
 		var passenger models.User
 		if err := database.Database.Db.
 			Select("id, name, email, profile_picture_url, contact_number").
@@ -118,31 +122,13 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 		})
 	}
 
-	hostHasBooking := false
-	for _, booking := range bookingDetails {
-		if booking.PassengerID == ride.HostUserID.String() {
-			hostHasBooking = true
-			break
-		}
-	}
+	// don't add a separate host booking since the host is represented in the Host field
+	// the host should not appear in the bookings array
 
-	if !hostHasBooking {
-		hostBooking := BookingDetail{
-			ID:                         "host-booking",
-			PassengerID:                ride.HostUserID.String(),
-			RequestStatus:              "accepted",
-			CreatedAt:                  ride.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-			PassengerName:              host.Name,
-			PassengerEmail:             host.Email,
-			PassengerProfilePictureURL: host.ProfilePictureURL,
-			PassengerContactNumber:     host.ContactNumber,
-		}
-		bookingDetails = append([]BookingDetail{hostBooking}, bookingDetails...)
-	}
-
+	// count accepted bookings (excluding host, who always has a seat)
 	bookedSeats := 0
 	for _, booking := range bookingDetails {
-		if booking.RequestStatus == "accepted" && booking.ID != "host-booking" {
+		if booking.RequestStatus == "accepted" {
 			bookedSeats++
 		}
 	}
