@@ -31,8 +31,7 @@ type RideResponse struct {
 func CreateRide(c *fiber.Ctx) error {
 	var ride models.Ride
 
-	//Logs a 400 error if the JSON request is invalid
-	   err := c.BodyParser(&ride) // Parse the request body into a Ride struct
+	   err := c.BodyParser(&ride)
 	   if err != nil {
 			   log.Printf("Error parsing JSON: %v\n", err)
 			   return c.Status(400).JSON(fiber.Map{
@@ -41,7 +40,7 @@ func CreateRide(c *fiber.Ctx) error {
 	   }
 
 	//Logs a 400 error if the Ride struct is invalid
-	   err = helpers.ValidateRide(ride) // Validate the Ride struct
+	   err = helpers.ValidateRide(ride)
 	   if err != nil {
 			   log.Printf("Error validating ride: %v\n", err)
 			   return c.Status(400).JSON(fiber.Map{
@@ -323,33 +322,80 @@ func UpdateRideByID(c *fiber.Ctx) error {
 func DeleteRideByID(c *fiber.Ctx) error {
 	rideID := c.Params("id")
 
+	userInterface := c.Locals("user")
+	if userInterface == nil {
+		return c.Status(401).JSON(fiber.Map{
+			"error": "User not authenticated",
+		})
+	}
+
+	user, ok := userInterface.(models.User)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{
+			"error": "Invalid user data",
+		})
+	}
+
+	rideUUID, err := uuid.Parse(rideID)
+	if err != nil {
+		log.Printf("Invalid ride ID format: %v\n", err)
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Invalid ride ID format",
+		})
+	}
+
 	var ride models.Ride
-	result := database.Database.Db.First(&ride, rideID)
+	result := database.Database.Db.Where("id = ?", rideUUID).First(&ride)
 
-	   if result.Error == gorm.ErrRecordNotFound {
-			   log.Printf("Ride with id %v not found\n", rideID)
-			   return c.Status(404).JSON(fiber.Map{
-					   "error": "Ride not found",
-			   })
-	   } else if result.Error != nil {
-			   log.Printf("Error finding ride: %v\n", result.Error)
-			   return c.Status(500).JSON(fiber.Map{
-					   "error": "Error finding ride",
-			   })
-	   }
+	if result.Error == gorm.ErrRecordNotFound {
+		log.Printf("Ride with id %v not found\n", rideID)
+		return c.Status(404).JSON(fiber.Map{
+			"error": "Ride not found",
+		})
+	} else if result.Error != nil {
+		log.Printf("Error finding ride: %v\n", result.Error)
+		return c.Status(500).JSON(fiber.Map{
+			"error": "Error finding ride",
+		})
+	}
 
-	// Delete the ride from the database
+	if ride.HostUserID != user.ID {
+		log.Printf("User %v is not authorized to delete ride %v (host: %v)\n", user.ID, ride.ID, ride.HostUserID)
+		return c.Status(403).JSON(fiber.Map{
+			"error": "Only the ride host can delete this ride",
+		})
+	}
+
+	var acceptedBookingsCount int64
+	err = database.Database.Db.Model(&models.Booking{}).
+		Where("ride_id = ? AND request_status = ?", rideUUID, "accepted").
+		Count(&acceptedBookingsCount).Error
+	
+	if err != nil {
+		log.Printf("Error checking bookings for ride %v: %v\n", rideID, err)
+		return c.Status(500).JSON(fiber.Map{
+			"error": "Error checking ride bookings",
+		})
+	}
+
+	if acceptedBookingsCount > 0 {
+		log.Printf("Cannot delete ride %v: has %d accepted bookings\n", rideID, acceptedBookingsCount)
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Cannot delete ride with accepted bookings. Please remove all passengers first.",
+		})
+	}
+
 	result = database.Database.Db.Delete(&ride)
 
-	   if result.Error != nil {
-			   log.Printf("Error deleting ride: %v\n", result.Error)
-			   return c.Status(500).JSON(fiber.Map{
-					   "error": "Error deleting ride",
-			   })
-	   }
+	if result.Error != nil {
+		log.Printf("Error deleting ride: %v\n", result.Error)
+		return c.Status(500).JSON(fiber.Map{
+			"error": "Error deleting ride",
+		})
+	}
 
-	   log.Printf("Ride with id %v deleted\n", ride.ID)
-	   return c.Status(200).JSON(fiber.Map{
-			   "message": "Ride deleted",
-	   })
+	log.Printf("Ride with id %v deleted by user %v\n", ride.ID, user.ID)
+	return c.Status(200).JSON(fiber.Map{
+		"message": "Ride deleted successfully",
+	})
 }
