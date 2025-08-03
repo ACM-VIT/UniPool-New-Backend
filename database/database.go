@@ -89,6 +89,29 @@ func ConnectToDB() {
 func createIndexes(db *gorm.DB) error {
 	log.Println("Creating database indexes for better performance...")
 	
+	log.Println("Installing required PostgreSQL extensions...")
+	extensions := []struct {
+		name string
+		sql  string
+	}{
+		{"postgis", "CREATE EXTENSION IF NOT EXISTS postgis"},
+		{"cube", "CREATE EXTENSION IF NOT EXISTS cube"},
+		{"earthdistance", "CREATE EXTENSION IF NOT EXISTS earthdistance"},
+		{"pg_trgm", "CREATE EXTENSION IF NOT EXISTS pg_trgm"},
+	}
+	
+	extensionCount := 0
+	for _, ext := range extensions {
+		log.Printf("Installing extension: %s", ext.name)
+		if err := db.Exec(ext.sql).Error; err != nil {
+			log.Printf("Warning: Failed to install extension %s: %v", ext.name, err)
+		} else {
+			log.Printf("Successfully installed extension: %s", ext.name)
+			extensionCount++
+		}
+	}
+	log.Printf("Installed %d/%d extensions successfully", extensionCount, len(extensions))
+	
 	indexes := []struct {
 		name string
 		sql  string
