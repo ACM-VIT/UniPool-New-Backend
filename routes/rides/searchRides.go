@@ -20,13 +20,17 @@ type RideCard struct {
 	HostUserID                uuid.UUID `json:"host_user_id"`
 	HostUserName              string    `json:"host_user_name"`
 	HostUserProfilePictureURL string    `json:"host_user_profile_picture_url"`
+	HostUserYOB               uint      `json:"host_user_yob,omitempty"`
 	StartLocation             string    `json:"start_location"`
 	EndLocation               string    `json:"end_location"`
 	StartTime                 time.Time `json:"start_time"`
 	TotalSeats                uint      `json:"total_seats"`
 	BookedSeats               uint      `json:"booked_seats"`
 	TotalPrice                uint      `json:"total_price"`
-	// New fields for geographic search
+	StartLatitude             *float64  `json:"start_latitude,omitempty"`
+	StartLongitude            *float64  `json:"start_longitude,omitempty"`
+	EndLatitude               *float64  `json:"end_latitude,omitempty"`
+	EndLongitude              *float64  `json:"end_longitude,omitempty"`
 	StartDistance             *float64  `json:"start_distance,omitempty"`
 	EndDistance               *float64  `json:"end_distance,omitempty"`
 	TotalDistance             *float64  `json:"total_distance,omitempty"`
@@ -213,12 +217,17 @@ func SearchRides(c *fiber.Ctx) error {
 					HostUserID:                ride.HostUserID,
 					HostUserName:              ride.HostUser.Name,
 					HostUserProfilePictureURL: ride.HostUser.ProfilePictureURL,
+					HostUserYOB:               ride.HostUser.YOB,
 					StartLocation:             ride.StartLocation,
 					EndLocation:               ride.EndLocation,
 					StartTime:                 ride.StartTime,
 					TotalSeats:                ride.TotalSeats,
 					BookedSeats:               ride.BookedSeats,
 					TotalPrice:                ride.TotalPrice,
+					StartLatitude:             ride.StartLatitude,
+					StartLongitude:            ride.StartLongitude,
+					EndLatitude:               ride.EndLatitude,
+					EndLongitude:              ride.EndLongitude,
 					StartDistance:             startDistance,
 					EndDistance:               endDistance,
 				}
@@ -255,12 +264,17 @@ func SearchRides(c *fiber.Ctx) error {
 				HostUserID:                ride.HostUserID,
 				HostUserName:              ride.HostUser.Name,
 				HostUserProfilePictureURL: ride.HostUser.ProfilePictureURL,
+				HostUserYOB:               ride.HostUser.YOB,
 				StartLocation:             ride.StartLocation,
 				EndLocation:               ride.EndLocation,
 				StartTime:                 ride.StartTime,
 				TotalSeats:                ride.TotalSeats,
 				BookedSeats:               ride.BookedSeats,
 				TotalPrice:                ride.TotalPrice,
+				StartLatitude:             ride.StartLatitude,
+				StartLongitude:            ride.StartLongitude,
+				EndLatitude:               ride.EndLatitude,
+				EndLongitude:              ride.EndLongitude,
 			}
 
 			responseRides = append(responseRides, responseRide)
