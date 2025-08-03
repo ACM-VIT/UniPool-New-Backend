@@ -145,7 +145,8 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 	
 	for _, radius := range radiusOptions {
 		var count int64
-		testTx := database.Database.Db.Model(&models.Ride{}).Where(tx.Statement.Where.Exprs[0])
+		testTx := database.Database.Db.Model(&models.Ride{}).
+			Where("booked_seats < total_seats AND start_time > NOW()")
 		
 		if hasStartCoord {
 			testTx = testTx.Where(
@@ -421,13 +422,11 @@ func SearchRides(c *fiber.Ctx) error {
 		tx = tx.Where("(total_seats - booked_seats) >= ?", *params.MinSeats)
 	}
 	
-	radiusMeters := params.RadiusKm * 1000
 	usedRadius := params.RadiusKm
 	
 	if params.HasStartCoord || params.HasEndCoord {
 		tx, usedRadius = searchWithAdaptiveRadius(tx, params.StartLat, params.StartLon, 
 			params.EndLat, params.EndLon, params.HasStartCoord, params.HasEndCoord)
-		radiusMeters = usedRadius * 1000
 	}
 	
 	if !params.HasStartCoord && params.StartLocation != "" {
