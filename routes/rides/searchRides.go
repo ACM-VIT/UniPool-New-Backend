@@ -208,25 +208,39 @@ func calculateRelevanceScore(ride models.Ride, params SearchParams, startDist, e
 		score -= (*endDist) * 2 // -2 points per km from end
 	}
 	
-	// Time preference bonus/penalty
-	now := time.Now()
-	timeDiff := ride.StartTime.Sub(now).Hours()
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		loc = time.UTC
+	}
 	
-	if timeDiff < 0.5 {
+	now := time.Now().In(loc)
+	rideTime := ride.StartTime.In(loc)
+	
+	nowDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	rideDateStart := time.Date(rideTime.Year(), rideTime.Month(), rideTime.Day(), 0, 0, 0, 0, loc)
+	
+	timeDiff := ride.StartTime.Sub(now)
+	daysDiff := rideDateStart.Sub(nowDate).Hours() / 24
+	
+	if timeDiff.Hours() < 0.5 {
 		score -= 30 // Too soon (less than 30 minutes)
-	} else if timeDiff < 1 {
+	} else if timeDiff.Hours() < 1 {
 		score -= 10 // A bit soon
-	} else if timeDiff <= 6 {
-		score += 15 // Good timing (1-6 hours)
-	} else if timeDiff <= 24 {
-		score += 5 // Decent timing (same day)
-	} else if timeDiff > 168 { // More than a week
-		score -= (timeDiff - 168) * 0.1 // Slight penalty for far future
+	} else if daysDiff == 0 && timeDiff.Hours() <= 6 {
+		score += 15 // Good timing (same day, 1-6 hours)
+	} else if daysDiff == 0 {
+		score += 10 // Same day but later
+	} else if daysDiff == 1 {
+		score += 5 // Tomorrow
+	} else if daysDiff <= 7 {
+		score += 2 // This week
+	} else if daysDiff > 7 {
+		score -= (daysDiff - 7) * 0.5 // Penalty for far future rides
 	}
 	
 	// Preferred time matching
 	if params.PreferredTime != "" {
-		hour := ride.StartTime.Hour()
+		hour := rideTime.Hour()
 		switch params.PreferredTime {
 		case "morning":
 			if hour >= 6 && hour < 12 {
@@ -296,11 +310,32 @@ func addMatchContext(card *RideCard, params SearchParams) {
 		reasons = append(reasons, "2 seats available")
 	}
 	
-	timeDiff := card.StartTime.Sub(time.Now()).Hours()
-	if timeDiff > 1 && timeDiff < 6 {
-		reasons = append(reasons, "Good timing")
-	} else if timeDiff >= 6 && timeDiff <= 24 {
-		reasons = append(reasons, "Today's ride")
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		loc = time.UTC
+	}
+	
+	now := time.Now().In(loc)
+	rideTime := card.StartTime.In(loc)
+	
+	nowDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	rideDateStart := time.Date(rideTime.Year(), rideTime.Month(), rideTime.Day(), 0, 0, 0, 0, loc)
+	tomorrowDate := nowDate.Add(24 * time.Hour)
+	
+	timeDiff := card.StartTime.Sub(now)
+	
+	if rideDateStart.Equal(nowDate) {
+		if timeDiff.Hours() > 1 && timeDiff.Hours() < 6 {
+			reasons = append(reasons, "Good timing today")
+		} else if timeDiff.Hours() >= 0.5 {
+			reasons = append(reasons, "Today's ride")
+		} else if timeDiff.Hours() > 0 {
+			reasons = append(reasons, "Leaving soon")
+		}
+	} else if rideDateStart.Equal(tomorrowDate) {
+		reasons = append(reasons, "Tomorrow's ride")
+	} else if timeDiff.Hours() > 0 && timeDiff.Hours() <= 72 {
+		reasons = append(reasons, "This week")
 	}
 	
 	if params.MaxPrice != nil && card.TotalPrice <= *params.MaxPrice/2 {
