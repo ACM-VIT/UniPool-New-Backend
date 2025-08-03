@@ -1,7 +1,9 @@
 package users
 
 import (
+	"context"
 	"log"
+	"time"
 	"unipool-backend/database"
 	"unipool-backend/models"
 
@@ -38,6 +40,10 @@ func UpdateUserToken(c *fiber.Ctx) error {
 		})
 	}
 
+	// Add context timeout for database operations
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	// Update user's FCM token, platform, and device ID
 	updates := map[string]interface{}{
 		"fcm_token": tokenReq.Token,
@@ -48,7 +54,7 @@ func UpdateUserToken(c *fiber.Ctx) error {
 		updates["device_id"] = tokenReq.DeviceID
 	}
 
-	if err := database.Database.Db.Model(&user).Updates(updates).Error; err != nil {
+	if err := database.Database.Db.WithContext(ctx).Model(&user).Updates(updates).Error; err != nil {
 		log.Printf("Error updating user token: %v", err)
 		return c.Status(500).JSON(fiber.Map{
 			"error": "Failed to update token",
@@ -77,8 +83,12 @@ func RemoveUserToken(c *fiber.Ctx) error {
 		})
 	}
 
+	// Add context timeout for database operations
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	// Clear FCM token
-	if err := database.Database.Db.Model(&user).Updates(map[string]interface{}{
+	if err := database.Database.Db.WithContext(ctx).Model(&user).Updates(map[string]interface{}{
 		"fcm_token": "",
 		"platform":  "",
 		"device_id": "",

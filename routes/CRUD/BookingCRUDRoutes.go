@@ -1,8 +1,10 @@
 package CRUD
 
 import (
+	"context"
 	"errors"
 	"log"
+	"time"
 	"unipool-backend/database"
 	"unipool-backend/helpers"
 	"unipool-backend/models"
@@ -102,8 +104,12 @@ func GetBookingsByRideID(c *fiber.Ctx) error {
 		return &fiber.Error{Code: 400, Message: "Invalid ride ID format"}
 	}
 
+	// Add context timeout for database operations
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	var bookings []models.Booking
-	if err := database.Database.Db.Preload("Ride").Preload("Passenger").Where("ride_id = ?", rideID).Find(&bookings).Error; err != nil {
+	if err := database.Database.Db.WithContext(ctx).Preload("Ride").Preload("Passenger").Where("ride_id = ?", rideID).Find(&bookings).Error; err != nil {
 		log.Printf("Error finding bookings for ride %v: %v\n", rideID, err)
 		return c.Status(502).SendString("Error finding bookings for ride")
 	}
@@ -161,6 +167,22 @@ func GetBookingByID(c *fiber.Ctx) error {
 func UpdateBooking(c *fiber.Ctx) error {
 	idParam := c.Params("id")
 
+	userInterface := c.Locals("user")
+	if userInterface == nil {
+		return c.Status(401).JSON(fiber.Map{
+			"success": false,
+			"error": "User not authenticated",
+		})
+	}
+
+	user, ok := userInterface.(models.User)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{
+			"success": false,
+			"error": "Invalid user data",
+		})
+	}
+
 	bookingID, err := uuid.Parse(idParam)
 	if err != nil {
 		return &fiber.Error{Code: 400, Message: "Invalid booking ID format"}
@@ -184,6 +206,25 @@ func UpdateBooking(c *fiber.Ctx) error {
 		}
 		log.Println(err)
 		return &fiber.Error{Code: 502, Message: "Error finding booking"}
+	}
+
+	var ride models.Ride
+	if err := database.Database.Db.First(&ride, existingBooking.RideID).Error; err != nil {
+		log.Printf("Error finding ride with ID %v: %v\n", existingBooking.RideID, err)
+		return c.Status(404).JSON(fiber.Map{
+			"success": false,
+			"error": "Ride not found",
+			"booking_id": bookingID.String(),
+		})
+	}
+
+	if ride.HostUserID != user.ID && existingBooking.PassengerID != user.ID {
+		log.Printf("User %v is not authorized to update booking %v (host: %v, passenger: %v)\n", user.ID, existingBooking.ID, ride.HostUserID, existingBooking.PassengerID)
+		return c.Status(403).JSON(fiber.Map{
+			"success": false,
+			"error": "Only the ride host or the passenger can update this booking",
+			"booking_id": bookingID.String(),
+		})
 	}
 
 	updated := false
@@ -217,6 +258,22 @@ func UpdateBooking(c *fiber.Ctx) error {
 func DeleteBooking(c *fiber.Ctx) error {
 	idParam := c.Params("id")
 
+	userInterface := c.Locals("user")
+	if userInterface == nil {
+		return c.Status(401).JSON(fiber.Map{
+			"success": false,
+			"error": "User not authenticated",
+		})
+	}
+
+	user, ok := userInterface.(models.User)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{
+			"success": false,
+			"error": "Invalid user data",
+		})
+	}
+
 	bookingID, err := uuid.Parse(idParam)
 	if err != nil {
 		return &fiber.Error{Code: 400, Message: "Invalid booking ID format"}
@@ -230,6 +287,25 @@ func DeleteBooking(c *fiber.Ctx) error {
 		}
 		log.Println(err)
 		return &fiber.Error{Code: 502, Message: "Error finding booking"}
+	}
+
+	var ride models.Ride
+	if err := database.Database.Db.First(&ride, booking.RideID).Error; err != nil {
+		log.Printf("Error finding ride with ID %v: %v\n", booking.RideID, err)
+		return c.Status(404).JSON(fiber.Map{
+			"success": false,
+			"error": "Ride not found",
+			"booking_id": bookingID.String(),
+		})
+	}
+
+	if ride.HostUserID != user.ID && booking.PassengerID != user.ID {
+		log.Printf("User %v is not authorized to delete booking %v (host: %v, passenger: %v)\n", user.ID, booking.ID, ride.HostUserID, booking.PassengerID)
+		return c.Status(403).JSON(fiber.Map{
+			"success": false,
+			"error": "Only the ride host or the passenger can delete this booking",
+			"booking_id": bookingID.String(),
+		})
 	}
 
 	// Perform the deletion

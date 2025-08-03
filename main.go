@@ -22,27 +22,37 @@ import (
 )
 
 func SetupRoutes(app *fiber.App) {
-	app.Use(cors.New())
+	app.Use(cors.New(cors.Config{
+		AllowOrigins: "*",
+		AllowMethods: "GET,POST,HEAD,PUT,DELETE,PATCH,OPTIONS",
+		AllowHeaders: "Origin,Content-Type,Accept,Authorization,X-Requested-With",
+		AllowCredentials: false,
+	}))
 
 	// Ride CRUD routes
 	app.Post("/ride/create", rides.CreateRide)          // Creates a new ride
 	app.Get("/ride/fetch/:id", CRUD.GetRideByID)        // Gets details of a ride by it's ID
+	app.Get("/ride/details/:id", rides.GetRideDetailsComplete) // Gets complete ride details with bookings and passengers
 	app.Get("/ride/all", CRUD.GetRides)                 // Gets all rides
 	app.Put("/ride/update/:id", CRUD.UpdateRideByID)    // Updates a ride by it's ID
 	app.Delete("/ride/delete/:id", CRUD.DeleteRideByID) // Deletes a ride by it's ID
 	app.Get("ride/search", rides.SearchRides)           // Search for rides
+	
+	// Ride settings routes
+	app.Get("/ride/:ride_id/settings", rides.GetRideSettings)    // Gets ride settings
+	app.Put("/ride/:ride_id/settings", rides.UpdateRideSettings) // Updates ride settings
 
 	// User CRUD routes
-	app.Post("/user", users.CreateOrUpdateUser)                 // Create or update a user
-	app.Get("/user/details", users.GetUser)                     // Gets user details
-	app.Get("/user/all", users.GetAllUsers)                     // Gets all users
-	app.Delete("/user/delete", users.DeleteUser)                // Deletes a user
-	app.Get("/user/rides", users.FetchUserRides)                // Gets all the rides of a particular user
-	app.Get("/user/passengers", users.GetPassengers)            // Gets all passengers the user has travelled with
-	app.Get("/user/default-address", users.GetDefaultAddress)   // Gets user's default start address
-	app.Post("/user/default-address", users.SetDefaultAddress)  // Sets user's default start address
+	app.Post("/user", users.CreateOrUpdateUser)    // Create or update a user
+	app.Get("/user/details", users.GetUser)        // Gets user details
+	app.Get("/user/all", users.GetAllUsers)        // Gets all users
+	app.Get("/user/rides", users.FetchUserRides)   // Gets all the rides of a particular user
+	app.Get("/user/passengers", users.GetPassengers) // Gets all passengers the user has travelled with
+	app.Get("/user/default-address", users.GetDefaultAddress) // Gets user's default start address
+	app.Post("/user/default-address", users.SetDefaultAddress) // Sets user's default start address
 	app.Patch("/user/default-address", users.SetDefaultAddress) // PATCH also sets user's default start address
-	app.Get("/user/:id", users.GetUserByID)                     // Gets user details by ID - MUST BE LAST in /user/* routes
+	app.Get("/user/:id", users.GetUserByID)        // Gets user details by ID (must be after specific routes)
+	app.Delete("/user/delete", users.DeleteUser)   // Deletes a user
 
 	// User token management routes
 	app.Post("/users/me/token", users.UpdateUserToken)   // Update user's FCM token
@@ -62,7 +72,10 @@ func SetupRoutes(app *fiber.App) {
 	// Chat routes
 	app.Get("/chats/:user_id", chat.GetUserChats)
 	app.Get("/chat/:ride_id/messages", chat.GetRideMessages)
+	app.Get("/dm/:dm_room_id/messages", chat.GetDMMessages)  // New DM messages endpoint
 	app.Post("/chat/:ride_id/message", chat.SendMessage)
+	app.Post("/dm/:dm_room_id/message", chat.SendDMMessage)  // New DM send message endpoint
+	app.Get("/chat/connections", chat.GetActiveConnections) // Debug endpoint for WebSocket connections
 
 	// Notification routes
 	app.Post("/notifications/send", notifications.SendNotification)               // Send FCM notification
@@ -81,6 +94,13 @@ func SetupRoutes(app *fiber.App) {
 	// Ride and Passenger Info routes
 	app.Get("/rides/involved", rides.GetInvolvedRides)
 	app.Get("/passengers/all", rides.GetAllPassengers)
+
+	app.Post("/booking/create", CRUD.CreateBooking)           // Creates a new booking
+	app.Get("/booking/list", CRUD.GetBookings)                // Retrieves all bookings
+	app.Get("/booking/:id", CRUD.GetBookingByID)              // Retrieves a specific booking by its ID
+	app.Patch("/booking/update/:id", CRUD.UpdateBooking)      // Updates an existing booking
+	app.Delete("/booking/delete/:id", bookings.DeleteBooking) // Deletes a booking
+
 }
 
 func main() {
@@ -96,11 +116,12 @@ func main() {
 
 	initializer.InitializeWebsocket()
 
-	// Configure Fiber with better settings for performance
 	app := fiber.New(fiber.Config{
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  60 * time.Second,  // Increased for WebSocket connections
+		WriteTimeout: 60 * time.Second,  // Increased for WebSocket connections
+		IdleTimeout:  120 * time.Second, // Increased for long-lived connections
+		BodyLimit:    10 * 1024 * 1024,  // 10MB body limit
+		Immutable:    true,              // Better performance
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			code := fiber.StatusInternalServerError
 			if e, ok := err.(*fiber.Error); ok {
@@ -120,7 +141,33 @@ func main() {
 	// 	log.Fatalf("Failed to run migrations: %v", err)
 	// }
 
+	app.Get("/health", func(c *fiber.Ctx) error {
+		sqlDB, err := database.Database.Db.DB()
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{
+				"status": "unhealthy",
+				"database": "error getting db instance",
+				"error": err.Error(),
+			})
+		}
+		
+		if err := sqlDB.Ping(); err != nil {
+			return c.Status(500).JSON(fiber.Map{
+				"status": "unhealthy", 
+				"database": "ping failed",
+				"error": err.Error(),
+			})
+		}
+		
+		return c.JSON(fiber.Map{
+			"status": "healthy",
+			"database": "connected",
+			"timestamp": time.Now().UTC(),
+		})
+	})
+
 	app.Use(middleware.Authenticate)
+	
 	app.Get("/", func(c *fiber.Ctx) error {
 		return c.SendString("Scared of Women✌️!")
 	})

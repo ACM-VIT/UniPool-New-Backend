@@ -3,6 +3,7 @@ package database
 import (
 	"log"
 	"os"
+	"strings"
 
 	// "runtime"
 	"time"
@@ -53,14 +54,17 @@ func ConnectToDB() {
 		log.Fatalf("Error getting generic DB: %v", err)
 	}
 
-	// Supabase-optimized connection pool settings
-	poolSize := 8                              // Reduced for Supabase limits
-	sqlDB.SetMaxOpenConns(poolSize)            // Conservative limit for Supabase
-	sqlDB.SetMaxIdleConns(2)                   // Keep minimal idle connections
-	sqlDB.SetConnMaxLifetime(10 * time.Minute) // Shorter lifetime for pooled connections
-	sqlDB.SetConnMaxIdleTime(2 * time.Minute)  // Release idle connections quickly
+	poolSize := 10
+	sqlDB.SetMaxOpenConns(poolSize)            
+	sqlDB.SetMaxIdleConns(poolSize / 2)        // 5 idle connections
+	sqlDB.SetConnMaxLifetime(10 * time.Minute) // Reduced to 10 minutes
+	sqlDB.SetConnMaxIdleTime(2 * time.Minute)  // Reduced to 2 minutes
 
-	log.Println("Connected to database")
+	if err := sqlDB.Ping(); err != nil {
+		log.Fatalf("Error pinging database: %v", err)
+	}
+
+	log.Println("Connected to database and verified connection")
 
 	if os.Getenv("SHOULD_MIGRATE") == "TRUE" {
 		log.Println("Running DB Migrations...")
@@ -82,42 +86,50 @@ func ConnectToDB() {
 	Database = DbInstance{Db: db}
 }
 
-// createIndexes creates database indexes for frequently queried fields
 func createIndexes(db *gorm.DB) error {
+	log.Println("Creating database indexes for better performance...")
+	
 	indexes := []struct {
 		name string
 		sql  string
 	}{
-		// User table indexes
-		{"idx_users_email", "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)"},
-		{"idx_users_deleted_at", "CREATE INDEX IF NOT EXISTS idx_users_deleted_at ON users(deleted_at)"},
+		{"idx_users_email", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_email ON users(email)"},
+		{"idx_users_id", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_id ON users(id)"},
+		{"idx_users_deleted_at", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_users_deleted_at ON users(deleted_at)"},
 
-		// Ride table indexes
-		{"idx_rides_host_user_id", "CREATE INDEX IF NOT EXISTS idx_rides_host_user_id ON rides(host_user_id)"},
-		{"idx_rides_start_time", "CREATE INDEX IF NOT EXISTS idx_rides_start_time ON rides(start_time)"},
-		{"idx_rides_is_ongoing", "CREATE INDEX IF NOT EXISTS idx_rides_is_ongoing ON rides(is_ongoing)"},
-		{"idx_rides_deleted_at", "CREATE INDEX IF NOT EXISTS idx_rides_deleted_at ON rides(deleted_at)"},
+		{"idx_rides_host_user_id", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_host_user_id ON rides(host_user_id)"},
+		{"idx_rides_start_time", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_start_time ON rides(start_time)"},
+		{"idx_rides_is_ongoing", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_is_ongoing ON rides(is_ongoing)"},
+		{"idx_rides_deleted_at", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_deleted_at ON rides(deleted_at)"},
 
-		// Booking table indexes
-		{"idx_bookings_ride_id", "CREATE INDEX IF NOT EXISTS idx_bookings_ride_id ON bookings(ride_id)"},
-		{"idx_bookings_passenger_id", "CREATE INDEX IF NOT EXISTS idx_bookings_passenger_id ON bookings(passenger_id)"},
-		{"idx_bookings_request_status", "CREATE INDEX IF NOT EXISTS idx_bookings_request_status ON bookings(request_status)"},
-		{"idx_bookings_deleted_at", "CREATE INDEX IF NOT EXISTS idx_bookings_deleted_at ON bookings(deleted_at)"},
+		{"idx_bookings_ride_id", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_ride_id ON bookings(ride_id)"},
+		{"idx_bookings_passenger_id", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_passenger_id ON bookings(passenger_id)"},
+		{"idx_bookings_request_status", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_request_status ON bookings(request_status)"},
+		{"idx_bookings_deleted_at", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_deleted_at ON bookings(deleted_at)"},
 
-		// Composite indexes for common query patterns
-		{"idx_bookings_ride_passenger", "CREATE INDEX IF NOT EXISTS idx_bookings_ride_passenger ON bookings(ride_id, passenger_id)"},
-		{"idx_rides_host_time", "CREATE INDEX IF NOT EXISTS idx_rides_host_time ON rides(host_user_id, start_time)"},
+		{"idx_bookings_ride_passenger", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_ride_passenger ON bookings(ride_id, passenger_id)"},
+		{"idx_rides_host_time", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_host_time ON rides(host_user_id, start_time)"},
 	}
 
+	successCount := 0
 	for _, index := range indexes {
 		log.Printf("Creating index: %s", index.name)
 		if err := db.Exec(index.sql).Error; err != nil {
-			log.Printf("Failed to create index %s: %v", index.name, err)
-			// Continue with other indexes even if one fails
+			// Remove CONCURRENTLY and try again if it fails
+			fallbackSQL := strings.Replace(index.sql, "CONCURRENTLY ", "", 1)
+			log.Printf("Retrying index %s without CONCURRENTLY", index.name)
+			if err := db.Exec(fallbackSQL).Error; err != nil {
+				log.Printf("Failed to create index %s: %v", index.name, err)
+			} else {
+				log.Printf("Successfully created index: %s (fallback)", index.name)
+				successCount++
+			}
 		} else {
 			log.Printf("Successfully created index: %s", index.name)
+			successCount++
 		}
 	}
 
+	log.Printf("Created %d/%d indexes successfully", successCount, len(indexes))
 	return nil
 }

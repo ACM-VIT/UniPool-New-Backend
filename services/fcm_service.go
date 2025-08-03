@@ -152,6 +152,19 @@ func (f *FCMService) SendChatMessageNotification(userID uuid.UUID, senderName, m
 	return f.SendNotification(userID, title, body, data)
 }
 
+func (f *FCMService) SendDirectMessageNotification(userID uuid.UUID, senderName, message string) error {
+	title := fmt.Sprintf("New message from %s", senderName)
+	body := fmt.Sprintf("💬 %s", message)
+	if len(body) > 100 {
+		body = body[:97] + "..."
+	}
+	data := map[string]string{
+		"type":    "direct_message",
+		"action":  "open_dm",
+	}
+	return f.SendNotification(userID, title, body, data)
+}
+
 func (f *FCMService) SendRideReminderNotification(userID uuid.UUID, rideRoute string, timeUntilRide string, rideID uuid.UUID) error {
 	title := "Ride Reminder"
 	body := fmt.Sprintf("Your ride from %s starts in %s", rideRoute, timeUntilRide)
