@@ -12,17 +12,21 @@ import (
 )
 
 type RideResponse struct {
-	RideID        uuid.UUID `json:"id"`
-	HostUserID    uuid.UUID `json:"host_user_id"`
-	HostUserName  string    `json:"host_user_name"`
-	StartLocation string    `json:"start_location"`
-	EndLocation   string    `json:"end_location"`
-	StartTime     time.Time `json:"start_time"`
-	TotalSeats    uint      `json:"total_seats"`
-	BookedSeats   uint      `json:"booked_seats"`
-	TotalPrice    uint      `json:"total_price"`
-	IsOngoing     uint      `json:"is_ongoing"`
-	IsSameGender  uint      `json:"is_same_gender"`
+	RideID         uuid.UUID `json:"id"`
+	HostUserID     uuid.UUID `json:"host_user_id"`
+	HostUserName   string    `json:"host_user_name"`
+	StartLocation  string    `json:"start_location"`
+	EndLocation    string    `json:"end_location"`
+	StartTime      time.Time `json:"start_time"`
+	TotalSeats     uint      `json:"total_seats"`
+	BookedSeats    uint      `json:"booked_seats"`
+	TotalPrice     uint      `json:"total_price"`
+	IsOngoing      uint      `json:"is_ongoing"`
+	IsSameGender   uint      `json:"is_same_gender"`
+	StartLatitude  *float64  `json:"start_latitude,omitempty"`
+	StartLongitude *float64  `json:"start_longitude,omitempty"`
+	EndLatitude    *float64  `json:"end_latitude,omitempty"`
+	EndLongitude   *float64  `json:"end_longitude,omitempty"`
 }
 
 func CreateRide(c *fiber.Ctx) error {
@@ -113,17 +117,21 @@ func CreateRide(c *fiber.Ctx) error {
 
 	// Create the ride response
 	rideResponse := RideResponse{
-		RideID:        ride.ID,
-		HostUserID:    ride.HostUserID,
-		HostUserName:  hostUser.Name,
-		StartLocation: ride.StartLocation,
-		EndLocation:   ride.EndLocation,
-		StartTime:     ride.StartTime,
-		TotalSeats:    ride.TotalSeats,
-		BookedSeats:   ride.BookedSeats,
-		TotalPrice:    ride.TotalPrice,
-		IsOngoing:     ride.IsOngoing,
-		IsSameGender:  ride.IsSameGender,
+		RideID:         ride.ID,
+		HostUserID:     ride.HostUserID,
+		HostUserName:   hostUser.Name,
+		StartLocation:  ride.StartLocation,
+		EndLocation:    ride.EndLocation,
+		StartTime:      ride.StartTime,
+		TotalSeats:     ride.TotalSeats,
+		BookedSeats:    ride.BookedSeats,
+		TotalPrice:     ride.TotalPrice,
+		IsOngoing:      ride.IsOngoing,
+		IsSameGender:   ride.IsSameGender,
+		StartLatitude:  ride.StartLatitude,
+		StartLongitude: ride.StartLongitude,
+		EndLatitude:    ride.EndLatitude,
+		EndLongitude:   ride.EndLongitude,
 	}
 
 	log.Printf("Ride with id %v created\n", ride.ID)
