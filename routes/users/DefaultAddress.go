@@ -14,7 +14,7 @@ import (
 func GetDefaultAddress(c *fiber.Ctx) error {
 	user, ok := c.Locals("user").(models.User)
 	if !ok {
-		return c.Status(401).SendString("Unauthorized")
+		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized"})
 	}
 	return c.Status(200).JSON(fiber.Map{"address": user.DefaultAddress})
 }
@@ -23,7 +23,7 @@ func GetDefaultAddress(c *fiber.Ctx) error {
 func SetDefaultAddress(c *fiber.Ctx) error {
 	user, ok := c.Locals("user").(models.User)
 	if !ok {
-		return c.Status(401).SendString("Unauthorized")
+		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized"})
 	}
 
 	type AddressPayload struct {
@@ -31,11 +31,11 @@ func SetDefaultAddress(c *fiber.Ctx) error {
 	}
 	var payload AddressPayload
 	if err := c.BodyParser(&payload); err != nil {
-		return c.Status(400).SendString("Invalid JSON body")
+		return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON body"})
 	}
 
 	if payload.Address == "" {
-		return c.Status(400).SendString("Address cannot be empty")
+		return c.Status(400).JSON(fiber.Map{"error": "Address cannot be empty"})
 	}
 
 	// Add context timeout for database operations
@@ -44,7 +44,7 @@ func SetDefaultAddress(c *fiber.Ctx) error {
 
 	if err := database.Database.Db.WithContext(ctx).Model(&models.User{}).Where("id = ?", user.ID).Update("default_address", payload.Address).Error; err != nil {
 		log.Printf("Error updating address: %v\n", err)
-		return c.Status(500).SendString("Failed to update address")
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to update address"})
 	}
 
 	return c.Status(200).JSON(fiber.Map{"status": "OK"})
