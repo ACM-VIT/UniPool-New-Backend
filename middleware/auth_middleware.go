@@ -69,7 +69,6 @@ func Authenticate(c *fiber.Ctx) error {
 
 	// Add retry logic for database queries
 	maxRetries := 3
-	var err error
 	
 	for i := 0; i < maxRetries; i++ {
 		if i > 0 {
