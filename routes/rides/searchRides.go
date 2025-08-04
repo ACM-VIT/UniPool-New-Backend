@@ -102,13 +102,13 @@ func buildLocationQuery(tx *gorm.DB, location string, hasCoord bool, lat, lon fl
 	if hasCoord {
 		if isStart {
 			return tx.Where(
-				"earth_distance(ll_to_earth(?, ?), ll_to_earth(start_latitude, start_longitude)) <= ?",
-				lat, lon, radiusMeters,
+				"ST_DWithin(ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, ST_SetSRID(ST_MakePoint(start_longitude, start_latitude), 4326)::geography, ?)",
+				lon, lat, radiusMeters,
 			)
 		} else {
 			return tx.Where(
-				"earth_distance(ll_to_earth(?, ?), ll_to_earth(end_latitude, end_longitude)) <= ?",
-				lat, lon, radiusMeters,
+				"ST_DWithin(ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, ST_SetSRID(ST_MakePoint(end_longitude, end_latitude), 4326)::geography, ?)",
+				lon, lat, radiusMeters,
 			)
 		}
 	}
@@ -150,14 +150,14 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 		
 		if hasStartCoord {
 			testTx = testTx.Where(
-				"earth_distance(ll_to_earth(?, ?), ll_to_earth(start_latitude, start_longitude)) <= ?",
-				startLat, startLon, radius,
+				"ST_DWithin(ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, ST_SetSRID(ST_MakePoint(start_longitude, start_latitude), 4326)::geography, ?)",
+				startLon, startLat, radius,
 			)
 		}
 		if hasEndCoord {
 			testTx = testTx.Where(
-				"earth_distance(ll_to_earth(?, ?), ll_to_earth(end_latitude, end_longitude)) <= ?",
-				endLat, endLon, radius,
+				"ST_DWithin(ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, ST_SetSRID(ST_MakePoint(end_longitude, end_latitude), 4326)::geography, ?)",
+				endLon, endLat, radius,
 			)
 		}
 		
@@ -166,14 +166,14 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 			finalTx := tx
 			if hasStartCoord {
 				finalTx = finalTx.Where(
-					"earth_distance(ll_to_earth(?, ?), ll_to_earth(start_latitude, start_longitude)) <= ?",
-					startLat, startLon, radius,
+					"ST_DWithin(ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, ST_SetSRID(ST_MakePoint(start_longitude, start_latitude), 4326)::geography, ?)",
+					startLon, startLat, radius,
 				)
 			}
 			if hasEndCoord {
 				finalTx = finalTx.Where(
-					"earth_distance(ll_to_earth(?, ?), ll_to_earth(end_latitude, end_longitude)) <= ?",
-					endLat, endLon, radius,
+					"ST_DWithin(ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, ST_SetSRID(ST_MakePoint(end_longitude, end_latitude), 4326)::geography, ?)",
+					endLon, endLat, radius,
 				)
 			}
 			return finalTx, radius / 1000 // Return radius in km
@@ -184,14 +184,14 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 	finalTx := tx
 	if hasStartCoord {
 		finalTx = finalTx.Where(
-			"earth_distance(ll_to_earth(?, ?), ll_to_earth(start_latitude, start_longitude)) <= ?",
-			startLat, startLon, 50000,
+			"ST_DWithin(ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, ST_SetSRID(ST_MakePoint(start_longitude, start_latitude), 4326)::geography, ?)",
+			startLon, startLat, 50000,
 		)
 	}
 	if hasEndCoord {
 		finalTx = finalTx.Where(
-			"earth_distance(ll_to_earth(?, ?), ll_to_earth(end_latitude, end_longitude)) <= ?",
-			endLat, endLon, 50000,
+			"ST_DWithin(ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, ST_SetSRID(ST_MakePoint(end_longitude, end_latitude), 4326)::geography, ?)",
+			endLon, endLat, 50000,
 		)
 	}
 	return finalTx, 50.0
