@@ -57,6 +57,15 @@ func DeleteUser(c *fiber.Ctx) error {
 		})
 	}
 
+	if err := handleUserMetadata(tx, user.ID); err != nil {
+		tx.Rollback()
+		log.Println("Error handling user metadata:", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error":   true,
+			"message": "Error deleting user metadata: " + err.Error(),
+		})
+	}
+
 	// Finally delete the user
 	if err := tx.Delete(&user).Error; err != nil {
 		tx.Rollback()
@@ -195,5 +204,15 @@ func handleUserMessages(tx *gorm.DB, userID uuid.UUID) error {
 	}
 
 	log.Printf("Updated messages for deleted user %s", userID)
+	return nil
+}
+
+func handleUserMetadata(tx *gorm.DB, userID uuid.UUID) error {
+	// Delete user metadata records
+	if err := tx.Where("user_id = ?", userID).Delete(&models.UserMetadata{}).Error; err != nil {
+		return err
+	}
+
+	log.Printf("Deleted user metadata for user %s", userID)
 	return nil
 }

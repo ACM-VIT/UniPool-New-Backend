@@ -61,15 +61,32 @@ func Authenticate(c *fiber.Ctx) error {
 
 	// Check if the user exists in the database (without global activation scope)
 	var user models.User
-	//log.Printf("Searching for user with email: %s", email)
+	log.Printf("Searching for user with email: %s", email)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Increase timeout to 5 seconds and add retry logic
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := database.Database.Db.WithContext(ctx).
-		Select("id", "email", "name", "profile_picture_url", "contact_number", "gender", "yob", "default_address", "created_at", "updated_at").
-		Where("email = ?", email).
-		First(&user).Error; err != nil {
+	// Add retry logic for database queries
+	maxRetries := 3
+	var err error
+	
+	for i := 0; i < maxRetries; i++ {
+		if i > 0 {
+			log.Printf("Retrying database query for user: %s (attempt %d/%d)", email, i+1, maxRetries)
+			time.Sleep(time.Duration(i) * 100 * time.Millisecond) // Progressive backoff
+		}
+		
+		err = database.Database.Db.WithContext(ctx).
+			Select("id", "email", "name", "profile_picture_url", "contact_number", "gender", "yob", "default_address", "created_at", "updated_at").
+			Where("email = ?", email).
+			First(&user).Error
+			
+		if err == nil {
+			log.Printf("Found existing user: %s (ID: %s)", user.Email, user.ID)
+			c.Locals("user", user)
+			break
+		}
 		
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Printf("User not found in database, creating new user entry for: %s", email)
@@ -78,16 +95,24 @@ func Authenticate(c *fiber.Ctx) error {
 				"name":                name,
 				"profile_picture_url": profilePicture,
 			})
-		} else if errors.Is(err, context.DeadlineExceeded) {
-			log.Printf("Database query timeout for user: %s", email)
-			return c.Status(500).JSON(fiber.Map{"error": "Database timeout - please try again"})
-		} else {
+			break
+		}
+		
+		if errors.Is(err, context.DeadlineExceeded) && i < maxRetries-1 {
+			log.Printf("Database query timeout for user: %s (attempt %d/%d), retrying...", email, i+1, maxRetries)
+			continue
+		}
+		
+		if !errors.Is(err, context.DeadlineExceeded) {
 			log.Printf("Database error for user %s: %v", email, err)
 			return c.Status(500).JSON(fiber.Map{"error": "Database error"})
 		}
-	} else {
-		log.Printf("Found existing user: %s (ID: %s)", user.Email, user.ID)
-		c.Locals("user", user)
+	}
+	
+	// If all retries failed with timeout
+	if errors.Is(err, context.DeadlineExceeded) {
+		log.Printf("Database query failed after %d retries for user: %s", maxRetries, email)
+		return c.Status(500).JSON(fiber.Map{"error": "Database timeout - please try again later"})
 	}
 
 	return c.Next()
