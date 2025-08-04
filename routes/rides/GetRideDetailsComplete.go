@@ -28,17 +28,21 @@ type BookingDetail struct {
 }
 
 type RideDetailsComplete struct {
-	ID            string `json:"id"`
-	HostUserID    string `json:"host_user_id"`
-	HostUserName  string `json:"host_user_name"`
-	StartLocation string `json:"start_location"`
-	EndLocation   string `json:"end_location"`
-	StartTime     string `json:"start_time"`
-	TotalPrice    int    `json:"total_price"`
-	TotalSeats    int    `json:"total_seats"`
-	BookedSeats   int    `json:"booked_seats"`
-	IsOngoing     bool   `json:"is_ongoing"`
-	CreatedAt     string `json:"created_at"`
+	ID             string   `json:"id"`
+	HostUserID     string   `json:"host_user_id"`
+	HostUserName   string   `json:"host_user_name"`
+	StartLocation  string   `json:"start_location"`
+	EndLocation    string   `json:"end_location"`
+	StartLatitude  *float64 `json:"start_latitude,omitempty"`
+	StartLongitude *float64 `json:"start_longitude,omitempty"`
+	EndLatitude    *float64 `json:"end_latitude,omitempty"`
+	EndLongitude   *float64 `json:"end_longitude,omitempty"`
+	StartTime      string   `json:"start_time"`
+	TotalPrice     int      `json:"total_price"`
+	TotalSeats     int      `json:"total_seats"`
+	BookedSeats    int      `json:"booked_seats"`
+	IsOngoing      bool     `json:"is_ongoing"`
+	CreatedAt      string   `json:"created_at"`
 
 	IsUserHost bool `json:"is_user_host"`
 
@@ -134,18 +138,22 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 	}
 
 	response := RideDetailsComplete{
-		ID:            ride.ID.String(),
-		HostUserID:    ride.HostUserID.String(),
-		HostUserName:  host.Name,
-		StartLocation: ride.StartLocation,
-		EndLocation:   ride.EndLocation,
-		StartTime:     ride.StartTime.Format("2006-01-02T15:04:05Z07:00"),
-		TotalPrice:    int(ride.TotalPrice),
-		TotalSeats:    int(ride.TotalSeats),
-		BookedSeats:   bookedSeats,
-		IsOngoing:     ride.IsOngoing > 0,
-		CreatedAt:     ride.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-		IsUserHost:    user.ID == ride.HostUserID,
+		ID:             ride.ID.String(),
+		HostUserID:     ride.HostUserID.String(),
+		HostUserName:   host.Name,
+		StartLocation:  ride.StartLocation,
+		EndLocation:    ride.EndLocation,
+		StartLatitude:  ride.StartLatitude,
+		StartLongitude: ride.StartLongitude,
+		EndLatitude:    ride.EndLatitude,
+		EndLongitude:   ride.EndLongitude,
+		StartTime:      ride.StartTime.Format("2006-01-02T15:04:05Z07:00"),
+		TotalPrice:     int(ride.TotalPrice),
+		TotalSeats:     int(ride.TotalSeats),
+		BookedSeats:    bookedSeats,
+		IsOngoing:      ride.IsOngoing > 0,
+		CreatedAt:      ride.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		IsUserHost:     user.ID == ride.HostUserID,
 		Host: PassengerDetail{
 			ID:                host.ID.String(),
 			Name:              host.Name,
