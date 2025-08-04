@@ -34,7 +34,7 @@ func (rs RideSettings) Value() (driver.Value, error) {
 type Ride struct {
 	BaseModel
 	HostUserID     uuid.UUID     `gorm:"not null" json:"host_user_id" valid:"required~Host user ID is required"`
-	HostUser       User          `gorm:"foreignKey:HostUserID;references:ID;constraint:OnDelete:SET NULL;" json:"host_user" valid:"-"`
+	HostUser       User          `gorm:"foreignKey:HostUserID;references:ID;constraint:OnDelete:CASCADE;" json:"host_user" valid:"-"`
 	StartLocation  string        `gorm:"size:255;not null;" json:"start_location" valid:"required~Start location is required"`
 	EndLocation    string        `gorm:"size:255;not null;" json:"end_location" valid:"required~End location is required"`
 	StartLatitude  *float64      `gorm:"type:decimal(10,8);" json:"start_latitude,omitempty"`
