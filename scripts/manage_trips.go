@@ -90,7 +90,6 @@ func main() {
 		fmt.Println("No trips found.")
 	}
 
-	// 2. Delete all trips for this user
 	fmt.Print("\nDelete all trips for this user? (y/N): ")
 	delInput, _ := reader.ReadString('\n')
 	delInput = strings.TrimSpace(strings.ToLower(delInput))
