@@ -102,9 +102,9 @@ func handleHostedRides(tx *gorm.DB, userID uuid.UUID) error {
 			return errors.New("cannot delete account while hosting an ongoing ride")
 		}
 		
-		if ride.StartTime.Before(time.Now().Add(24 * time.Hour)) && ride.StartTime.After(time.Now()) {
-			return errors.New("cannot delete account with rides starting within 24 hours")
-		}
+		// if ride.StartTime.Before(time.Now().Add(24 * time.Hour)) && ride.StartTime.After(time.Now()) {
+		// 	return errors.New("cannot delete account with rides starting within 24 hours")
+		// }
 
 		var acceptedBookings []models.Booking
 		if err := tx.Where("ride_id = ? AND request_status = ?", ride.ID, "accepted").
