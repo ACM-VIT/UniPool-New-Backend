@@ -456,6 +456,119 @@ func SearchRides(c *fiber.Ctx) error {
 	log.Printf("Search params: StartLocation=%s, EndLocation=%s, StartCoord=(%f,%f), EndCoord=(%f,%f), HasStartCoord=%v, HasEndCoord=%v", 
 		params.StartLocation, params.EndLocation, params.StartLat, params.StartLon, params.EndLat, params.EndLon, params.HasStartCoord, params.HasEndCoord)
 	
+	if params.HasStartCoord || params.HasEndCoord {
+		var nearestRides []struct {
+			StartLocation string   `json:"start_location"`
+			EndLocation   string   `json:"end_location"`
+			StartLatitude *float64 `json:"start_latitude"`
+			StartLongitude *float64 `json:"start_longitude"`
+			EndLatitude   *float64 `json:"end_latitude"`
+			EndLongitude  *float64 `json:"end_longitude"`
+			StartDistance *float64 `json:"start_distance"`
+			EndDistance   *float64 `json:"end_distance"`
+		}
+		
+		query := `
+			SELECT 
+				start_location, 
+				end_location, 
+				start_latitude, 
+				start_longitude, 
+				end_latitude, 
+				end_longitude`
+		
+		if params.HasStartCoord {
+			query += `,
+				ST_Distance(
+					ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography,
+					ST_SetSRID(ST_MakePoint(start_longitude, start_latitude), 4326)::geography
+				) / 1000.0 as start_distance`
+		} else {
+			query += `, NULL as start_distance`
+		}
+		
+		if params.HasEndCoord {
+			query += `,
+				ST_Distance(
+					ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography,
+					ST_SetSRID(ST_MakePoint(end_longitude, end_latitude), 4326)::geography
+				) / 1000.0 as end_distance`
+		} else {
+			query += `, NULL as end_distance`
+		}
+		
+		query += `
+			FROM rides 
+			WHERE booked_seats < total_seats 
+				AND start_time > NOW() 
+				AND (start_latitude IS NOT NULL OR end_latitude IS NOT NULL)
+			ORDER BY `
+		
+		if params.HasStartCoord && params.HasEndCoord {
+			query += `LEAST(
+				COALESCE(ST_Distance(
+					ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography,
+					ST_SetSRID(ST_MakePoint(start_longitude, start_latitude), 4326)::geography
+				), 999999999),
+				COALESCE(ST_Distance(
+					ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography,
+					ST_SetSRID(ST_MakePoint(end_longitude, end_latitude), 4326)::geography
+				), 999999999)
+			) ASC`
+		} else if params.HasStartCoord {
+			query += `ST_Distance(
+				ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography,
+				ST_SetSRID(ST_MakePoint(start_longitude, start_latitude), 4326)::geography
+			) ASC`
+		} else if params.HasEndCoord {
+			query += `ST_Distance(
+				ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography,
+				ST_SetSRID(ST_MakePoint(end_longitude, end_latitude), 4326)::geography
+			) ASC`
+		}
+		
+		query += ` LIMIT 5`
+		
+		var queryArgs []interface{}
+		if params.HasStartCoord {
+			queryArgs = append(queryArgs, params.StartLon, params.StartLat)
+		}
+		if params.HasEndCoord {
+			queryArgs = append(queryArgs, params.EndLon, params.EndLat)
+		}
+		if params.HasStartCoord && params.HasEndCoord {
+			queryArgs = append(queryArgs, params.StartLon, params.StartLat, params.EndLon, params.EndLat)
+		} else if params.HasStartCoord {
+			queryArgs = append(queryArgs, params.StartLon, params.StartLat)
+		} else if params.HasEndCoord {
+			queryArgs = append(queryArgs, params.EndLon, params.EndLat)
+		}
+		
+		if err := database.Database.Db.Raw(query, queryArgs...).Scan(&nearestRides).Error; err == nil && len(nearestRides) > 0 {
+			log.Printf("=== NEAREST RIDES IN DATABASE ===")
+			for i, ride := range nearestRides {
+				log.Printf("  %d. Start: %s (%.6f, %.6f) End: %s (%.6f, %.6f)", 
+					i+1, 
+					ride.StartLocation,
+					func() float64 { if ride.StartLatitude != nil { return *ride.StartLatitude } else { return 0 } }(),
+					func() float64 { if ride.StartLongitude != nil { return *ride.StartLongitude } else { return 0 } }(),
+					ride.EndLocation,
+					func() float64 { if ride.EndLatitude != nil { return *ride.EndLatitude } else { return 0 } }(),
+					func() float64 { if ride.EndLongitude != nil { return *ride.EndLongitude } else { return 0 } }())
+				
+				if ride.StartDistance != nil {
+					log.Printf("     Start distance: %.2f km", *ride.StartDistance)
+				}
+				if ride.EndDistance != nil {
+					log.Printf("     End distance: %.2f km", *ride.EndDistance)
+				}
+			}
+			log.Printf("=== END NEAREST RIDES ===")
+		} else {
+			log.Printf("No rides found in database with coordinates or error: %v", err)
+		}
+	}
+	
 	tx := database.Database.Db.
 		Model(&models.Ride{}).
 		Where("booked_seats < total_seats AND start_time > NOW()").
