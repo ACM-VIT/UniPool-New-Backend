@@ -2,8 +2,8 @@ package rides
 
 import (
 	"errors"
+	"fmt"
 	"log"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -123,17 +123,35 @@ func buildLocationQuery(tx *gorm.DB, location string, hasCoord bool, lat, lon fl
 		locationColumn = "end_location"
 	}
 	
-	return tx.Where(
-		locationColumn+" ILIKE ? OR "+
-		locationColumn+" ILIKE ? OR "+
-		"similarity("+locationColumn+", ?) > ? OR "+
-		locationColumn+" ~ ?",
+	log.Printf("Text search on %s for: %s", locationColumn, normalizedLocation)
+	
+	words := strings.Fields(normalizedLocation)
+	
+	conditions := []string{
+		fmt.Sprintf("%s ILIKE ?", locationColumn),    // exact match
+		fmt.Sprintf("%s ILIKE ?", locationColumn),    // contains match
+	}
+	values := []interface{}{
 		normalizedLocation,
-		"%"+normalizedLocation+"%",
-		location,
-		0.3,
-		`\y`+regexp.QuoteMeta(normalizedLocation)+`\y`,
-	)
+		"%" + normalizedLocation + "%",
+	}
+	
+	for _, word := range words {
+		if len(word) > 2 {
+			conditions = append(conditions, fmt.Sprintf("%s ILIKE ?", locationColumn))
+			values = append(values, "%"+word+"%")
+		}
+	}
+	
+	if len(words) > 0 {
+		conditions = append(conditions, fmt.Sprintf("similarity(%s, ?) > ?", locationColumn))
+		values = append(values, location, 0.2)
+	}
+	
+	whereClause := strings.Join(conditions, " OR ")
+	log.Printf("Location WHERE clause: (%s)", whereClause)
+	
+	return tx.Where(fmt.Sprintf("(%s)", whereClause), values...)
 }
 
 func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon float64, hasStartCoord, hasEndCoord bool) (*gorm.DB, float64) {
@@ -435,6 +453,9 @@ func SearchRides(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": err.Error()})
 	}
 	
+	log.Printf("Search params: StartLocation=%s, EndLocation=%s, StartCoord=(%f,%f), EndCoord=(%f,%f), HasStartCoord=%v, HasEndCoord=%v", 
+		params.StartLocation, params.EndLocation, params.StartLat, params.StartLon, params.EndLat, params.EndLon, params.HasStartCoord, params.HasEndCoord)
+	
 	tx := database.Database.Db.
 		Model(&models.Ride{}).
 		Where("booked_seats < total_seats AND start_time > NOW()").
@@ -458,17 +479,67 @@ func SearchRides(c *fiber.Ctx) error {
 	}
 	
 	usedRadius := params.RadiusKm
+	var useCoordinateSearch bool
 	
 	if params.HasStartCoord || params.HasEndCoord {
-		tx, usedRadius = searchWithAdaptiveRadius(tx, params.StartLat, params.StartLon, 
-			params.EndLat, params.EndLon, params.HasStartCoord, params.HasEndCoord)
+		coordinateTx := tx
+		
+		if params.HasStartCoord {
+			coordinateTx = coordinateTx.Where(
+				"ST_DWithin(ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, ST_SetSRID(ST_MakePoint(start_longitude, start_latitude), 4326)::geography, ?) OR start_longitude IS NULL OR start_latitude IS NULL",
+				params.StartLon, params.StartLat, usedRadius*1000,
+			)
+		}
+		if params.HasEndCoord {
+			coordinateTx = coordinateTx.Where(
+				"ST_DWithin(ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, ST_SetSRID(ST_MakePoint(end_longitude, end_latitude), 4326)::geography, ?) OR end_longitude IS NULL OR end_latitude IS NULL",
+				params.EndLon, params.EndLat, usedRadius*1000,
+			)
+		}
+		
+		var testCount int64
+		coordinateTx.Count(&testCount)
+		log.Printf("Coordinate-based search found %d results with radius %.1fkm", testCount, usedRadius)
+		
+		if testCount > 0 {
+			tx = coordinateTx
+			useCoordinateSearch = true
+		}
 	}
 	
-	if !params.HasStartCoord && params.StartLocation != "" {
-		tx = buildLocationQuery(tx, params.StartLocation, false, 0, 0, 0, true)
-	}
-	if !params.HasEndCoord && params.EndLocation != "" {
-		tx = buildLocationQuery(tx, params.EndLocation, false, 0, 0, 0, false)
+	if (!useCoordinateSearch || true) && (params.StartLocation != "" || params.EndLocation != "") {
+		textTx := database.Database.Db.
+			Model(&models.Ride{}).
+			Where("booked_seats < total_seats AND start_time > NOW()").
+			Where("host_user_id != ?", params.User.ID)
+		
+		if params.Date != "" {
+			startTime, endTime, _ := parseTimeWindow(params.Date, params.PreferredTime)
+			textTx = textTx.Where("start_time BETWEEN ? AND ?", startTime, endTime)
+		}
+		if params.MaxPrice != nil {
+			textTx = textTx.Where("total_price <= ?", *params.MaxPrice)
+		}
+		if params.MinSeats != nil {
+			textTx = textTx.Where("(total_seats - booked_seats) >= ?", *params.MinSeats)
+		}
+		
+		if params.StartLocation != "" {
+			textTx = buildLocationQuery(textTx, params.StartLocation, false, 0, 0, 0, true)
+		}
+		if params.EndLocation != "" {
+			textTx = buildLocationQuery(textTx, params.EndLocation, false, 0, 0, 0, false)
+		}
+		
+		var textCount int64
+		textTx.Count(&textCount)
+		log.Printf("Text-based search found %d results", textCount)
+		
+		// Use text search if coordinate search failed or supplement it
+		if !useCoordinateSearch {
+			tx = textTx
+			log.Printf("Using text-based search")
+		}
 	}
 	
 	var rides []models.Ride
@@ -478,7 +549,55 @@ func SearchRides(c *fiber.Ctx) error {
 		Limit(params.Limit * 2).
 		Offset(params.Offset).
 		Find(&rides).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		log.Printf("Database error: %v", err)
 		return c.Status(500).JSON(fiber.Map{"error": "Error fetching rides"})
+	}
+	
+	log.Printf("Query returned %d rides", len(rides))
+	
+	if len(rides) == 0 && (params.StartLocation != "" || params.EndLocation != "") {
+		log.Printf("No results found, trying fallback search...")
+		
+		fallbackTx := database.Database.Db.
+			Model(&models.Ride{}).
+			Where("booked_seats < total_seats AND start_time > NOW()").
+			Where("host_user_id != ?", params.User.ID)
+		
+		if params.Date != "" {
+			startTime, endTime, _ := parseTimeWindow(params.Date, params.PreferredTime)
+			fallbackTx = fallbackTx.Where("start_time BETWEEN ? AND ?", startTime, endTime)
+		}
+		
+		if params.StartLocation != "" {
+			words := strings.Fields(strings.ToLower(params.StartLocation))
+			for _, word := range words {
+				if len(word) > 3 {
+					fallbackTx = fallbackTx.Where("LOWER(start_location) LIKE ?", "%"+word+"%")
+					break
+				}
+			}
+		}
+		
+		if params.EndLocation != "" {
+			words := strings.Fields(strings.ToLower(params.EndLocation))
+			for _, word := range words {
+				if len(word) > 3 {
+					fallbackTx = fallbackTx.Where("LOWER(end_location) LIKE ?", "%"+word+"%")
+					break
+				}
+			}
+		}
+		
+		if err := fallbackTx.
+			Preload("HostUser").
+			Order("start_time ASC").
+			Limit(params.Limit * 2).
+			Offset(params.Offset).
+			Find(&rides).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			log.Printf("Fallback search error: %v", err)
+		} else {
+			log.Printf("Fallback search returned %d rides", len(rides))
+		}
 	}
 	
 	response := make([]RideCard, 0, len(rides))
@@ -566,10 +685,20 @@ func SearchRides(c *fiber.Ctx) error {
 	
 	return c.Status(200).JSON(fiber.Map{
 		"rides": response,
-		"meta": fiber.Map{
-			"total_found": len(response),
-			"used_radius_km": usedRadius,
-			"sort_by": params.SortBy,
+		"total_found": len(response),
+		"used_radius_km": usedRadius,
+		"sort_by": params.SortBy,
+		"search_method": func() string {
+			if useCoordinateSearch {
+				return "coordinate"
+			}
+			return "text"
+		}(),
+		"debug": fiber.Map{
+			"has_start_coord": params.HasStartCoord,
+			"has_end_coord": params.HasEndCoord,
+			"start_location": params.StartLocation,
+			"end_location": params.EndLocation,
 		},
 	})
 }
