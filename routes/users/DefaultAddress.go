@@ -1,0 +1,51 @@
+package users
+
+import (
+	"context"
+	"log"
+	"time"
+	"unipool-backend/database"
+	"unipool-backend/models"
+
+	"github.com/gofiber/fiber/v2"
+)
+
+// GetDefaultAddress returns the default address for the authenticated user
+func GetDefaultAddress(c *fiber.Ctx) error {
+	user, ok := c.Locals("user").(models.User)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized"})
+	}
+	return c.Status(200).JSON(fiber.Map{"address": user.DefaultAddress})
+}
+
+// SetDefaultAddress sets the default address for the authenticated user
+func SetDefaultAddress(c *fiber.Ctx) error {
+	user, ok := c.Locals("user").(models.User)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"error": "Unauthorized"})
+	}
+
+	type AddressPayload struct {
+		Address string `json:"address"`
+	}
+	var payload AddressPayload
+	if err := c.BodyParser(&payload); err != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Invalid JSON body"})
+	}
+
+	if payload.Address == "" {
+		return c.Status(400).JSON(fiber.Map{"error": "Address cannot be empty"})
+	}
+
+	// Add context timeout for database operations
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := database.Database.Db.WithContext(ctx).Model(&models.User{}).Where("id = ?", user.ID).Update("default_address", payload.Address).Error; err != nil {
+		log.Printf("Error updating address: %v\n", err)
+		return c.Status(500).JSON(fiber.Map{"error": "Failed to update address"})
+	}
+
+	return c.Status(200).JSON(fiber.Map{"status": "OK"})
+}

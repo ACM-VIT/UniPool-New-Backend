@@ -6,23 +6,24 @@ import (
 	"os"
 
 	firebase "firebase.google.com/go/v4"
-	"github.com/joho/godotenv"
 	"google.golang.org/api/option"
+	"github.com/joho/godotenv"
 )
 
 var FirebaseApp *firebase.App
 
 func InitFirebase() {
 	err := godotenv.Load(".env")
-
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		log.Println("No .env file found, using environment variables")
 	}
 
-	credentialsPath := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+	credentialsVal := os.Getenv("SERVICE_CREDS")
+	if credentialsVal == "" {
+		log.Fatal("SERVICE_CREDS environment variable is required")
+	}
 
-	opt := option.WithCredentialsJSON([]byte(credentialsPath))
-	// log.Println(opt)
+	opt := option.WithCredentialsJSON([]byte(credentialsVal))
 	app, err := firebase.NewApp(context.Background(), nil, opt)
 	if err != nil {
 		log.Fatalf("error initializing Firebase app: %v\n", err)

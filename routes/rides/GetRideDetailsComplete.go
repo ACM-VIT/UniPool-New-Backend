@@ -1,0 +1,168 @@
+package rides
+
+import (
+	"log"
+	"unipool-backend/database"
+	"unipool-backend/models"
+
+	"github.com/gofiber/fiber/v2"
+)
+
+type PassengerDetail struct {
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	Email             string `json:"email"`
+	ProfilePictureURL string `json:"profile_picture_url"`
+	ContactNumber     string `json:"contact_number"`
+}
+
+type BookingDetail struct {
+	ID                            string `json:"id"`
+	PassengerID                   string `json:"passenger_id"`
+	RequestStatus                 string `json:"request_status"`
+	CreatedAt                     string `json:"booking_created_at"`
+	PassengerName                 string `json:"passenger_name"`
+	PassengerEmail                string `json:"passenger_email"`
+	PassengerProfilePictureURL    string `json:"passenger_profile_picture_url"`
+	PassengerContactNumber        string `json:"passenger_contact_number"`
+}
+
+type RideDetailsComplete struct {
+	ID             string   `json:"id"`
+	HostUserID     string   `json:"host_user_id"`
+	HostUserName   string   `json:"host_user_name"`
+	StartLocation  string   `json:"start_location"`
+	EndLocation    string   `json:"end_location"`
+	StartLatitude  *float64 `json:"start_latitude,omitempty"`
+	StartLongitude *float64 `json:"start_longitude,omitempty"`
+	EndLatitude    *float64 `json:"end_latitude,omitempty"`
+	EndLongitude   *float64 `json:"end_longitude,omitempty"`
+	StartTime      string   `json:"start_time"`
+	TotalPrice     int      `json:"total_price"`
+	TotalSeats     int      `json:"total_seats"`
+	BookedSeats    int      `json:"booked_seats"`
+	IsOngoing      bool     `json:"is_ongoing"`
+	CreatedAt      string   `json:"created_at"`
+
+	IsUserHost bool `json:"is_user_host"`
+
+	Host PassengerDetail `json:"host"`
+
+	Bookings []BookingDetail `json:"bookings"`
+}
+
+func GetRideDetailsComplete(c *fiber.Ctx) error {
+	rideID := c.Params("id")
+	
+	userInterface := c.Locals("user")
+	if userInterface == nil {
+		return c.Status(401).JSON(fiber.Map{
+			"error": "User not authenticated",
+		})
+	}
+
+	user, ok := userInterface.(models.User)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{
+			"error": "Invalid user data",
+		})
+	}
+
+	var ride models.Ride
+	var host models.User
+	
+	if err := database.Database.Db.Where("id = ?", rideID).First(&ride).Error; err != nil {
+		log.Printf("Error finding ride for ID %s: %v\n", rideID, err)
+		return c.Status(404).JSON(fiber.Map{
+			"error": "Ride not found",
+		})
+	}
+
+	if err := database.Database.Db.
+		Select("id, name, email, profile_picture_url, contact_number").
+		Where("id = ?", ride.HostUserID).
+		First(&host).Error; err != nil {
+		log.Printf("Error finding host with ID %s: %v\n", ride.HostUserID, err)
+		return c.Status(500).JSON(fiber.Map{
+			"error": "Host details not found",
+		})
+	}
+
+	var bookings []models.Booking
+	if err := database.Database.Db.
+		Where("ride_id = ?", rideID).
+		Order("created_at ASC").
+		Find(&bookings).Error; err != nil {
+		log.Printf("Error fetching bookings for ride %s: %v\n", rideID, err)
+		return c.Status(500).JSON(fiber.Map{
+			"error": "Error fetching bookings",
+		})
+	}
+
+	var bookingDetails []BookingDetail
+	for _, booking := range bookings {
+		if booking.PassengerID.String() == ride.HostUserID.String() {
+			continue
+		}
+
+		var passenger models.User
+		if err := database.Database.Db.
+			Select("id, name, email, profile_picture_url, contact_number").
+			Where("id = ?", booking.PassengerID).
+			First(&passenger).Error; err != nil {
+			log.Printf("Warning: Could not fetch passenger details for booking %s: %v\n", booking.ID, err)
+			continue
+		}
+
+		bookingDetails = append(bookingDetails, BookingDetail{
+			ID:                         booking.ID.String(),
+			PassengerID:                booking.PassengerID.String(),
+			RequestStatus:              booking.RequestStatus,
+			CreatedAt:                  booking.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+			PassengerName:              passenger.Name,
+			PassengerEmail:             passenger.Email,
+			PassengerProfilePictureURL: passenger.ProfilePictureURL,
+			PassengerContactNumber:     passenger.ContactNumber,
+		})
+	}
+
+	// don't add a separate host booking since the host is represented in the Host field
+	// the host should not appear in the bookings array
+
+	// count accepted bookings (excluding host, who always has a seat)
+	bookedSeats := 0
+	for _, booking := range bookingDetails {
+		if booking.RequestStatus == "accepted" {
+			bookedSeats++
+		}
+	}
+
+	response := RideDetailsComplete{
+		ID:             ride.ID.String(),
+		HostUserID:     ride.HostUserID.String(),
+		HostUserName:   host.Name,
+		StartLocation:  ride.StartLocation,
+		EndLocation:    ride.EndLocation,
+		StartLatitude:  ride.StartLatitude,
+		StartLongitude: ride.StartLongitude,
+		EndLatitude:    ride.EndLatitude,
+		EndLongitude:   ride.EndLongitude,
+		StartTime:      ride.StartTime.Format("2006-01-02T15:04:05Z07:00"),
+		TotalPrice:     int(ride.TotalPrice),
+		TotalSeats:     int(ride.TotalSeats),
+		BookedSeats:    bookedSeats,
+		IsOngoing:      ride.IsOngoing > 0,
+		CreatedAt:      ride.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		IsUserHost:     user.ID == ride.HostUserID,
+		Host: PassengerDetail{
+			ID:                host.ID.String(),
+			Name:              host.Name,
+			Email:             host.Email,
+			ProfilePictureURL: host.ProfilePictureURL,
+			ContactNumber:     host.ContactNumber,
+		},
+		Bookings: bookingDetails,
+	}
+
+	return c.Status(200).JSON(response)
+}
