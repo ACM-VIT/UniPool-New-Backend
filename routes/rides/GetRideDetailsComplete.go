@@ -29,12 +29,16 @@ type BookingDetail struct {
 }
 
 type RideDetailsComplete struct {
-	ID                   string  `json:"id"`
-	HostUserID           string  `json:"host_user_id"`
-	HostUserName         string  `json:"host_user_name"`
-	HostIsVerified       bool    `json:"host_is_verified"`
-	HostInstituteName    *string `json:"host_institute_name,omitempty"`
-	HostSameInstituteAsViewer bool `json:"host_same_institute_as_viewer"`
+	ID                        string  `json:"id"`
+	HostUserID                string  `json:"host_user_id"`
+	HostUserName              string  `json:"host_user_name"`
+	HostIsVerified            bool    `json:"host_is_verified"`
+	HostInstituteName         *string `json:"host_institute_name,omitempty"`
+	HostSameInstituteAsViewer bool    `json:"host_same_institute_as_viewer"`
+	// Vehicle ID surfaced *only* to host + confirmed passengers
+	// (the pickup audience). Other viewers get an empty string so
+	// random rides on the map don't leak the plate.
+	VehicleInfo string `json:"vehicle_info,omitempty"`
 	StartLocation  string   `json:"start_location"`
 	EndLocation    string   `json:"end_location"`
 	StartLatitude  *float64 `json:"start_latitude,omitempty"`
@@ -193,6 +197,14 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 
 	viewerCtx := ResolveViewerState(&ride, user.ID, viewerBooking)
 
+	// Vehicle info only shown to host + confirmed passengers — the
+	// audience that's actually meeting at the pickup point. Random
+	// viewers see an empty string so the plate isn't broadcast.
+	vehicleInfoForViewer := ""
+	if viewerCtx.State == StateHost || viewerCtx.State == StateConfirmedPassenger {
+		vehicleInfoForViewer = ride.VehicleInfo
+	}
+
 	response := RideDetailsComplete{
 		ID:                        ride.ID.String(),
 		HostUserID:                ride.HostUserID.String(),
@@ -200,6 +212,7 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 		HostIsVerified:            host.IsEmailVerified,
 		HostInstituteName:         hostInstituteName,
 		HostSameInstituteAsViewer: hostSameInstituteAsViewer,
+		VehicleInfo:               vehicleInfoForViewer,
 		StartLocation:   ride.StartLocation,
 		EndLocation:     ride.EndLocation,
 		StartLatitude:   ride.StartLatitude,

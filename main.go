@@ -60,6 +60,10 @@ func SetupRoutes(app *fiber.App) {
 	app.Put("/user/default-address", users.SetDefaultAddress) // PUT also sets / clears user's default start address
 	app.Patch("/user/default-address", users.SetDefaultAddress) // PATCH also sets user's default start address
 	app.Delete("/user/default-address", users.SetDefaultAddress) // DELETE clears user's default start address (uses empty payload path)
+	// Self-edit profile fields (UPI VPA, contact number). Name +
+	// email + verification status are NOT editable here — those flow
+	// from Firebase identity / institute matching.
+	app.Patch("/user/profile", users.UpdateProfile)
 	app.Get("/user/:id", users.GetUserByID)        // Gets user details by ID (must be after specific routes)
 	app.Delete("/user/delete", users.DeleteUser)   // Deletes a user
 

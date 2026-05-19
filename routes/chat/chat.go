@@ -511,16 +511,19 @@ func GetUserChats(c *fiber.Ctx) error {
 		}
 
 		room := fiber.Map{
-			"id":                  ride.ID.String(),
-			"title":               ride.StartLocation + " to " + ride.EndLocation,
-			"start_location":      ride.StartLocation,
-			"end_location":        ride.EndLocation,
-			"start_time":          ride.StartTime.Format(time.RFC3339),
-			"subtitle":            "Trip on " + ride.StartTime.Format("Mon 2 Jan 2006"),
-			"participants":        strconv.Itoa(int(ride.BookedSeats)) + " passengers",
-			"host_user_id":        ride.HostUserID.String(),
-			"host_user_name":      ride.HostUser.Name,
+			"id":                       ride.ID.String(),
+			"title":                    ride.StartLocation + " to " + ride.EndLocation,
+			"start_location":           ride.StartLocation,
+			"end_location":             ride.EndLocation,
+			"start_time":               ride.StartTime.Format(time.RFC3339),
+			"subtitle":                 "Trip on " + ride.StartTime.Format("Mon 2 Jan 2006"),
+			"participants":             strconv.Itoa(int(ride.BookedSeats)) + " passengers",
+			"host_user_id":             ride.HostUserID.String(),
+			"host_user_name":           ride.HostUser.Name,
 			"host_profile_picture_url": ride.HostUser.ProfilePictureURL,
+			// Lets the chat list surface a lime checkmark next to
+			// the host's name without a second round-trip.
+			"host_is_verified":    ride.HostUser.IsEmailVerified,
 			"viewer_role":         viewerRole,
 			"notifications_muted": ride.Settings.NotificationsMuted,
 			"unread_count":        unreadByRide[ride.ID],
