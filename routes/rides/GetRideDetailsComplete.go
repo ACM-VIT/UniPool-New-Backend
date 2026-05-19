@@ -29,9 +29,12 @@ type BookingDetail struct {
 }
 
 type RideDetailsComplete struct {
-	ID             string   `json:"id"`
-	HostUserID     string   `json:"host_user_id"`
-	HostUserName   string   `json:"host_user_name"`
+	ID                   string  `json:"id"`
+	HostUserID           string  `json:"host_user_id"`
+	HostUserName         string  `json:"host_user_name"`
+	HostIsVerified       bool    `json:"host_is_verified"`
+	HostInstituteName    *string `json:"host_institute_name,omitempty"`
+	HostSameInstituteAsViewer bool `json:"host_same_institute_as_viewer"`
 	StartLocation  string   `json:"start_location"`
 	EndLocation    string   `json:"end_location"`
 	StartLatitude  *float64 `json:"start_latitude,omitempty"`
@@ -96,12 +99,32 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 
 	var host models.User
 	if err := database.Database.Db.
-		Select("id, name, email, profile_picture_url, contact_number").
+		Select("id, name, email, profile_picture_url, contact_number, institute_id, is_email_verified").
 		Where("id = ?", ride.HostUserID).
 		First(&host).Error; err != nil {
 		log.Printf("host lookup failed for ride %s: %v", rideID, err)
 		return c.Status(500).JSON(fiber.Map{"error": "Host details not found"})
 	}
+
+	// Resolve institute name once, cheap. Only fired when the host
+	// has an institute set (verified users); skipped otherwise.
+	var hostInstituteName *string
+	if host.InstituteID != nil {
+		var inst models.Institute
+		if err := database.Database.Db.
+			Select("id, name").
+			Where("id = ?", *host.InstituteID).
+			First(&inst).Error; err == nil {
+			n := inst.Name
+			hostInstituteName = &n
+		}
+	}
+	// Same-institute flag — drives the "Same campus" chip on the
+	// client. Only true if both viewer and host have a non-nil
+	// institute and they match.
+	hostSameInstituteAsViewer := host.InstituteID != nil &&
+		user.InstituteID != nil &&
+		*host.InstituteID == *user.InstituteID
 
 	var bookings []models.Booking
 	if err := database.Database.Db.
@@ -171,9 +194,12 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 	viewerCtx := ResolveViewerState(&ride, user.ID, viewerBooking)
 
 	response := RideDetailsComplete{
-		ID:              ride.ID.String(),
-		HostUserID:      ride.HostUserID.String(),
-		HostUserName:    host.Name,
+		ID:                        ride.ID.String(),
+		HostUserID:                ride.HostUserID.String(),
+		HostUserName:              host.Name,
+		HostIsVerified:            host.IsEmailVerified,
+		HostInstituteName:         hostInstituteName,
+		HostSameInstituteAsViewer: hostSameInstituteAsViewer,
 		StartLocation:   ride.StartLocation,
 		EndLocation:     ride.EndLocation,
 		StartLatitude:   ride.StartLatitude,

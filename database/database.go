@@ -69,7 +69,20 @@ func ConnectToDB() {
 	if os.Getenv("SHOULD_MIGRATE") == "TRUE" {
 		log.Println("Running DB Migrations...")
 
-		err = db.AutoMigrate(&models.User{}, &models.Ride{}, &models.Booking{}, &models.UserMetadata{}, &models.Message{}, &models.ChatRead{}, &models.Report{})
+		// Institute + InstituteDomain are migrated BEFORE User so the
+		// foreign key (`users.institute_id` → `institutes.id`) resolves
+		// cleanly on a fresh database.
+		err = db.AutoMigrate(
+			&models.Institute{},
+			&models.InstituteDomain{},
+			&models.User{},
+			&models.Ride{},
+			&models.Booking{},
+			&models.UserMetadata{},
+			&models.Message{},
+			&models.ChatRead{},
+			&models.Report{},
+		)
 
 		if err != nil {
 			log.Fatalf("Error running migrations: %v", err)

@@ -78,6 +78,12 @@ func SetupRoutes(app *fiber.App) {
 	app.Put("/bookings/reject/:bookingID", bookings.RejectRoute) // Rejects a booking
 	app.Post("/bookings/request", bookings.Request)              // Requests a booking aka Create a booking
 
+	// Post-trip card surface for the home screen — one query for the
+	// currently relevant trip, and a dismiss endpoint to record the
+	// passenger's "I paid" / "didn't happen" signal.
+	app.Get("/trip-card/active", bookings.GetActiveTripCard)
+	app.Post("/trip-card/dismiss", bookings.DismissTripCard)
+
 	// Chat routes
 	app.Get("/chats/:user_id", chat.GetUserChats)
 	// "me" alias for the chat list — the handler reads the
@@ -163,6 +169,12 @@ func main() {
 	// 	log.Fatalf("Failed to run migrations: %v", err)
 	// }
 
+	// Idempotent — guarantees the launch institutes (e.g. VIT) exist
+	// in the institutes / institute_domains tables, so a user signing
+	// in with a known student-email domain auto-resolves to a
+	// verified profile on first login.
+	users.SeedDefaultInstitutes()
+
 	app.Get("/health", func(c *fiber.Ctx) error {
 		sqlDB, err := database.Database.Db.DB()
 		if err != nil {
@@ -193,6 +205,10 @@ func main() {
 	// and, with /rides/nearby, plot the actual ride pins on the map.
 	app.Get("/rides/nearby-count", rides.NearbyRidesCount)
 	app.Get("/rides/nearby", rides.NearbyRides)
+
+	// Public institute catalogue — frontend uses this to display the
+	// host's school on profile / ride cards without an authed call.
+	app.Get("/institutes", users.ListInstitutes)
 
 	app.Use(middleware.Authenticate)
 

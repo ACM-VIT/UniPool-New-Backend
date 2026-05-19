@@ -2,11 +2,39 @@ package users
 
 import (
 	"log"
+	"strings"
 	"unipool-backend/database"
 	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 )
+
+// resolveInstituteFromEmail looks up the user's email domain in the
+// institute_domains table. If the domain is known, returns the
+// matching InstituteID + verified=true; otherwise returns nil + false.
+//
+// Called on new-user creation so verification + institute linkage
+// happen once at signup. Cheap (single indexed query) and silent —
+// unknown domains just create an unverified user, no error.
+func resolveInstituteFromEmail(email string) (*uuid.UUID, bool) {
+	at := strings.LastIndex(email, "@")
+	if at < 0 || at == len(email)-1 {
+		return nil, false
+	}
+	domain := strings.ToLower(strings.TrimSpace(email[at+1:]))
+	if domain == "" {
+		return nil, false
+	}
+	var row models.InstituteDomain
+	if err := database.Database.Db.
+		Where("LOWER(domain) = ?", domain).
+		First(&row).Error; err != nil {
+		return nil, false
+	}
+	id := row.InstituteID
+	return &id, true
+}
 
 // Function to create or update a user in the DB after authentication
 func CreateOrUpdateUser(c *fiber.Ctx) error {
@@ -34,6 +62,14 @@ func CreateOrUpdateUser(c *fiber.Ctx) error {
 			ContactNumber:     requestBody.ContactNumber,
 			Gender:            requestBody.Gender,
 			YOB:               requestBody.YOB,
+		}
+
+		// Institute matching by email domain — silent. Known domain
+		// → user.institute_id set + is_email_verified=true. Unknown
+		// domain just creates an unverified user.
+		if instituteID, verified := resolveInstituteFromEmail(newUser.Email); verified {
+			newUser.InstituteID = instituteID
+			newUser.IsEmailVerified = true
 		}
 
 		log.Println("User to be created:", newUser)
