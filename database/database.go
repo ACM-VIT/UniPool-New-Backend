@@ -69,7 +69,7 @@ func ConnectToDB() {
 	if os.Getenv("SHOULD_MIGRATE") == "TRUE" {
 		log.Println("Running DB Migrations...")
 
-		err = db.AutoMigrate(&models.User{}, &models.Ride{}, &models.Booking{}, &models.UserMetadata{}, &models.Message{})
+		err = db.AutoMigrate(&models.User{}, &models.Ride{}, &models.Booking{}, &models.UserMetadata{}, &models.Message{}, &models.ChatRead{}, &models.Report{})
 
 		if err != nil {
 			log.Fatalf("Error running migrations: %v", err)
@@ -112,6 +112,33 @@ func createIndexes(db *gorm.DB) error {
 	}
 	log.Printf("Installed %d/%d extensions successfully", extensionCount, len(extensions))
 	
+	// Ensure new chat-read table exists even when SHOULD_MIGRATE isn't
+	// set. Auto-migrate handles new columns when explicitly enabled;
+	// these CREATE ... IF NOT EXISTS statements are a cheap safety
+	// net. CockroachDB doesn't support multi-statement prepared queries
+	// so we issue them one at a time.
+	chatReadsDDL := []string{
+		`CREATE TABLE IF NOT EXISTS chat_reads (
+			id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+			deleted_at   TIMESTAMPTZ,
+			user_id      UUID NOT NULL,
+			ride_id      UUID,
+			dm_room_id   TEXT,
+			last_read_at TIMESTAMPTZ NOT NULL
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_reads_user_ride
+			ON chat_reads(user_id, ride_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_chat_reads_dm
+			ON chat_reads(dm_room_id)`,
+	}
+	for _, stmt := range chatReadsDDL {
+		if err := db.Exec(stmt).Error; err != nil {
+			log.Printf("Warning: chat_reads bootstrap DDL failed: %v", err)
+		}
+	}
+
 	indexes := []struct {
 		name string
 		sql  string
@@ -132,6 +159,10 @@ func createIndexes(db *gorm.DB) error {
 
 		{"idx_bookings_ride_passenger", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_ride_passenger ON bookings(ride_id, passenger_id)"},
 		{"idx_rides_host_time", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_host_time ON rides(host_user_id, start_time)"},
+
+		// Chat-list & message-history hot paths.
+		{"idx_messages_ride_created", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_ride_created ON messages(ride_id, created_at DESC)"},
+		{"idx_messages_dm_created", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_dm_created ON messages(dm_room_id, created_at DESC)"},
 	}
 
 	successCount := 0

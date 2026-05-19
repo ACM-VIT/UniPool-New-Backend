@@ -26,6 +26,10 @@ type RideCard struct {
 	StartLocation             string    `json:"start_location"`
 	EndLocation               string    `json:"end_location"`
 	StartTime                 time.Time `json:"start_time"`
+	// CreatedAt feeds the "Just listed" match reason — we only surface the
+	// flag on the frontend, but the timestamp is exposed in case clients
+	// want their own freshness UX.
+	CreatedAt                 time.Time `json:"created_at"`
 	TotalSeats                uint      `json:"total_seats"`
 	BookedSeats               uint      `json:"booked_seats"`
 	TotalPrice                uint      `json:"total_price"`
@@ -38,6 +42,14 @@ type RideCard struct {
 	TotalDistance             *float64  `json:"total_distance,omitempty"`
 	RelevanceScore            float64   `json:"relevance_score,omitempty"`
 	MatchReason               string    `json:"match_reason,omitempty"`
+
+	// Server-computed UI state — see viewerState.go. Lets clients
+	// render the right CTA ("Request seat" vs "Your seat is
+	// confirmed" vs "Waiting for host" vs nothing) without doing
+	// any conditional math themselves.
+	ViewerState     ViewerState   `json:"viewer_state,omitempty"`
+	Actions         ViewerActions `json:"actions,omitempty"`
+	ViewerBookingID *string       `json:"viewer_booking_id,omitempty"`
 }
 
 type SearchParams struct {
@@ -306,9 +318,38 @@ func calculateRelevanceScore(ride models.Ride, params SearchParams, startDist, e
 	return score
 }
 
+// addMatchContext kept for backwards-compatibility with callers that don't
+// have host frequency. New caller path uses addMatchContextWithHost.
 func addMatchContext(card *RideCard, params SearchParams) {
+	addMatchContextWithHost(card, params, 0, false)
+}
+
+func addMatchContextWithHost(card *RideCard, params SearchParams, hostPastRides int64, repeatRoute bool) {
 	reasons := []string{}
-	
+
+	// "Repeat route" is the strongest signal we have — the user already
+	// took this exact origin → destination before. Goes to the top.
+	if repeatRoute {
+		reasons = append(reasons, "Your usual route")
+	}
+
+	// "Just listed" wins the top slot when there's no repeat-route — fresh
+	// activity is the strongest social signal in a peer-to-peer carpool
+	// board. 60-minute window so newly posted rides surface quickly
+	// without becoming noise.
+	if !card.CreatedAt.IsZero() && time.Since(card.CreatedAt) < 60*time.Minute {
+		reasons = append(reasons, "Just listed")
+	}
+
+	// Trusted host = ≥3 past rides. Capped wording: "Trusted host" is the
+	// strongest social-proof phrase a stranger-to-stranger marketplace
+	// can credibly use without ratings infrastructure.
+	if hostPastRides >= 10 {
+		reasons = append(reasons, "Top host")
+	} else if hostPastRides >= 3 {
+		reasons = append(reasons, "Trusted host")
+	}
+
 	if card.StartDistance != nil && *card.StartDistance < 2.0 {
 		reasons = append(reasons, "Very close to pickup")
 	} else if card.StartDistance != nil && *card.StartDistance < 5.0 {
@@ -713,6 +754,79 @@ func SearchRides(c *fiber.Ctx) error {
 		}
 	}
 	
+	// Build a "routes the user has travelled" set so we can boost rides
+	// that match a route they've taken before. Pulls (start_location,
+	// end_location) tuples from both their past hosted rides and past
+	// bookings, then normalises them for case-insensitive comparison.
+	pastRoutes := make(map[string]bool)
+	if params.User.ID != uuid.Nil {
+		type routePair struct {
+			StartLocation string `json:"start_location"`
+			EndLocation   string `json:"end_location"`
+		}
+		var pairs []routePair
+		// Past hosted rides
+		if err := database.Database.Db.Raw(`
+			SELECT start_location, end_location FROM rides
+			WHERE host_user_id = ?
+			  AND start_time < NOW()
+			  AND deleted_at IS NULL
+			UNION
+			SELECT r.start_location, r.end_location FROM bookings b
+			JOIN rides r ON r.id = b.ride_id
+			WHERE b.passenger_id = ?
+			  AND b.request_status = 'accepted'
+			  AND r.deleted_at IS NULL
+			LIMIT 200
+		`, params.User.ID, params.User.ID).Scan(&pairs).Error; err != nil {
+			log.Printf("past-routes lookup failed (continuing without): %v", err)
+		}
+		for _, p := range pairs {
+			key := strings.ToLower(strings.TrimSpace(p.StartLocation)) + "|" +
+				strings.ToLower(strings.TrimSpace(p.EndLocation))
+			pastRoutes[key] = true
+		}
+	}
+
+	// Build a "completed rides per host" map in a single batch query so
+	// `addMatchContext` can surface a "Trusted host" reason for prolific
+	// hosts without doing one query per ride.
+	hostFreq := make(map[uuid.UUID]int64)
+	if len(rides) > 0 {
+		hostIDs := make([]uuid.UUID, 0, len(rides))
+		seenHost := make(map[uuid.UUID]bool, len(rides))
+		for _, r := range rides {
+			if !seenHost[r.HostUserID] {
+				hostIDs = append(hostIDs, r.HostUserID)
+				seenHost[r.HostUserID] = true
+			}
+		}
+		type hostCount struct {
+			HostUserID uuid.UUID `json:"host_user_id"`
+			RideCount  int64     `json:"ride_count"`
+		}
+		var counts []hostCount
+		if err := database.Database.Db.Model(&models.Ride{}).
+			Select("host_user_id, COUNT(*) as ride_count").
+			Where("host_user_id IN ? AND start_time < NOW()", hostIDs).
+			Group("host_user_id").
+			Find(&counts).Error; err != nil {
+			log.Printf("host frequency lookup failed (continuing without): %v", err)
+		}
+		for _, c := range counts {
+			hostFreq[c.HostUserID] = c.RideCount
+		}
+	}
+
+	// Batch-load the caller's bookings for *every* ride in this
+	// result set so the viewer-state resolver below doesn't trigger
+	// a per-ride query. Single round-trip even for 50 results.
+	rideIDs := make([]uuid.UUID, 0, len(rides))
+	for _, r := range rides {
+		rideIDs = append(rideIDs, r.ID)
+	}
+	viewerBookings := LoadViewerBookings(params.User.ID, rideIDs)
+
 	response := make([]RideCard, 0, len(rides))
 	for _, ride := range rides {
 		card := RideCard{
@@ -724,6 +838,7 @@ func SearchRides(c *fiber.Ctx) error {
 			StartLocation:             ride.StartLocation,
 			EndLocation:               ride.EndLocation,
 			StartTime:                 ride.StartTime,
+			CreatedAt:                 ride.CreatedAt,
 			TotalSeats:                ride.TotalSeats,
 			BookedSeats:               ride.BookedSeats,
 			TotalPrice:                ride.TotalPrice,
@@ -732,6 +847,15 @@ func SearchRides(c *fiber.Ctx) error {
 			EndLatitude:               ride.EndLatitude,
 			EndLongitude:              ride.EndLongitude,
 		}
+
+		// Annotate with server-computed viewer state so the search
+		// results list can render "Request seat" / "Pending" /
+		// "Confirmed" / "Hosting" per card without re-deriving.
+		rideRef := ride
+		viewerCtx := ResolveViewerState(&rideRef, params.User.ID, viewerBookings[ride.ID])
+		card.ViewerState = viewerCtx.State
+		card.Actions = viewerCtx.Actions
+		card.ViewerBookingID = viewerCtx.BookingID
 		
 		var startDist, endDist *float64
 		if params.HasStartCoord && helpers.AreCoordinatesValid(ride.StartLatitude, ride.StartLongitude) {
@@ -754,9 +878,31 @@ func SearchRides(c *fiber.Ctx) error {
 		}
 		
 		card.RelevanceScore = calculateRelevanceScore(ride, params, startDist, endDist)
-		
-		addMatchContext(&card, params)
-		
+
+		// Mild relevance boost for proven hosts so users see them first
+		// when sorting by relevance. Capped so it never dominates
+		// distance/time factors.
+		if past, ok := hostFreq[ride.HostUserID]; ok {
+			if past >= 10 {
+				card.RelevanceScore += 12
+			} else if past >= 3 {
+				card.RelevanceScore += 6
+			}
+		}
+
+		// Repeat-route boost. If the user has taken this exact origin →
+		// destination pair before (either hosted or booked + accepted),
+		// nudge it up the list. Strongest single signal that this ride
+		// fits the user's life.
+		routeKey := strings.ToLower(strings.TrimSpace(ride.StartLocation)) + "|" +
+			strings.ToLower(strings.TrimSpace(ride.EndLocation))
+		repeatRoute := pastRoutes[routeKey]
+		if repeatRoute {
+			card.RelevanceScore += 18
+		}
+
+		addMatchContextWithHost(&card, params, hostFreq[ride.HostUserID], repeatRoute)
+
 		response = append(response, card)
 	}
 	

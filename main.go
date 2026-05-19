@@ -11,6 +11,7 @@ import (
 	"unipool-backend/routes/bookings"
 	"unipool-backend/routes/chat"
 	"unipool-backend/routes/notifications"
+	"unipool-backend/routes/reports"
 	"unipool-backend/routes/rides"
 	"unipool-backend/routes/users"
 	"unipool-backend/services"
@@ -18,10 +19,16 @@ import (
 	"github.com/gofiber/websocket/v2"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/compress"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 )
 
 func SetupRoutes(app *fiber.App) {
+	// gzip every JSON response. Chat-list / user-rides / ride-search
+	// payloads are textually verbose; compression cuts wire bytes
+	// 60-75% on average. CPU cost is negligible at our load.
+	app.Use(compress.New(compress.Config{Level: compress.LevelBestSpeed}))
+
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
 		AllowMethods: "GET,POST,HEAD,PUT,DELETE,PATCH,OPTIONS",
@@ -50,7 +57,9 @@ func SetupRoutes(app *fiber.App) {
 	app.Get("/user/passengers", users.GetPassengers) // Gets all passengers the user has travelled with
 	app.Get("/user/default-address", users.GetDefaultAddress) // Gets user's default start address
 	app.Post("/user/default-address", users.SetDefaultAddress) // Sets user's default start address
+	app.Put("/user/default-address", users.SetDefaultAddress) // PUT also sets / clears user's default start address
 	app.Patch("/user/default-address", users.SetDefaultAddress) // PATCH also sets user's default start address
+	app.Delete("/user/default-address", users.SetDefaultAddress) // DELETE clears user's default start address (uses empty payload path)
 	app.Get("/user/:id", users.GetUserByID)        // Gets user details by ID (must be after specific routes)
 	app.Delete("/user/delete", users.DeleteUser)   // Deletes a user
 
@@ -71,15 +80,28 @@ func SetupRoutes(app *fiber.App) {
 
 	// Chat routes
 	app.Get("/chats/:user_id", chat.GetUserChats)
+	// "me" alias for the chat list — the handler reads the
+	// authenticated user from locals, so the URL param is purely
+	// informational. Keeps the client URL clean.
+	app.Get("/chats/me", chat.GetUserChats)
 	app.Get("/chat/:ride_id/messages", chat.GetRideMessages)
-	app.Get("/dm/:dm_room_id/messages", chat.GetDMMessages)  // New DM messages endpoint
+	app.Get("/dm/:dm_room_id/messages", chat.GetDMMessages)
 	app.Post("/chat/:ride_id/message", chat.SendMessage)
-	app.Post("/dm/:dm_room_id/message", chat.SendDMMessage)  // New DM send message endpoint
-	app.Get("/chat/connections", chat.GetActiveConnections) // Debug endpoint for WebSocket connections
+	app.Post("/dm/:dm_room_id/message", chat.SendDMMessage)
+	// Mark a ride chat read for the current user. Frontend calls this
+	// whenever the chat is opened or returns to the foreground so the
+	// unread badge on the chat-list stays accurate.
+	app.Post("/chat/:ride_id/read", chat.MarkRideRead)
+	app.Get("/chat/connections", chat.GetActiveConnections) // Debug
 
 	// Notification routes
 	app.Post("/notifications/send", notifications.SendNotification)               // Send FCM notification
 	app.Post("/notifications/send-to-user", notifications.SendNotificationToUser) // Send notification to specific user
+
+	// User-submitted moderation reports (chat settings → "Report").
+	// Auth-gated by the middleware below; the reporter_id is read from
+	// `c.Locals("user")` so a client can't spoof someone else.
+	app.Post("/reports", reports.CreateReport)
 
 	// WebSocket endpoint (upgrade)
 	app.Use("/ws", func(c *fiber.Ctx) error {
@@ -166,8 +188,14 @@ func main() {
 		})
 	})
 
+	// Public — no auth required. Lets the unauthenticated HomeScreen
+	// decide whether the "carpools nearby" pill is worth showing
+	// and, with /rides/nearby, plot the actual ride pins on the map.
+	app.Get("/rides/nearby-count", rides.NearbyRidesCount)
+	app.Get("/rides/nearby", rides.NearbyRides)
+
 	app.Use(middleware.Authenticate)
-	
+
 	app.Get("/", func(c *fiber.Ctx) error {
 		return c.SendString("Scared of Women✌️!")
 	})
