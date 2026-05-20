@@ -23,25 +23,30 @@ type RideCard struct {
 	HostUserName              string    `json:"host_user_name"`
 	HostUserProfilePictureURL string    `json:"host_user_profile_picture_url"`
 	HostUserYOB               uint      `json:"host_user_yob,omitempty"`
-	StartLocation             string    `json:"start_location"`
-	EndLocation               string    `json:"end_location"`
-	StartTime                 time.Time `json:"start_time"`
+	// HostUserGender lets the client surface a same-gender affinity
+	// signal (e.g. soft pink tint when a female passenger searches and
+	// the host is also female). Omit when unset to avoid leaking blanks.
+	HostUserGender   string    `json:"host_user_gender,omitempty"`
+	SameGenderFemale bool      `json:"same_gender_female,omitempty"`
+	StartLocation    string    `json:"start_location"`
+	EndLocation      string    `json:"end_location"`
+	StartTime        time.Time `json:"start_time"`
 	// CreatedAt feeds the "Just listed" match reason — we only surface the
 	// flag on the frontend, but the timestamp is exposed in case clients
 	// want their own freshness UX.
-	CreatedAt                 time.Time `json:"created_at"`
-	TotalSeats                uint      `json:"total_seats"`
-	BookedSeats               uint      `json:"booked_seats"`
-	TotalPrice                uint      `json:"total_price"`
-	StartLatitude             *float64  `json:"start_latitude,omitempty"`
-	StartLongitude            *float64  `json:"start_longitude,omitempty"`
-	EndLatitude               *float64  `json:"end_latitude,omitempty"`
-	EndLongitude              *float64  `json:"end_longitude,omitempty"`
-	StartDistance             *float64  `json:"start_distance,omitempty"`
-	EndDistance               *float64  `json:"end_distance,omitempty"`
-	TotalDistance             *float64  `json:"total_distance,omitempty"`
-	RelevanceScore            float64   `json:"relevance_score,omitempty"`
-	MatchReason               string    `json:"match_reason,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	TotalSeats     uint      `json:"total_seats"`
+	BookedSeats    uint      `json:"booked_seats"`
+	TotalPrice     uint      `json:"total_price"`
+	StartLatitude  *float64  `json:"start_latitude,omitempty"`
+	StartLongitude *float64  `json:"start_longitude,omitempty"`
+	EndLatitude    *float64  `json:"end_latitude,omitempty"`
+	EndLongitude   *float64  `json:"end_longitude,omitempty"`
+	StartDistance  *float64  `json:"start_distance,omitempty"`
+	EndDistance    *float64  `json:"end_distance,omitempty"`
+	TotalDistance  *float64  `json:"total_distance,omitempty"`
+	RelevanceScore float64   `json:"relevance_score,omitempty"`
+	MatchReason    string    `json:"match_reason,omitempty"`
 
 	// Server-computed UI state — see viewerState.go. Lets clients
 	// render the right CTA ("Request seat" vs "Your seat is
@@ -53,23 +58,23 @@ type RideCard struct {
 }
 
 type SearchParams struct {
-	StartLocation    string
-	EndLocation      string
-	StartLat         float64
-	StartLon         float64
-	EndLat           float64
-	EndLon           float64
-	HasStartCoord    bool
-	HasEndCoord      bool
-	Date             string
-	PreferredTime    string
-	MaxPrice         *uint
-	MinSeats         *uint
-	SortBy           string
-	RadiusKm         float64
-	Limit            int
-	Offset           int
-	User             models.User
+	StartLocation string
+	EndLocation   string
+	StartLat      float64
+	StartLon      float64
+	EndLat        float64
+	EndLon        float64
+	HasStartCoord bool
+	HasEndCoord   bool
+	Date          string
+	PreferredTime string
+	MaxPrice      *uint
+	MinSeats      *uint
+	SortBy        string
+	RadiusKm      float64
+	Limit         int
+	Offset        int
+	User          models.User
 }
 
 func parseTimeWindow(dateStr string, timeStr string) (time.Time, time.Time, error) {
@@ -77,7 +82,7 @@ func parseTimeWindow(dateStr string, timeStr string) (time.Time, time.Time, erro
 	if err != nil {
 		loc = time.UTC
 	}
-	
+
 	if dateStr == "" {
 		// Default to today and next 7 days
 		now := time.Now().In(loc)
@@ -85,25 +90,25 @@ func parseTimeWindow(dateStr string, timeStr string) (time.Time, time.Time, erro
 		end := start.Add(7 * 24 * time.Hour)
 		return start.UTC(), end.UTC(), nil
 	}
-	
+
 	date, err := time.ParseInLocation("2006-01-02", dateStr, loc)
 	if err != nil {
 		return time.Time{}, time.Time{}, err
 	}
-	
+
 	// If time specified, create a window around it
 	if timeStr != "" {
 		targetTime, err := time.ParseInLocation("15:04", timeStr, loc)
 		if err == nil {
-			target := time.Date(date.Year(), date.Month(), date.Day(), 
-							   targetTime.Hour(), targetTime.Minute(), 0, 0, loc)
+			target := time.Date(date.Year(), date.Month(), date.Day(),
+				targetTime.Hour(), targetTime.Minute(), 0, 0, loc)
 			// ±2 hour window around target time
 			start := target.Add(-2 * time.Hour)
 			end := target.Add(2 * time.Hour)
 			return start.UTC(), end.UTC(), nil
 		}
 	}
-	
+
 	// Full day
 	start := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, loc)
 	end := start.Add(24*time.Hour - time.Nanosecond)
@@ -124,45 +129,45 @@ func buildLocationQuery(tx *gorm.DB, location string, hasCoord bool, lat, lon fl
 			)
 		}
 	}
-	
+
 	if location == "" {
 		return tx
 	}
-	
+
 	normalizedLocation := strings.TrimSpace(strings.ToLower(location))
 	locationColumn := "start_location"
 	if !isStart {
 		locationColumn = "end_location"
 	}
-	
+
 	log.Printf("Text search on %s for: %s", locationColumn, normalizedLocation)
-	
+
 	words := strings.Fields(normalizedLocation)
-	
+
 	conditions := []string{
-		fmt.Sprintf("%s ILIKE ?", locationColumn),    // exact match
-		fmt.Sprintf("%s ILIKE ?", locationColumn),    // contains match
+		fmt.Sprintf("%s ILIKE ?", locationColumn), // exact match
+		fmt.Sprintf("%s ILIKE ?", locationColumn), // contains match
 	}
 	values := []interface{}{
 		normalizedLocation,
 		"%" + normalizedLocation + "%",
 	}
-	
+
 	for _, word := range words {
 		if len(word) > 2 {
 			conditions = append(conditions, fmt.Sprintf("%s ILIKE ?", locationColumn))
 			values = append(values, "%"+word+"%")
 		}
 	}
-	
+
 	if len(words) > 0 {
 		conditions = append(conditions, fmt.Sprintf("similarity(%s, ?) > ?", locationColumn))
 		values = append(values, location, 0.2)
 	}
-	
+
 	whereClause := strings.Join(conditions, " OR ")
 	log.Printf("Location WHERE clause: (%s)", whereClause)
-	
+
 	return tx.Where(fmt.Sprintf("(%s)", whereClause), values...)
 }
 
@@ -170,14 +175,14 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 	if !hasStartCoord && !hasEndCoord {
 		return tx, 0
 	}
-	
+
 	radiusOptions := []float64{5000, 10000, 20000, 50000} // 5km, 10km, 20km, 50km
-	
+
 	for _, radius := range radiusOptions {
 		var count int64
 		testTx := database.Database.Db.Model(&models.Ride{}).
 			Where("booked_seats < total_seats AND start_time > NOW()")
-		
+
 		if hasStartCoord {
 			testTx = testTx.Where(
 				"ST_DWithin(ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, ST_SetSRID(ST_MakePoint(start_longitude, start_latitude), 4326)::geography, ?)",
@@ -190,7 +195,7 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 				endLon, endLat, radius,
 			)
 		}
-		
+
 		testTx.Count(&count)
 		if count >= 5 { // Found enough results
 			finalTx := tx
@@ -209,7 +214,7 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 			return finalTx, radius / 1000 // Return radius in km
 		}
 	}
-	
+
 	// Fallback to largest radius
 	finalTx := tx
 	if hasStartCoord {
@@ -229,7 +234,7 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 
 func calculateRelevanceScore(ride models.Ride, params SearchParams, startDist, endDist *float64) float64 {
 	score := 100.0
-	
+
 	// Distance penalties (closer = better)
 	if startDist != nil {
 		score -= (*startDist) * 2 // -2 points per km from start
@@ -237,21 +242,21 @@ func calculateRelevanceScore(ride models.Ride, params SearchParams, startDist, e
 	if endDist != nil {
 		score -= (*endDist) * 2 // -2 points per km from end
 	}
-	
+
 	loc, err := time.LoadLocation("Asia/Kolkata")
 	if err != nil {
 		loc = time.UTC
 	}
-	
+
 	now := time.Now().In(loc)
 	rideTime := ride.StartTime.In(loc)
-	
+
 	nowDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 	rideDateStart := time.Date(rideTime.Year(), rideTime.Month(), rideTime.Day(), 0, 0, 0, 0, loc)
-	
+
 	timeDiff := ride.StartTime.Sub(now)
 	daysDiff := rideDateStart.Sub(nowDate).Hours() / 24
-	
+
 	if timeDiff.Hours() < 0.5 {
 		score -= 30 // Too soon (less than 30 minutes)
 	} else if timeDiff.Hours() < 1 {
@@ -267,7 +272,7 @@ func calculateRelevanceScore(ride models.Ride, params SearchParams, startDist, e
 	} else if daysDiff > 7 {
 		score -= (daysDiff - 7) * 0.5 // Penalty for far future rides
 	}
-	
+
 	// Preferred time matching
 	if params.PreferredTime != "" {
 		hour := rideTime.Hour()
@@ -290,18 +295,18 @@ func calculateRelevanceScore(ride models.Ride, params SearchParams, startDist, e
 			}
 		}
 	}
-	
+
 	// Availability bonus
 	availableSeats := float64(ride.TotalSeats - ride.BookedSeats)
 	totalSeats := float64(ride.TotalSeats)
 	availabilityRatio := availableSeats / totalSeats
 	score += availabilityRatio * 15 // Up to 15 bonus points for full availability
-	
+
 	// Multiple seats bonus
 	if availableSeats > 1 {
 		score += 5
 	}
-	
+
 	// Price attractiveness (assuming lower prices are better)
 	if params.MaxPrice != nil && ride.TotalPrice <= *params.MaxPrice {
 		score += 10 // Bonus for being within budget
@@ -309,12 +314,12 @@ func calculateRelevanceScore(ride models.Ride, params SearchParams, startDist, e
 			score += 5 // Extra bonus for being very affordable
 		}
 	}
-	
+
 	// Capacity bonus
 	if params.MinSeats != nil && availableSeats >= float64(*params.MinSeats) {
 		score += 8
 	}
-	
+
 	return score
 }
 
@@ -355,34 +360,34 @@ func addMatchContextWithHost(card *RideCard, params SearchParams, hostPastRides 
 	} else if card.StartDistance != nil && *card.StartDistance < 5.0 {
 		reasons = append(reasons, "Close to pickup")
 	}
-	
+
 	if card.EndDistance != nil && *card.EndDistance < 2.0 {
 		reasons = append(reasons, "Very close to destination")
 	} else if card.EndDistance != nil && *card.EndDistance < 5.0 {
 		reasons = append(reasons, "Close to destination")
 	}
-	
+
 	availableSeats := card.TotalSeats - card.BookedSeats
 	if availableSeats > 2 {
 		reasons = append(reasons, "Multiple seats available")
 	} else if availableSeats > 1 {
 		reasons = append(reasons, "2 seats available")
 	}
-	
+
 	loc, err := time.LoadLocation("Asia/Kolkata")
 	if err != nil {
 		loc = time.UTC
 	}
-	
+
 	now := time.Now().In(loc)
 	rideTime := card.StartTime.In(loc)
-	
+
 	nowDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 	rideDateStart := time.Date(rideTime.Year(), rideTime.Month(), rideTime.Day(), 0, 0, 0, 0, loc)
 	tomorrowDate := nowDate.Add(24 * time.Hour)
-	
+
 	timeDiff := card.StartTime.Sub(now)
-	
+
 	if rideDateStart.Equal(nowDate) {
 		if timeDiff.Hours() > 1 && timeDiff.Hours() < 6 {
 			reasons = append(reasons, "Good timing today")
@@ -396,13 +401,13 @@ func addMatchContextWithHost(card *RideCard, params SearchParams, hostPastRides 
 	} else if timeDiff.Hours() > 0 && timeDiff.Hours() <= 72 {
 		reasons = append(reasons, "This week")
 	}
-	
+
 	if params.MaxPrice != nil && card.TotalPrice <= *params.MaxPrice/2 {
 		reasons = append(reasons, "Great price")
 	} else if params.MaxPrice != nil && card.TotalPrice <= *params.MaxPrice {
 		reasons = append(reasons, "Within budget")
 	}
-	
+
 	if len(reasons) > 0 {
 		card.MatchReason = strings.Join(reasons, ", ")
 	}
@@ -410,30 +415,30 @@ func addMatchContextWithHost(card *RideCard, params SearchParams, hostPastRides 
 
 func parseSearchParams(c *fiber.Ctx) (SearchParams, error) {
 	params := SearchParams{}
-	
+
 	params.StartLocation = c.Query("start_location")
 	params.EndLocation = c.Query("end_location")
 	params.Date = c.Query("date")
 	params.PreferredTime = c.Query("preferred_time")
 	params.SortBy = c.Query("sort_by", "relevance")
-	
+
 	limitStr := c.Query("limit", "20")
 	offsetStr := c.Query("offset", "0")
-	
+
 	limit, err := strconv.Atoi(limitStr)
 	if err != nil || limit < 1 {
 		params.Limit = 20
 	} else {
 		params.Limit = limit
 	}
-	
+
 	offset, err := strconv.Atoi(offsetStr)
 	if err != nil || offset < 0 {
 		params.Offset = 0
 	} else {
 		params.Offset = offset
 	}
-	
+
 	if latStr, lonStr := c.Query("start_lat"), c.Query("start_lon"); latStr != "" && lonStr != "" {
 		if v, err := strconv.ParseFloat(latStr, 64); err == nil {
 			params.StartLat = v
@@ -443,7 +448,7 @@ func parseSearchParams(c *fiber.Ctx) (SearchParams, error) {
 			}
 		}
 	}
-	
+
 	if latStr, lonStr := c.Query("end_lat"), c.Query("end_lon"); latStr != "" && lonStr != "" {
 		if v, err := strconv.ParseFloat(latStr, 64); err == nil {
 			params.EndLat = v
@@ -453,28 +458,28 @@ func parseSearchParams(c *fiber.Ctx) (SearchParams, error) {
 			}
 		}
 	}
-	
+
 	params.RadiusKm = 10.0 // default
 	if rStr := c.Query("radius"); rStr != "" {
 		if v, err := strconv.ParseFloat(rStr, 64); err == nil && v > 0 {
 			params.RadiusKm = v
 		}
 	}
-	
+
 	if maxPriceStr := c.Query("max_price"); maxPriceStr != "" {
 		if v, err := strconv.ParseUint(maxPriceStr, 10, 32); err == nil {
 			maxPrice := uint(v)
 			params.MaxPrice = &maxPrice
 		}
 	}
-	
+
 	if minSeatsStr := c.Query("min_seats"); minSeatsStr != "" {
 		if v, err := strconv.ParseUint(minSeatsStr, 10, 32); err == nil {
 			minSeats := uint(v)
 			params.MinSeats = &minSeats
 		}
 	}
-	
+
 	// Search is a public endpoint via OptionalAuthenticate, so a
 	// missing or invalid user is fine — we treat the caller as a
 	// guest. Downstream:
@@ -494,27 +499,31 @@ func parseSearchParams(c *fiber.Ctx) (SearchParams, error) {
 	return params, nil
 }
 
+func normalizeGender(gender string) string {
+	return strings.ToLower(strings.TrimSpace(gender))
+}
+
 func SearchRides(c *fiber.Ctx) error {
 	params, err := parseSearchParams(c)
 	if err != nil {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": err.Error()})
 	}
-	
-	log.Printf("Search params: StartLocation=%s, EndLocation=%s, StartCoord=(%f,%f), EndCoord=(%f,%f), HasStartCoord=%v, HasEndCoord=%v", 
+
+	log.Printf("Search params: StartLocation=%s, EndLocation=%s, StartCoord=(%f,%f), EndCoord=(%f,%f), HasStartCoord=%v, HasEndCoord=%v",
 		params.StartLocation, params.EndLocation, params.StartLat, params.StartLon, params.EndLat, params.EndLon, params.HasStartCoord, params.HasEndCoord)
-	
+
 	if params.HasStartCoord || params.HasEndCoord {
 		var nearestRides []struct {
-			StartLocation string   `json:"start_location"`
-			EndLocation   string   `json:"end_location"`
-			StartLatitude *float64 `json:"start_latitude"`
+			StartLocation  string   `json:"start_location"`
+			EndLocation    string   `json:"end_location"`
+			StartLatitude  *float64 `json:"start_latitude"`
 			StartLongitude *float64 `json:"start_longitude"`
-			EndLatitude   *float64 `json:"end_latitude"`
-			EndLongitude  *float64 `json:"end_longitude"`
-			StartDistance *float64 `json:"start_distance"`
-			EndDistance   *float64 `json:"end_distance"`
+			EndLatitude    *float64 `json:"end_latitude"`
+			EndLongitude   *float64 `json:"end_longitude"`
+			StartDistance  *float64 `json:"start_distance"`
+			EndDistance    *float64 `json:"end_distance"`
 		}
-		
+
 		query := `
 			SELECT 
 				start_location, 
@@ -523,7 +532,7 @@ func SearchRides(c *fiber.Ctx) error {
 				start_longitude, 
 				end_latitude, 
 				end_longitude`
-		
+
 		if params.HasStartCoord {
 			query += `,
 				ST_Distance(
@@ -533,7 +542,7 @@ func SearchRides(c *fiber.Ctx) error {
 		} else {
 			query += `, NULL as start_distance`
 		}
-		
+
 		if params.HasEndCoord {
 			query += `,
 				ST_Distance(
@@ -543,14 +552,14 @@ func SearchRides(c *fiber.Ctx) error {
 		} else {
 			query += `, NULL as end_distance`
 		}
-		
+
 		query += `
 			FROM rides 
 			WHERE booked_seats < total_seats 
 				AND start_time > NOW() 
 				AND (start_latitude IS NOT NULL OR end_latitude IS NOT NULL)
 			ORDER BY `
-		
+
 		if params.HasStartCoord && params.HasEndCoord {
 			query += `LEAST(
 				COALESCE(ST_Distance(
@@ -573,9 +582,9 @@ func SearchRides(c *fiber.Ctx) error {
 				ST_SetSRID(ST_MakePoint(end_longitude, end_latitude), 4326)::geography
 			) ASC`
 		}
-		
+
 		query += ` LIMIT 5`
-		
+
 		var queryArgs []interface{}
 		if params.HasStartCoord {
 			queryArgs = append(queryArgs, params.StartLon, params.StartLat)
@@ -590,19 +599,43 @@ func SearchRides(c *fiber.Ctx) error {
 		} else if params.HasEndCoord {
 			queryArgs = append(queryArgs, params.EndLon, params.EndLat)
 		}
-		
+
 		if err := database.Database.Db.Raw(query, queryArgs...).Scan(&nearestRides).Error; err == nil && len(nearestRides) > 0 {
 			log.Printf("=== NEAREST RIDES IN DATABASE ===")
 			for i, ride := range nearestRides {
-				log.Printf("  %d. Start: %s (%.6f, %.6f) End: %s (%.6f, %.6f)", 
-					i+1, 
+				log.Printf("  %d. Start: %s (%.6f, %.6f) End: %s (%.6f, %.6f)",
+					i+1,
 					ride.StartLocation,
-					func() float64 { if ride.StartLatitude != nil { return *ride.StartLatitude } else { return 0 } }(),
-					func() float64 { if ride.StartLongitude != nil { return *ride.StartLongitude } else { return 0 } }(),
+					func() float64 {
+						if ride.StartLatitude != nil {
+							return *ride.StartLatitude
+						} else {
+							return 0
+						}
+					}(),
+					func() float64 {
+						if ride.StartLongitude != nil {
+							return *ride.StartLongitude
+						} else {
+							return 0
+						}
+					}(),
 					ride.EndLocation,
-					func() float64 { if ride.EndLatitude != nil { return *ride.EndLatitude } else { return 0 } }(),
-					func() float64 { if ride.EndLongitude != nil { return *ride.EndLongitude } else { return 0 } }())
-				
+					func() float64 {
+						if ride.EndLatitude != nil {
+							return *ride.EndLatitude
+						} else {
+							return 0
+						}
+					}(),
+					func() float64 {
+						if ride.EndLongitude != nil {
+							return *ride.EndLongitude
+						} else {
+							return 0
+						}
+					}())
+
 				if ride.StartDistance != nil {
 					log.Printf("     Start distance: %.2f km", *ride.StartDistance)
 				}
@@ -615,12 +648,12 @@ func SearchRides(c *fiber.Ctx) error {
 			log.Printf("No rides found in database with coordinates or error: %v", err)
 		}
 	}
-	
+
 	tx := database.Database.Db.
 		Model(&models.Ride{}).
 		Where("booked_seats < total_seats AND start_time > NOW()").
 		Where("host_user_id != ?", params.User.ID)
-	
+
 	if params.Date != "" {
 		startTime, endTime, err := parseTimeWindow(params.Date, params.PreferredTime)
 		if err != nil {
@@ -629,21 +662,21 @@ func SearchRides(c *fiber.Ctx) error {
 		}
 		tx = tx.Where("start_time BETWEEN ? AND ?", startTime, endTime)
 	}
-	
+
 	if params.MaxPrice != nil {
 		tx = tx.Where("total_price <= ?", *params.MaxPrice)
 	}
-	
+
 	if params.MinSeats != nil {
 		tx = tx.Where("(total_seats - booked_seats) >= ?", *params.MinSeats)
 	}
-	
+
 	usedRadius := params.RadiusKm
 	var useCoordinateSearch bool
-	
+
 	if params.HasStartCoord || params.HasEndCoord {
 		coordinateTx := tx
-		
+
 		if params.HasStartCoord {
 			coordinateTx = coordinateTx.Where(
 				"ST_DWithin(ST_SetSRID(ST_MakePoint(?, ?), 4326)::geography, ST_SetSRID(ST_MakePoint(start_longitude, start_latitude), 4326)::geography, ?) OR start_longitude IS NULL OR start_latitude IS NULL",
@@ -656,23 +689,23 @@ func SearchRides(c *fiber.Ctx) error {
 				params.EndLon, params.EndLat, usedRadius*1000,
 			)
 		}
-		
+
 		var testCount int64
 		coordinateTx.Count(&testCount)
 		log.Printf("Coordinate-based search found %d results with radius %.1fkm", testCount, usedRadius)
-		
+
 		if testCount > 0 {
 			tx = coordinateTx
 			useCoordinateSearch = true
 		}
 	}
-	
+
 	if (!useCoordinateSearch || true) && (params.StartLocation != "" || params.EndLocation != "") {
 		textTx := database.Database.Db.
 			Model(&models.Ride{}).
 			Where("booked_seats < total_seats AND start_time > NOW()").
 			Where("host_user_id != ?", params.User.ID)
-		
+
 		if params.Date != "" {
 			startTime, endTime, _ := parseTimeWindow(params.Date, params.PreferredTime)
 			textTx = textTx.Where("start_time BETWEEN ? AND ?", startTime, endTime)
@@ -683,25 +716,25 @@ func SearchRides(c *fiber.Ctx) error {
 		if params.MinSeats != nil {
 			textTx = textTx.Where("(total_seats - booked_seats) >= ?", *params.MinSeats)
 		}
-		
+
 		if params.StartLocation != "" {
 			textTx = buildLocationQuery(textTx, params.StartLocation, false, 0, 0, 0, true)
 		}
 		if params.EndLocation != "" {
 			textTx = buildLocationQuery(textTx, params.EndLocation, false, 0, 0, 0, false)
 		}
-		
+
 		var textCount int64
 		textTx.Count(&textCount)
 		log.Printf("Text-based search found %d results", textCount)
-		
+
 		// Use text search if coordinate search failed or supplement it
 		if !useCoordinateSearch {
 			tx = textTx
 			log.Printf("Using text-based search")
 		}
 	}
-	
+
 	var rides []models.Ride
 	if err := tx.
 		Preload("HostUser").
@@ -712,22 +745,22 @@ func SearchRides(c *fiber.Ctx) error {
 		log.Printf("Database error: %v", err)
 		return c.Status(500).JSON(fiber.Map{"error": "Error fetching rides"})
 	}
-	
+
 	log.Printf("Query returned %d rides", len(rides))
-	
+
 	if len(rides) == 0 && (params.StartLocation != "" || params.EndLocation != "") {
 		log.Printf("No results found, trying fallback search...")
-		
+
 		fallbackTx := database.Database.Db.
 			Model(&models.Ride{}).
 			Where("booked_seats < total_seats AND start_time > NOW()").
 			Where("host_user_id != ?", params.User.ID)
-		
+
 		if params.Date != "" {
 			startTime, endTime, _ := parseTimeWindow(params.Date, params.PreferredTime)
 			fallbackTx = fallbackTx.Where("start_time BETWEEN ? AND ?", startTime, endTime)
 		}
-		
+
 		if params.StartLocation != "" {
 			words := strings.Fields(strings.ToLower(params.StartLocation))
 			for _, word := range words {
@@ -737,7 +770,7 @@ func SearchRides(c *fiber.Ctx) error {
 				}
 			}
 		}
-		
+
 		if params.EndLocation != "" {
 			words := strings.Fields(strings.ToLower(params.EndLocation))
 			for _, word := range words {
@@ -747,7 +780,7 @@ func SearchRides(c *fiber.Ctx) error {
 				}
 			}
 		}
-		
+
 		if err := fallbackTx.
 			Preload("HostUser").
 			Order("start_time ASC").
@@ -759,7 +792,7 @@ func SearchRides(c *fiber.Ctx) error {
 			log.Printf("Fallback search returned %d rides", len(rides))
 		}
 	}
-	
+
 	// Build a "routes the user has travelled" set so we can boost rides
 	// that match a route they've taken before. Pulls (start_location,
 	// end_location) tuples from both their past hosted rides and past
@@ -841,6 +874,8 @@ func SearchRides(c *fiber.Ctx) error {
 			HostUserName:              ride.HostUser.Name,
 			HostUserProfilePictureURL: ride.HostUser.ProfilePictureURL,
 			HostUserYOB:               ride.HostUser.YOB,
+			HostUserGender:            ride.HostUser.Gender,
+			SameGenderFemale:          normalizeGender(params.User.Gender) == "female" && normalizeGender(ride.HostUser.Gender) == "female",
 			StartLocation:             ride.StartLocation,
 			EndLocation:               ride.EndLocation,
 			StartTime:                 ride.StartTime,
@@ -862,7 +897,7 @@ func SearchRides(c *fiber.Ctx) error {
 		card.ViewerState = viewerCtx.State
 		card.Actions = viewerCtx.Actions
 		card.ViewerBookingID = viewerCtx.BookingID
-		
+
 		var startDist, endDist *float64
 		if params.HasStartCoord && helpers.AreCoordinatesValid(ride.StartLatitude, ride.StartLongitude) {
 			d := helpers.CalculateDistance(params.StartLat, params.StartLon, *ride.StartLatitude, *ride.StartLongitude)
@@ -882,7 +917,7 @@ func SearchRides(c *fiber.Ctx) error {
 		} else if card.EndDistance != nil {
 			card.TotalDistance = card.EndDistance
 		}
-		
+
 		card.RelevanceScore = calculateRelevanceScore(ride, params, startDist, endDist)
 
 		// Mild relevance boost for proven hosts so users see them first
@@ -911,7 +946,7 @@ func SearchRides(c *fiber.Ctx) error {
 
 		response = append(response, card)
 	}
-	
+
 	// Sort by preference
 	switch params.SortBy {
 	case "time":
@@ -943,16 +978,16 @@ func SearchRides(c *fiber.Ctx) error {
 			return response[i].StartTime.Before(response[j].StartTime)
 		})
 	}
-	
+
 	if len(response) > params.Limit {
 		response = response[:params.Limit]
 	}
-	
+
 	return c.Status(200).JSON(fiber.Map{
-		"rides": response,
-		"total_found": len(response),
+		"rides":          response,
+		"total_found":    len(response),
 		"used_radius_km": usedRadius,
-		"sort_by": params.SortBy,
+		"sort_by":        params.SortBy,
 		"search_method": func() string {
 			if useCoordinateSearch {
 				return "coordinate"
@@ -961,9 +996,9 @@ func SearchRides(c *fiber.Ctx) error {
 		}(),
 		"debug": fiber.Map{
 			"has_start_coord": params.HasStartCoord,
-			"has_end_coord": params.HasEndCoord,
-			"start_location": params.StartLocation,
-			"end_location": params.EndLocation,
+			"has_end_coord":   params.HasEndCoord,
+			"start_location":  params.StartLocation,
+			"end_location":    params.EndLocation,
 		},
 	})
 }

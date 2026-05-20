@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -21,12 +22,8 @@ const (
 	sesVerifySender = "UniPool <unipool@acmvit.in>"
 	awsRegion       = "ap-south-1"
 
-	// Brand assets. Hosted on Azure blob with a year-long SAS so
-	// the email keeps rendering across iterations of the template.
-	// If these expire, refresh via:
-	//   az storage blob generate-sas --account-name examcookerdevsi …
-	emailLogoURL = "https://examcookerdevsi.blob.core.windows.net/exam-assets/unipool-email/logo.png?se=2027-05-19T21%3A49Z&sp=r&sv=2026-02-06&sr=b&sig=Tpz2VtkyBak9aGWN1zFFlZLAC2d%2BFlG7kPqimdGTC5Q%3D"
-	emailIllustrationURL = "https://examcookerdevsi.blob.core.windows.net/exam-assets/unipool-email/illustration.png?se=2027-05-19T21%3A49Z&sp=r&sv=2026-02-06&sr=b&sig=DlIM%2F5DrcoDjPBsKyG8UTXJsitAZc5VDUf2Y89a%2BkWk%3D"
+	// Trap-Bold wordmark on Azure blob. SAS read-only through 2027-05-20.
+	emailWordmarkURL = "https://examcookerdevsi.blob.core.windows.net/exam-assets/unipool-email/wordmark.png?se=2027-05-20T00%3A00Z&sp=r&spr=https&sv=2026-02-06&sr=b&sig=7XpecwI5sxlV2UQxtHfoH%2FrS6c8w3TYs%2Fyms%2F7ZvSeY%3D"
 )
 
 var (
@@ -115,7 +112,7 @@ func loadAWSCLICreds() (*awsCLICreds, error) {
 
 // SendVerificationCode emails the user a one-tap magic link and the
 // matching numeric code as a fallback. Either path lands on the same
-// row in `email_verifications` — confirm by token or by code.
+// row in `email_verifications`; confirm by token or by code.
 //
 // `magicLink` should be the fully-formed deeplink (`unipool://verify?t=<token>`)
 // so the email body just renders it verbatim into the CTA's href.
@@ -124,12 +121,19 @@ func SendVerificationCode(toEmail, code, magicLink string) error {
 		return fmt.Errorf("ses init: %w", err)
 	}
 
-	subject := "Verify your academic status on UniPool"
+	subject := "Verify your email on UniPool"
 	textBody := fmt.Sprintf(
-		"Verify your UniPool academic status.\n\nTap to verify: %s\n\nOr enter this code in the app: %s\n\nThis link and code expire in 10 minutes. If you didn't ask to verify, you can ignore this email.",
-		magicLink, code,
+		"UniPool\n\n"+
+			"We need to confirm %s is yours.\n\n"+
+			"Verify in the app:\n%s\n\n"+
+			"Or enter this code: %s\n\n"+
+			"Expires in 10 minutes. Didn't request this? Ignore this email.",
+		toEmail, magicLink, formatCodeSpaced(code),
 	)
-	htmlBody := fmt.Sprintf(emailTemplate, emailLogoURL, toEmail, magicLink, code, emailIllustrationURL)
+	htmlBody := fmt.Sprintf(
+		emailTemplate,
+		emailWordmarkURL, toEmail, magicLink, magicLink, buildOTPDigitsHTML(code),
+	)
 
 	_, err := sesClient.SendEmail(&ses.SendEmailInput{
 		Source: aws.String(sesVerifySender),
@@ -151,85 +155,120 @@ func SendVerificationCode(toEmail, code, magicLink string) error {
 	return nil
 }
 
-// Email template. Five `%s` slots in order:
-//
-//   1. logo image URL
-//   2. recipient email (shown bold inside the body copy)
-//   3. magic-link URL (href on the CTA + the raw link below it)
-//   4. 6-digit code (rendered in the OTP block)
-//   5. illustration image URL
-//
-// Inline-styled because most email clients (notably Gmail) strip
-// <style> blocks. Forest + lime palette mirrors the in-app look.
+// formatCodeSpaced inserts a space after the third digit for plain-text
+// readability (e.g. "482 193").
+func formatCodeSpaced(code string) string {
+	code = strings.TrimSpace(code)
+	if len(code) == 6 {
+		return code[:3] + " " + code[3:]
+	}
+	return code
+}
+
+// buildOTPDigitsHTML renders the code as six boxed digits. Table-based
+// layout survives Gmail/Outlook better than letter-spacing on one span.
+func buildOTPDigitsHTML(code string) string {
+	code = strings.TrimSpace(code)
+	if len(code) != 6 {
+		return fmt.Sprintf(
+			`<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center"><tr><td style="padding:16px 20px;background:#FFFFFF;border:1.5px solid rgba(38,59,51,0.12);border-radius:14px;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;font-size:28px;font-weight:700;letter-spacing:0.35em;color:#263B33;">%s</td></tr></table>`,
+			code,
+		)
+	}
+	var b strings.Builder
+	b.WriteString(`<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" style="margin:0 auto;"><tr>`)
+	for i, ch := range code {
+		pad := "padding:0 3px;"
+		if i == 0 {
+			pad = "padding:0 3px 0 0;"
+		} else if i == 5 {
+			pad = "padding:0 0 0 3px;"
+		}
+		b.WriteString(fmt.Sprintf(
+			`<td style="%s"><div style="width:42px;height:50px;line-height:50px;text-align:center;background:#FFFFFF;border:1.5px solid rgba(38,59,51,0.12);border-radius:12px;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;font-size:26px;font-weight:700;color:#263B33;">%c</div></td>`,
+			pad, ch,
+		))
+	}
+	b.WriteString(`</tr></table>`)
+	return b.String()
+}
+
+// Email template. Five `%s` slots: wordmark URL, recipient email,
+// magic link (x2), OTP HTML. Wordmark is Trap-Bold PNG on Azure blob.
 const emailTemplate = `<!doctype html>
-<html lang="en">
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Verify your UniPool academic status</title>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="x-apple-disable-message-reformatting">
+  <title>Verify your email on UniPool</title>
 </head>
-<body style="margin:0;padding:0;background:#F1F4EE;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;color:#263B33;">
-  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%%" style="background:#F1F4EE;padding:36px 16px;">
+<body style="margin:0;padding:0;background:#B5D750;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#263B33;-webkit-text-size-adjust:100%%;ms-text-size-adjust:100%%;">
+  <div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;opacity:0;overflow:hidden;mso-hide:all;">
+    Your UniPool verification code. Tap the button or enter the code in the app.
+  </div>
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%%" style="background:#B5D750;padding:48px 20px 32px;">
     <tr>
       <td align="center">
-        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="520" style="max-width:520px;width:100%%;background:#FFFFFF;border-radius:22px;overflow:hidden;box-shadow:0 8px 24px rgba(38,59,51,0.08);">
-          <!-- Header band: lime canvas with the brand mark -->
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="440" style="max-width:440px;width:100%%;">
           <tr>
-            <td style="background:#B5D750;padding:28px 32px 22px;">
-              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
-                <tr>
-                  <td style="vertical-align:middle;">
-                    <img src="%s" alt="UniPool" width="44" height="44" style="display:block;border-radius:11px;border:0;">
-                  </td>
-                  <td style="vertical-align:middle;padding-left:12px;">
-                    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-weight:800;font-size:18px;color:#263B33;letter-spacing:-0.3px;">UniPool</div>
-                    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-weight:600;font-size:12px;color:#263B33;opacity:0.7;letter-spacing:0.2px;">Student carpools</div>
-                  </td>
-                </tr>
-              </table>
+            <td align="center" style="padding:0 0 32px;">
+              <img src="%s" alt="UniPool" width="152" style="display:block;margin:0 auto;border:0;height:auto;max-width:70%%;">
             </td>
           </tr>
-
-          <!-- Body -->
           <tr>
-            <td style="padding:32px 32px 8px;">
-              <h1 style="margin:0 0 8px;font-size:22px;font-weight:800;color:#263B33;letter-spacing:-0.5px;line-height:30px;">Verify your academic status</h1>
-              <p style="margin:0 0 22px;font-size:15px;line-height:23px;color:#52786A;">
-                Confirm that <b style="color:#263B33;">%s</b> belongs to you and we'll add a verified badge to your UniPool profile.
+            <td style="background:#FFFDF4;border-radius:20px;padding:32px 28px;box-shadow:0 4px 24px rgba(38,59,51,0.1);">
+              <h1 style="margin:0 0 12px;font-size:22px;font-weight:800;color:#263B33;letter-spacing:-0.4px;line-height:28px;text-align:center;">Verify your email</h1>
+              <p style="margin:0 0 28px;font-size:15px;line-height:23px;color:rgba(38,59,51,0.7);text-align:center;">
+                Sent to <strong style="color:#263B33;">%s</strong>. Tap below or enter the code in UniPool.
               </p>
-
-              <!-- Primary CTA: deeplink button. Bg + text both inline-styled
-                   so Gmail / Apple Mail / Outlook all render the pill. -->
-              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 24px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%%" style="margin:0 0 20px;">
                 <tr>
-                  <td align="center" style="border-radius:14px;background:#263B33;">
-                    <a href="%s" target="_blank" style="display:inline-block;padding:14px 28px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:15px;font-weight:800;letter-spacing:0.3px;color:#B5D750;text-decoration:none;border-radius:14px;">
-                      Tap to verify →
+                  <td align="center">
+                    <!--[if mso]>
+                    <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="%s" style="height:50px;v-text-anchor:middle;width:240px;" arcsize="28%%" strokecolor="#263B33" fillcolor="#263B33">
+                      <w:anchorlock/>
+                      <center style="color:#B5D750;font-family:sans-serif;font-size:15px;font-weight:bold;">Verify in app</center>
+                    </v:roundrect>
+                    <![endif]-->
+                    <!--[if !mso]><!-->
+                    <a href="%s" target="_blank" style="display:inline-block;width:100%%;max-width:280px;background:#263B33;color:#B5D750;font-size:15px;font-weight:800;line-height:50px;text-decoration:none;border-radius:14px;text-align:center;">
+                      Verify in app
                     </a>
+                    <!--<![endif]-->
                   </td>
                 </tr>
               </table>
-
-              <!-- Fallback code. Some email clients (notably Gmail web in
-                   strict mode) will strip the unipool:// deeplink; in
-                   that case the recipient enters the code manually. -->
-              <div style="margin:0 0 8px;font-size:13px;color:#86988F;font-weight:600;letter-spacing:0.3px;text-transform:uppercase;">Or enter this code</div>
-              <div style="margin:0 0 24px;padding:18px 16px;background:#EBF1ED;border-radius:14px;text-align:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-weight:800;font-size:30px;letter-spacing:0.4em;color:#263B33;">
-                %s
-              </div>
-
-              <p style="margin:0 0 4px;font-size:12.5px;line-height:18px;color:#86988F;">
-                The link and code expire in 10 minutes. If you didn't ask to verify, you can ignore this email — nothing changes on your account.
+              <p style="margin:0 0 24px;font-size:13px;line-height:18px;color:rgba(38,59,51,0.5);text-align:center;">
+                Open on your phone.
+              </p>
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%%" style="margin:0 0 20px;">
+                <tr>
+                  <td style="border-top:1px solid rgba(38,59,51,0.1);width:40%%;">&nbsp;</td>
+                  <td style="padding:0 10px;font-size:12px;font-weight:600;color:rgba(38,59,51,0.4);text-align:center;white-space:nowrap;">or use code</td>
+                  <td style="border-top:1px solid rgba(38,59,51,0.1);width:40%%;">&nbsp;</td>
+                </tr>
+              </table>
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%%" style="margin:0 0 20px;">
+                <tr>
+                  <td align="center">
+                    %s
+                  </td>
+                </tr>
+              </table>
+              <p style="margin:0;font-size:13px;line-height:18px;color:rgba(38,59,51,0.5);text-align:center;">
+                Expires in 10 minutes.
               </p>
             </td>
           </tr>
-
-          <!-- Footer with the brand illustration -->
           <tr>
-            <td style="padding:18px 32px 32px;text-align:center;">
-              <img src="%s" alt="" width="180" style="display:inline-block;max-width:60%%;border:0;opacity:0.9;">
-              <p style="margin:18px 0 0;font-size:12px;line-height:18px;color:#86988F;">
-                UniPool · ACM-VIT · Vellore Institute of Technology
+            <td style="padding:28px 12px 8px;text-align:center;">
+              <p style="margin:0 0 10px;font-size:12px;line-height:18px;color:rgba(38,59,51,0.55);">
+                Didn't request this? Ignore this email.
+              </p>
+              <p style="margin:0;font-size:13px;font-weight:700;color:rgba(38,59,51,0.65);letter-spacing:0.2px;">
+                Sent with <span style="color:#263B33;">&#9829;</span> by ACM-VIT
               </p>
             </td>
           </tr>

@@ -97,14 +97,14 @@ func SearchInstitutes(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"institutes": []any{}})
 	}
 
-	// Substring match against the lowercased name covers natural
-	// queries ("vellore", "indian institute"). For short queries
-	// we ALSO match against the institute's acronym — the string
-	// formed by every uppercase ASCII letter in the name. That
-	// makes "VIT" find "Vellore Institute of Technology", "IIT"
-	// find every IIT campus, "BITS" find "Birla Institute of
-	// Technology and Science", etc. without the user needing to
-	// know the full name.
+	// Match against three different fields so users can find their
+	// institute by whatever they remember:
+	//   1) Natural-name substring ("vellore", "indian institute")
+	//   2) Acronym from uppercase letters in the name ("VIT", "IIT-D")
+	//   3) Email domain prefix/substring ("vitstudent" → VIT, "iitb"
+	//      → IIT Bombay). Domains are stored in institute_domains —
+	//      we join via EXISTS so each institute appears once even if
+	//      multiple domains match.
 	pattern := "%" + q + "%"
 	prefixPattern := q + "%"
 	// Strip non-letters from the raw query before treating it as an
@@ -122,43 +122,80 @@ func SearchInstitutes(c *fiber.Ctx) error {
 		acronymPattern = acronym + "%"
 	}
 
-	// Relevance ordering — exact acronym match wins, then acronym
-	// prefix, then name-starts-with, then any substring match.
+	// Relevance ordering — tightest match wins:
+	//   1) exact acronym match
+	//   2) acronym prefix
+	//   3) name starts with query
+	//   4) ANY domain starts with query
+	//   5) name contains query
+	//   6) (default) — must be a domain substring match
 	// Within a tier, shorter names rank first so canonical entries
 	// like "Vellore Institute of Technology" beat the longer
 	// "Vellore Institute of Technology, Vellore" variant.
 	//
-	// Hand-written SQL because GORM's chained `Order` doesn't bind
-	// arguments — the CASE expression needs `?` placeholders.
+	// Limited to 15 — 20 was scrollable noise, 15 fits the visible
+	// list comfortably while still covering acronym-ambiguous queries
+	// (e.g. "IIT" matches every campus).
 	var institutes []models.Institute
 	var sql string
 	var args []any
 	if acronym != "" {
 		sql = `
-			SELECT * FROM institutes
-			WHERE LOWER(name) LIKE ?
-			   OR REGEXP_REPLACE(name, '[^A-Z]', '', 'g') LIKE ?
+			SELECT * FROM institutes i
+			WHERE LOWER(i.name) LIKE ?
+			   OR REGEXP_REPLACE(i.name, '[^A-Z]', '', 'g') LIKE ?
+			   OR EXISTS (
+			     SELECT 1 FROM institute_domains d
+			      WHERE d.institute_id = i.id
+			        AND LOWER(d.domain) LIKE ?
+			   )
 			ORDER BY
 				CASE
-					WHEN REGEXP_REPLACE(name, '[^A-Z]', '', 'g') = ? THEN 1
-					WHEN REGEXP_REPLACE(name, '[^A-Z]', '', 'g') LIKE ? THEN 2
-					WHEN LOWER(name) LIKE ? THEN 3
-					ELSE 4
+					WHEN REGEXP_REPLACE(i.name, '[^A-Z]', '', 'g') = ? THEN 1
+					WHEN REGEXP_REPLACE(i.name, '[^A-Z]', '', 'g') LIKE ? THEN 2
+					WHEN LOWER(i.name) LIKE ? THEN 3
+					WHEN EXISTS (
+					  SELECT 1 FROM institute_domains d
+					   WHERE d.institute_id = i.id
+					     AND LOWER(d.domain) LIKE ?
+					) THEN 4
+					WHEN LOWER(i.name) LIKE ? THEN 5
+					ELSE 6
 				END ASC,
-				LENGTH(name) ASC,
-				name ASC
-			LIMIT 20`
-		args = []any{pattern, acronymPattern, acronym, acronymPattern, prefixPattern}
+				LENGTH(i.name) ASC,
+				i.name ASC
+			LIMIT 15`
+		args = []any{
+			pattern, acronymPattern, pattern,
+			acronym, acronymPattern, prefixPattern, prefixPattern, pattern,
+		}
 	} else {
 		sql = `
-			SELECT * FROM institutes
-			WHERE LOWER(name) LIKE ?
+			SELECT * FROM institutes i
+			WHERE LOWER(i.name) LIKE ?
+			   OR EXISTS (
+			     SELECT 1 FROM institute_domains d
+			      WHERE d.institute_id = i.id
+			        AND LOWER(d.domain) LIKE ?
+			   )
 			ORDER BY
-				CASE WHEN LOWER(name) LIKE ? THEN 1 ELSE 2 END ASC,
-				LENGTH(name) ASC,
-				name ASC
-			LIMIT 20`
-		args = []any{pattern, prefixPattern}
+				CASE
+					WHEN LOWER(i.name) LIKE ? THEN 1
+					WHEN EXISTS (
+					  SELECT 1 FROM institute_domains d
+					   WHERE d.institute_id = i.id
+					     AND LOWER(d.domain) LIKE ?
+					) THEN 2
+					WHEN LOWER(i.name) LIKE ? THEN 3
+					ELSE 4
+				END ASC,
+				LENGTH(i.name) ASC,
+				i.name ASC
+			LIMIT 15`
+		args = []any{
+			pattern, pattern,
+			prefixPattern, prefixPattern, pattern,
+		}
 	}
 	if err := database.Database.Db.Raw(sql, args...).Scan(&institutes).Error; err != nil {
 		log.Printf("SearchInstitutes: %v", err)

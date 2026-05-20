@@ -41,6 +41,18 @@ type UserRidesResponse struct {
 // state so the Trips screen can bucket + style each row without
 // asking "wait, what's my relationship to this ride?" client-side.
 //
+// Query params:
+//   - ?scope=upcoming  → exclude rides whose start_time is >24h ago.
+//                        Used by the home "Your trips" carousel so
+//                        past trips don't linger on the headline.
+//   - ?scope=past      → only rides whose start_time is >24h ago.
+//                        Used by the Trip History screen under Profile.
+//   - ?scope=all       → (default, omitted, or unknown) no time filter.
+//                        Preserved so existing callers don't break.
+//
+// The 24h cutoff matches ResolveViewerState's `StatePast` boundary so
+// scope + viewer_state stay consistent.
+//
 // Perf:
 //   - One query for hosted rides, one for booked rides — both bounded
 //     by user-scoped indexes.
@@ -58,6 +70,7 @@ func FetchUserRides(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"error": "Invalid user data"})
 	}
 	viewerID := user.ID
+	scope := c.Query("scope", "all")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -81,7 +94,7 @@ func FetchUserRides(c *fiber.Ctx) error {
 		RequestStatus *string
 	}
 	var rows []row
-	if err := database.Database.Db.WithContext(ctx).
+	q := database.Database.Db.WithContext(ctx).
 		Table("rides AS r").
 		Select(`
 			r.id            AS ride_id,
@@ -99,9 +112,19 @@ func FetchUserRides(c *fiber.Ctx) error {
 			b.request_status
 		`).
 		Joins("LEFT JOIN bookings b ON b.ride_id = r.id AND b.passenger_id = ?", viewerID).
-		Where("r.host_user_id = ? OR b.passenger_id = ?", viewerID, viewerID).
-		Order("r.start_time DESC").
-		Scan(&rows).Error; err != nil {
+		Where("r.host_user_id = ? OR b.passenger_id = ?", viewerID, viewerID)
+
+	// Same 24h cutoff that ResolveViewerState uses for StatePast, so
+	// the scope filter and viewer_state agree on what "past" means.
+	pastCutoff := time.Now().Add(-24 * time.Hour)
+	switch scope {
+	case "upcoming":
+		q = q.Where("r.start_time >= ?", pastCutoff)
+	case "past":
+		q = q.Where("r.start_time < ?", pastCutoff)
+	}
+
+	if err := q.Order("r.start_time DESC").Scan(&rows).Error; err != nil {
 		log.Printf("FetchUserRides query failed: %v", err)
 		return c.Status(fiber.StatusBadGateway).SendString("Error finding rides for user")
 	}

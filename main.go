@@ -24,7 +24,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 )
 
-func SetupRoutes(app *fiber.App) {
+func SetupMiddleware(app *fiber.App) {
 	// gzip every JSON response. Chat-list / user-rides / ride-search
 	// payloads are textually verbose; compression cuts wire bytes
 	// 60-75% on average. CPU cost is negligible at our load.
@@ -36,7 +36,9 @@ func SetupRoutes(app *fiber.App) {
 		AllowHeaders:     "Origin,Content-Type,Accept,Authorization,X-Requested-With",
 		AllowCredentials: false,
 	}))
+}
 
+func SetupRoutes(app *fiber.App) {
 	// Ride CRUD routes
 	app.Post("/ride/create", rides.CreateRide)                 // Creates a new ride
 	app.Get("/ride/fetch/:id", CRUD.GetRideByID)               // Gets details of a ride by it's ID
@@ -52,6 +54,26 @@ func SetupRoutes(app *fiber.App) {
 	// Ride settings routes
 	app.Get("/ride/:ride_id/settings", rides.GetRideSettings)    // Gets ride settings
 	app.Put("/ride/:ride_id/settings", rides.UpdateRideSettings) // Updates ride settings
+
+	// Post-trip ratings. /eligibility tells the client whether the
+	// caller can rate someone on this ride yet (12h after start);
+	// /rate accepts the batched form submission.
+	app.Get("/ride/:id/rating-eligibility", rides.GetRideRatingEligibility)
+	app.Post("/ride/:id/rate", rides.SubmitRideRating)
+	// Aggregate "what trips still need ratings from me?" — drives
+	// both the home-screen prompt on app focus and the trip-history
+	// badge counts.
+	app.Get("/user/pending-ratings", rides.GetPendingRatings)
+
+	// Notification preferences. /prefs is the global category list
+	// (chat / ride-updates / reminders / rating-prompts); per-ride
+	// chat mute lives at /ride/:ride_id/chat-mute and is the
+	// canonical wiring for the chat-settings sheet's "Mute
+	// notifications" toggle.
+	app.Get("/user/notification-prefs", users.GetNotificationPreferences)
+	app.Put("/user/notification-prefs", users.SetNotificationPreference)
+	app.Get("/ride/:ride_id/chat-mute", users.GetRideChatMute)
+	app.Put("/ride/:ride_id/chat-mute", users.SetRideChatMute)
 
 	// User CRUD routes
 	app.Post("/user", users.CreateOrUpdateUser)                  // Create or update a user
@@ -112,6 +134,10 @@ func SetupRoutes(app *fiber.App) {
 	// whenever the chat is opened or returns to the foreground so the
 	// unread badge on the chat-list stays accurate.
 	app.Post("/chat/:ride_id/read", chat.MarkRideRead)
+	// DM-room read marker — same shape as the ride one, used by the
+	// host's pending-request thread so the unread badge clears when
+	// they open the DM.
+	app.Post("/dm/:dm_room_id/read", chat.MarkDMRead)
 	app.Get("/chat/connections", chat.GetActiveConnections) // Debug
 
 	// Notification routes
@@ -136,6 +162,7 @@ func SetupRoutes(app *fiber.App) {
 	// Ride and Passenger Info routes
 	app.Get("/rides/involved", rides.GetInvolvedRides)
 	app.Get("/passengers/all", rides.GetAllPassengers)
+	app.Delete("/rides/:ride_id/participants/:user_id", rides.RemoveRideParticipant)
 
 	app.Post("/booking/create", CRUD.CreateBooking)           // Creates a new booking
 	app.Get("/booking/list", CRUD.GetBookings)                // Retrieves all bookings
@@ -175,6 +202,8 @@ func main() {
 			})
 		},
 	})
+
+	SetupMiddleware(app)
 
 	database.ConnectToDB()
 

@@ -6,6 +6,7 @@ import (
 	"unipool-backend/database"
 	"unipool-backend/helpers"
 	"unipool-backend/models"
+	"unipool-backend/services"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -381,8 +382,22 @@ func DeleteRideByID(c *fiber.Ctx) error {
 	if acceptedBookingsCount > 0 {
 		log.Printf("Cannot delete ride %v: has %d accepted bookings\n", rideID, acceptedBookingsCount)
 		return c.Status(400).JSON(fiber.Map{
-			"error": "Cannot delete ride with accepted bookings. Please remove all passengers first.",
+			"error":                  "You can't delete this ride — you've already accepted passengers. Reject them first if you really need to cancel.",
+			"accepted_booking_count": acceptedBookingsCount,
 		})
+	}
+
+	// Collect pending bookings BEFORE deletion so we can notify each
+	// requester that the post they were waiting on has gone away.
+	// Cascade-delete drops these rows along with the ride; without
+	// this snapshot we'd lose the user_id list.
+	var pendingBookings []models.Booking
+	if err := database.Database.Db.
+		Where("ride_id = ? AND request_status = ?", rideUUID, "pending").
+		Find(&pendingBookings).Error; err != nil {
+		log.Printf("Error fetching pending bookings for ride %v: %v\n", rideID, err)
+		// Don't block deletion on this — better to drop the post and
+		// skip the notification than leave a stale ride around.
 	}
 
 	result = database.Database.Db.Delete(&ride)
@@ -394,8 +409,34 @@ func DeleteRideByID(c *fiber.Ctx) error {
 		})
 	}
 
-	log.Printf("Ride with id %v deleted by user %v\n", ride.ID, user.ID)
+	// Fire-and-forget pending-passenger notifications. Run in a
+	// goroutine so the response doesn't wait on FCM round-trips, and
+	// so a transient FCM hiccup doesn't 500 the delete that already
+	// committed to the DB.
+	if len(pendingBookings) > 0 {
+		fcm := services.GetFCMService()
+		if fcm != nil {
+			pendingCopy := pendingBookings
+			rideRoute := ride.StartLocation + " → " + ride.EndLocation
+			go func() {
+				for _, b := range pendingCopy {
+					_ = fcm.SendNotification(
+						b.PassengerID,
+						"Ride no longer available",
+						"The host pulled "+rideRoute+". Find another one — there are usually more on the same route.",
+						map[string]string{
+							"type":    "ride_cancelled_pending",
+							"ride_id": ride.ID.String(),
+						},
+					)
+				}
+			}()
+		}
+	}
+
+	log.Printf("Ride with id %v deleted by user %v (notified %d pending passengers)\n", ride.ID, user.ID, len(pendingBookings))
 	return c.Status(200).JSON(fiber.Map{
-		"message": "Ride deleted successfully",
+		"message":             "Ride deleted",
+		"pending_notified":    len(pendingBookings),
 	})
 }

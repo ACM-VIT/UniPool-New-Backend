@@ -55,7 +55,7 @@ func ConnectToDB() {
 	}
 
 	poolSize := 10
-	sqlDB.SetMaxOpenConns(poolSize)            
+	sqlDB.SetMaxOpenConns(poolSize)
 	sqlDB.SetMaxIdleConns(poolSize / 2)        // 5 idle connections
 	sqlDB.SetConnMaxLifetime(10 * time.Minute) // Reduced to 10 minutes
 	sqlDB.SetConnMaxIdleTime(2 * time.Minute)  // Reduced to 2 minutes
@@ -82,6 +82,9 @@ func ConnectToDB() {
 			&models.Message{},
 			&models.ChatRead{},
 			&models.Report{},
+			&models.EmailVerification{},
+			&models.NotificationPreference{},
+			&models.RideRating{},
 		)
 
 		if err != nil {
@@ -101,7 +104,7 @@ func ConnectToDB() {
 
 func createIndexes(db *gorm.DB) error {
 	log.Println("Creating database indexes for better performance...")
-	
+
 	log.Println("Installing required PostgreSQL extensions...")
 	extensions := []struct {
 		name string
@@ -112,7 +115,7 @@ func createIndexes(db *gorm.DB) error {
 		{"earthdistance", "CREATE EXTENSION IF NOT EXISTS earthdistance"},
 		{"pg_trgm", "CREATE EXTENSION IF NOT EXISTS pg_trgm"},
 	}
-	
+
 	extensionCount := 0
 	for _, ext := range extensions {
 		log.Printf("Installing extension: %s", ext.name)
@@ -124,7 +127,7 @@ func createIndexes(db *gorm.DB) error {
 		}
 	}
 	log.Printf("Installed %d/%d extensions successfully", extensionCount, len(extensions))
-	
+
 	// Ensure new chat-read table exists even when SHOULD_MIGRATE isn't
 	// set. Auto-migrate handles new columns when explicitly enabled;
 	// these CREATE ... IF NOT EXISTS statements are a cheap safety
@@ -145,6 +148,8 @@ func createIndexes(db *gorm.DB) error {
 			ON chat_reads(user_id, ride_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_chat_reads_dm
 			ON chat_reads(dm_room_id)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_reads_user_dm
+			ON chat_reads(user_id, dm_room_id)`,
 	}
 	for _, stmt := range chatReadsDDL {
 		if err := db.Exec(stmt).Error; err != nil {
@@ -176,6 +181,13 @@ func createIndexes(db *gorm.DB) error {
 		// Chat-list & message-history hot paths.
 		{"idx_messages_ride_created", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_ride_created ON messages(ride_id, created_at DESC)"},
 		{"idx_messages_dm_created", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_dm_created ON messages(dm_room_id, created_at DESC)"},
+
+		// Notification preferences need separate partial unique indexes:
+		// Postgres treats NULL values as distinct, so a single
+		// (user_id, category, ride_id) unique index does not protect
+		// global rows where ride_id IS NULL.
+		{"idx_notif_pref_global", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_notif_pref_global ON notification_preferences(user_id, category) WHERE ride_id IS NULL"},
+		{"idx_notif_pref_ride", "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_notif_pref_ride ON notification_preferences(user_id, category, ride_id) WHERE ride_id IS NOT NULL"},
 	}
 
 	successCount := 0

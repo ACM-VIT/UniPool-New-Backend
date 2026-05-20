@@ -24,7 +24,6 @@ const (
 
 func (c *Client) readPump() {
 	defer func() {
-		c.sendUserPresenceUpdate("user_left")
 		c.Hub.Unregister <- c
 		c.Conn.Close()
 	}()
@@ -35,8 +34,6 @@ func (c *Client) readPump() {
 		c.Conn.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
 	})
-
-	c.sendUserPresenceUpdate("user_joined")
 
 	for {
 		_, message, err := c.Conn.ReadMessage()
@@ -56,7 +53,7 @@ func (c *Client) readPump() {
 		}
 
 		msgType, _ := baseMsg["type"].(string)
-		
+
 		switch msgType {
 		case "message":
 			c.handleChatMessage(message)
@@ -77,15 +74,8 @@ func (c *Client) handleChatMessage(message []byte) {
 		return
 	}
 
-	var sender models.User
-	senderUUID, err := uuid.Parse(c.UserID)
-	if err != nil {
+	if _, err := uuid.Parse(c.UserID); err != nil {
 		log.Printf("Invalid sender UUID: %v", err)
-		return
-	}
-
-	if err := database.Database.Db.First(&sender, senderUUID).Error; err != nil {
-		log.Printf("Error fetching sender details: %v", err)
 		return
 	}
 
@@ -93,10 +83,10 @@ func (c *Client) handleChatMessage(message []byte) {
 	chatMsg.RoomID = c.RoomID
 	chatMsg.Timestamp = time.Now().Format(time.RFC3339)
 	chatMsg.Type = "message"
-	
+
 	chatMsg.Sender = &UserInfo{
-		Name:              sender.Name,
-		ProfilePictureURL: sender.ProfilePictureURL,
+		Name:              c.Name,
+		ProfilePictureURL: c.Avatar,
 	}
 
 	if chatMsg.MessageID == "" {
@@ -118,7 +108,6 @@ func (c *Client) handleChatMessage(message []byte) {
 
 		if len(m.RoomID) > 3 && m.RoomID[:3] == "dm_" {
 			msg.DMRoomID = &m.RoomID
-			log.Printf("Saving DM message to room: %s", m.RoomID)
 		} else {
 			rideUUID, err := uuid.Parse(m.RoomID)
 			if err != nil {
@@ -126,7 +115,6 @@ func (c *Client) handleChatMessage(message []byte) {
 				return
 			}
 			msg.RideID = &rideUUID
-			log.Printf("Saving ride message to ride: %s", m.RoomID)
 		}
 
 		if err := database.Database.Db.Create(&msg).Error; err != nil {
@@ -148,11 +136,9 @@ func (c *Client) handleChatMessage(message []byte) {
 				Timestamp: msg.CreatedAt.Format(time.RFC3339),
 				Sender:    m.Sender,
 			}
-			
+
 			if confirmMsg, err := json.Marshal(confirmation); err == nil {
-				select {
-				case c.Send <- confirmMsg:
-				default:
+				if ok := c.TrySend(confirmMsg); !ok {
 					log.Printf("Failed to send confirmation to sender")
 				}
 			}
@@ -187,51 +173,13 @@ func (c *Client) handleTypingIndicator(message []byte) {
 		return
 	}
 
-	var user models.User
-	userUUID, err := uuid.Parse(c.UserID)
-	if err != nil {
-		log.Printf("Invalid user UUID: %v", err)
-		return
-	}
-
-	if err := database.Database.Db.First(&user, userUUID).Error; err != nil {
-		log.Printf("Error fetching user details: %v", err)
-		return
-	}
-
 	typingMsg.UserID = c.UserID
-	typingMsg.UserName = user.Name
+	typingMsg.UserName = c.Name
 	typingMsg.RoomID = c.RoomID
 	typingMsg.Type = "typing"
 
 	if typingBytes, err := json.Marshal(typingMsg); err == nil {
 		c.Hub.BroadcastToRoomExceptSender(c.RoomID, c, typingBytes)
-	}
-}
-
-func (c *Client) sendUserPresenceUpdate(presenceType string) {
-	// Get user name
-	var user models.User
-	userUUID, err := uuid.Parse(c.UserID)
-	if err != nil {
-		log.Printf("Invalid user UUID: %v", err)
-		return
-	}
-
-	if err := database.Database.Db.First(&user, userUUID).Error; err != nil {
-		log.Printf("Error fetching user details: %v", err)
-		return
-	}
-
-	presenceMsg := UserPresenceMessage{
-		Type:     presenceType,
-		UserID:   c.UserID,
-		UserName: user.Name,
-		RoomID:   c.RoomID,
-	}
-
-	if presenceBytes, err := json.Marshal(presenceMsg); err == nil {
-		c.Hub.BroadcastToRoomExceptSender(c.RoomID, c, presenceBytes)
 	}
 }
 

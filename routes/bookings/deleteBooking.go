@@ -19,7 +19,7 @@ func DeleteBooking(c *fiber.Ctx) error {
 	if userInterface == nil {
 		return c.Status(401).JSON(fiber.Map{
 			"success": false,
-			"error": "User not authenticated",
+			"error":   "User not authenticated",
 		})
 	}
 
@@ -27,7 +27,7 @@ func DeleteBooking(c *fiber.Ctx) error {
 	if !ok {
 		return c.Status(401).JSON(fiber.Map{
 			"success": false,
-			"error": "Invalid user data",
+			"error":   "Invalid user data",
 		})
 	}
 
@@ -36,13 +36,25 @@ func DeleteBooking(c *fiber.Ctx) error {
 		return &fiber.Error{Code: 400, Message: "Invalid booking ID format"}
 	}
 
+	tx := database.Database.Db.Begin()
+	if tx.Error != nil {
+		return &fiber.Error{Code: 500, Message: "Database error"}
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+			panic(r)
+		}
+	}()
+
 	var booking models.Booking
-	err = database.Database.Db.First(&booking, "id = ?", bookingID).Error
+	err = tx.First(&booking, "id = ?", bookingID).Error
 	if err != nil {
+		tx.Rollback()
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return c.Status(404).JSON(fiber.Map{
-				"success": false,
-				"error": "Booking not found",
+				"success":    false,
+				"error":      "Booking not found",
 				"booking_id": bookingID.String(),
 			})
 		}
@@ -51,34 +63,52 @@ func DeleteBooking(c *fiber.Ctx) error {
 	}
 
 	var ride models.Ride
-	if err := database.Database.Db.First(&ride, booking.RideID).Error; err != nil {
+	if err := tx.First(&ride, booking.RideID).Error; err != nil {
+		tx.Rollback()
 		log.Printf("Error finding ride with ID %v: %v\n", booking.RideID, err)
 		return c.Status(404).JSON(fiber.Map{
-			"success": false,
-			"error": "Ride not found",
+			"success":    false,
+			"error":      "Ride not found",
 			"booking_id": bookingID.String(),
 		})
 	}
 
 	if ride.HostUserID != user.ID && booking.PassengerID != user.ID {
+		tx.Rollback()
 		log.Printf("User %v is not authorized to delete booking %v (host: %v, passenger: %v)\n", user.ID, booking.ID, ride.HostUserID, booking.PassengerID)
 		return c.Status(403).JSON(fiber.Map{
-			"success": false,
-			"error": "Only the ride host or the passenger can delete this booking",
+			"success":    false,
+			"error":      "Only the ride host or the passenger can delete this booking",
 			"booking_id": bookingID.String(),
 		})
 	}
 
 	// Perform the deletion
-	if err := database.Database.Db.Delete(&booking).Error; err != nil {
+	if err := tx.Delete(&booking).Error; err != nil {
+		tx.Rollback()
 		log.Println(err)
+		return &fiber.Error{Code: 500, Message: "Database error"}
+	}
+
+	if booking.RequestStatus == "accepted" {
+		if err := tx.Model(&models.Ride{}).
+			Where("id = ? AND booked_seats > 0", booking.RideID).
+			Update("booked_seats", gorm.Expr("booked_seats - 1")).Error; err != nil {
+			tx.Rollback()
+			log.Printf("Error decrementing booked seats for ride %v: %v\n", booking.RideID, err)
+			return &fiber.Error{Code: 500, Message: "Database error"}
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		log.Printf("Error committing booking delete transaction: %v\n", err)
 		return &fiber.Error{Code: 500, Message: "Database error"}
 	}
 
 	log.Printf("Booking with id %v deleted\n", booking.ID)
 	return c.Status(200).JSON(fiber.Map{
-		"success": true,
-		"message": "Booking deleted successfully",
+		"success":    true,
+		"message":    "Booking deleted successfully",
 		"booking_id": booking.ID.String(),
 	})
 }

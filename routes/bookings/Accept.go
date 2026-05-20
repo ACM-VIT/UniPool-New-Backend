@@ -7,6 +7,7 @@ import (
 	"unipool-backend/services"
 
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm"
 )
 
 func AcceptRoute(c *fiber.Ctx) error {
@@ -16,7 +17,7 @@ func AcceptRoute(c *fiber.Ctx) error {
 	if userInterface == nil {
 		return c.Status(401).JSON(fiber.Map{
 			"success": false,
-			"error": "User not authenticated",
+			"error":   "User not authenticated",
 		})
 	}
 
@@ -24,7 +25,7 @@ func AcceptRoute(c *fiber.Ctx) error {
 	if !ok {
 		return c.Status(401).JSON(fiber.Map{
 			"success": false,
-			"error": "Invalid user data",
+			"error":   "Invalid user data",
 		})
 	}
 
@@ -43,8 +44,8 @@ func AcceptRoute(c *fiber.Ctx) error {
 		log.Printf("Error finding booking with ID %v: %v\n", bookingID, err)
 		tx.Rollback()
 		return c.Status(404).JSON(fiber.Map{
-			"success": false,
-			"error": "Booking not found",
+			"success":    false,
+			"error":      "Booking not found",
 			"booking_id": bookingID,
 		})
 	}
@@ -54,8 +55,8 @@ func AcceptRoute(c *fiber.Ctx) error {
 		log.Printf("Error finding ride with ID %v: %v\n", booking.RideID, err)
 		tx.Rollback()
 		return c.Status(404).JSON(fiber.Map{
-			"success": false,
-			"error": "Ride not found",
+			"success":    false,
+			"error":      "Ride not found",
 			"booking_id": bookingID,
 		})
 	}
@@ -64,51 +65,85 @@ func AcceptRoute(c *fiber.Ctx) error {
 		log.Printf("User %v is not authorized to accept bookings for ride %v (host: %v)\n", user.ID, ride.ID, ride.HostUserID)
 		tx.Rollback()
 		return c.Status(403).JSON(fiber.Map{
-			"success": false,
-			"error": "Only the ride host can accept booking requests",
+			"success":    false,
+			"error":      "Only the ride host can accept booking requests",
 			"booking_id": bookingID,
 		})
 	}
 
-	// Update the booking status to "accepted"
-	if err := tx.Model(&booking).Update("request_status", "accepted").Error; err != nil {
-		log.Printf("Error updating booking status for ID %v: %v\n", bookingID, err)
+	if booking.RequestStatus == "accepted" {
+		tx.Rollback()
+		return c.Status(200).JSON(fiber.Map{
+			"success":    true,
+			"message":    "Booking already accepted",
+			"booking_id": bookingID,
+			"booking":    booking,
+		})
+	}
+	if booking.RequestStatus != "pending" {
+		tx.Rollback()
+		return c.Status(409).JSON(fiber.Map{
+			"success":    false,
+			"error":      "Only pending bookings can be accepted",
+			"booking_id": bookingID,
+		})
+	}
+
+	// Atomically reserve a seat. The WHERE clause is rechecked under
+	// the row lock, so concurrent accepts cannot overbook the ride.
+	seatUpdate := tx.Model(&models.Ride{}).
+		Where("id = ? AND booked_seats < total_seats", ride.ID).
+		Update("booked_seats", gorm.Expr("booked_seats + 1"))
+	if seatUpdate.Error != nil {
+		log.Printf("Error updating booked seats for ride with ID %v: %v\n", ride.ID, seatUpdate.Error)
 		tx.Rollback()
 		return c.Status(500).JSON(fiber.Map{
-			"success": false,
-			"error": "Error updating booking status",
+			"success":    false,
+			"error":      "Error updating booked seats for ride",
 			"booking_id": bookingID,
 		})
 	}
-
-	// Check if there are available seats for the ride
-	if ride.BookedSeats >= ride.TotalSeats {
+	if seatUpdate.RowsAffected == 0 {
 		log.Printf("No available seats for ride with ID %v\n", booking.RideID)
 		tx.Rollback()
 		return c.Status(400).JSON(fiber.Map{
-			"success": false,
-			"error": "No available seats for this ride",
+			"success":    false,
+			"error":      "No available seats for this ride",
 			"booking_id": bookingID,
 		})
 	}
 
-	// Increment the booked seats count
-	if err := tx.Model(&ride).Update("booked_seats", ride.BookedSeats+1).Error; err != nil {
-		log.Printf("Error updating booked seats for ride with ID %v: %v\n", ride.ID, err)
+	// Only the first accept for a pending booking may transition the
+	// row. If another request changed it while this transaction was
+	// waiting, roll back the seat reservation above.
+	bookingUpdate := tx.Model(&models.Booking{}).
+		Where("id = ? AND request_status = ?", booking.ID, "pending").
+		Update("request_status", "accepted")
+	if bookingUpdate.Error != nil {
+		log.Printf("Error updating booking status for ID %v: %v\n", bookingID, bookingUpdate.Error)
 		tx.Rollback()
 		return c.Status(500).JSON(fiber.Map{
-			"success": false,
-			"error": "Error updating booked seats for ride",
+			"success":    false,
+			"error":      "Error updating booking status",
 			"booking_id": bookingID,
 		})
 	}
+	if bookingUpdate.RowsAffected == 0 {
+		tx.Rollback()
+		return c.Status(409).JSON(fiber.Map{
+			"success":    false,
+			"error":      "Booking is no longer pending",
+			"booking_id": bookingID,
+		})
+	}
+	booking.RequestStatus = "accepted"
 
 	// Commit the transaction after all successful updates
 	if err := tx.Commit().Error; err != nil {
 		log.Printf("Error committing transaction: %v\n", err)
 		return c.Status(500).JSON(fiber.Map{
-			"success": false,
-			"error": "Error committing transaction",
+			"success":    false,
+			"error":      "Error committing transaction",
 			"booking_id": bookingID,
 		})
 	}
@@ -126,9 +161,9 @@ func AcceptRoute(c *fiber.Ctx) error {
 
 	log.Printf("Booking with ID %v accepted successfully\n", bookingID)
 	return c.Status(200).JSON(fiber.Map{
-		"success": true,
-		"message": "Booking accepted successfully",
+		"success":    true,
+		"message":    "Booking accepted successfully",
 		"booking_id": bookingID,
-		"booking": booking,
+		"booking":    booking,
 	})
 }

@@ -3,6 +3,7 @@ package chat
 import (
 	"encoding/json"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/gofiber/websocket/v2"
 	"github.com/google/uuid"
 	"unipool-backend/database"
+	"unipool-backend/helpers"
 	"unipool-backend/initializer"
 	"unipool-backend/models"
 	"unipool-backend/services"
@@ -28,6 +30,60 @@ const (
 	defaultMessageLimit = 50
 	maxMessageLimit     = 200
 )
+
+// Roles a user can have on a ride chat. The chat endpoints branch on
+// this for both auth (none/rejected => 403) and visibility filtering
+// (pending only sees host ↔ self thread).
+const (
+	roleHost     = "host"
+	roleAccepted = "accepted"
+	rolePending  = "pending"
+	roleRejected = "rejected"
+	roleNone     = "none"
+)
+
+// getRideViewerRole resolves the caller's relationship to a ride in
+// one query. Returns the host_user_id alongside the role so callers
+// that need it (message filtering for `pending` viewers) avoid a
+// second lookup.
+func getRideViewerRole(userID, rideID uuid.UUID) (role string, hostID uuid.UUID, err error) {
+	var row struct {
+		HostUserID    uuid.UUID
+		RequestStatus *string
+	}
+	q := database.Database.Db.Raw(`
+		SELECT r.host_user_id,
+		       b.request_status
+		  FROM rides r
+		  LEFT JOIN bookings b
+		    ON b.ride_id = r.id
+		   AND b.passenger_id = ?
+		 WHERE r.id = ?
+		 LIMIT 1
+	`, userID, rideID).Scan(&row)
+	if q.Error != nil {
+		return roleNone, uuid.Nil, q.Error
+	}
+	if q.RowsAffected == 0 {
+		return roleNone, uuid.Nil, nil
+	}
+	hostID = row.HostUserID
+	if hostID == userID {
+		return roleHost, hostID, nil
+	}
+	if row.RequestStatus == nil {
+		return roleNone, hostID, nil
+	}
+	switch *row.RequestStatus {
+	case "accepted":
+		return roleAccepted, hostID, nil
+	case "pending":
+		return rolePending, hostID, nil
+	case "rejected":
+		return roleRejected, hostID, nil
+	}
+	return roleNone, hostID, nil
+}
 
 // transformMessage serialises a `models.Message` into the wire shape the
 // frontend expects. Kept in one place so every endpoint emits identical
@@ -90,6 +146,23 @@ func GetRideMessages(c *fiber.Ctx) error {
 	rideUUID, err := uuid.Parse(rideID)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid ride id"})
+	}
+
+	user, ok := c.Locals("user").(models.User)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "User not authenticated or found"})
+	}
+
+	// Membership check: only host / accepted can read the group ride
+	// chat. Pending requesters are routed to a DM with the host
+	// (`/dm/...`) and never touch this endpoint; rejected requesters
+	// and outsiders get 403.
+	role, _, err := getRideViewerRole(user.ID, rideUUID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "membership lookup failed"})
+	}
+	if role != roleHost && role != roleAccepted {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not a participant in this ride"})
 	}
 
 	limit, before, hasBefore := parsePagination(c)
@@ -178,6 +251,16 @@ func SendMessage(c *fiber.Ctx) error {
 	user, ok := c.Locals("user").(models.User)
 	if !ok {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "User not authenticated or found"})
+	}
+
+	// Only host + accepted can post to the group ride chat. Pending
+	// requesters live in a DM with the host, not in here.
+	role, _, err := getRideViewerRole(user.ID, rideUUID)
+	if err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "membership lookup failed"})
+	}
+	if role != roleHost && role != roleAccepted {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not a participant in this ride"})
 	}
 
 	var body struct {
@@ -298,7 +381,6 @@ func fanOutRideNotifications(rideUUID uuid.UUID, sender models.User, content str
 		return
 	}
 	if ride.Settings.NotificationsMuted {
-		log.Printf("notifications: ride %s muted — skipping fan-out", rideUUID)
 		return
 	}
 
@@ -311,7 +393,8 @@ func fanOutRideNotifications(rideUUID uuid.UUID, sender models.User, content str
 	}
 
 	// Build the recipient set: host + every accepted passenger, minus
-	// the sender. Use a map so duplicates can't double-notify.
+	// the sender. Pending requesters live in DMs with the host and
+	// are notified through fanOutDMNotification instead.
 	recipients := map[uuid.UUID]struct{}{}
 	if ride.HostUserID != sender.ID {
 		recipients[ride.HostUserID] = struct{}{}
@@ -330,6 +413,12 @@ func fanOutRideNotifications(rideUUID uuid.UUID, sender models.User, content str
 		uid := userID
 		go func() {
 			defer wg.Done()
+			// Respect both global chat-message opt-out AND per-ride
+			// mute toggle (chat settings sheet). Per-ride takes
+			// priority — see helpers.IsNotificationAllowed.
+			if allowed, _ := helpers.IsNotificationAllowed(uid, helpers.NotifChatMessages, rideUUID); !allowed {
+				return
+			}
 			if err := fcm.SendChatMessageNotification(uid, sender.Name, content, rideRoute, rideUUID); err != nil {
 				log.Printf("notifications: ride %s -> user %s failed: %v", rideUUID, uid, err)
 			}
@@ -400,7 +489,12 @@ func GetUserChats(c *fiber.Ctx) error {
 	}
 
 	if len(rides) == 0 {
-		return c.JSON(fiber.Map{"chat_rooms": []fiber.Map{}, "count": 0})
+		return c.JSON(fiber.Map{
+			"chat_rooms":       []fiber.Map{},
+			"count":            0,
+			"pending_requests": []fiber.Map{},
+			"viewer_user_id":   user.ID.String(),
+		})
 	}
 
 	rideIDs := make([]uuid.UUID, 0, len(rides))
@@ -541,19 +635,164 @@ func GetUserChats(c *fiber.Ctx) error {
 		}
 		rooms = append(rooms, roomEntry{Room: room, SortKey: sortKey})
 	}
-	// In-memory sort by latest activity desc — small N, cheaper than
-	// reshuffling on the database side.
-	for i := 1; i < len(rooms); i++ {
-		for j := i; j > 0 && rooms[j].SortKey.After(rooms[j-1].SortKey); j-- {
-			rooms[j], rooms[j-1] = rooms[j-1], rooms[j]
-		}
-	}
+	sort.Slice(rooms, func(i, j int) bool {
+		return rooms[i].SortKey.After(rooms[j].SortKey)
+	})
 
 	result := make([]fiber.Map, len(rooms))
 	for i, r := range rooms {
 		result[i] = r.Room
 	}
-	return c.JSON(fiber.Map{"chat_rooms": result, "count": len(result)})
+
+	// Pending requests — for each hosted ride, surface every pending
+	// passenger as its own row so the host can open a 1:1 DM with
+	// them before deciding to accept. Pending passengers themselves
+	// already see this thread via their own viewer_role=pending_passenger
+	// ride row above, so this section is host-only.
+	pendingRequests := pendingRequestRowsForHost(user.ID, rides)
+
+	return c.JSON(fiber.Map{
+		"chat_rooms":       result,
+		"count":            len(result),
+		"pending_requests": pendingRequests,
+		"viewer_user_id":   user.ID.String(),
+	})
+}
+
+// pendingRequestRowsForHost builds the host-side "Pending requests"
+// section of the chat list. Returns one row per pending booking on
+// rides the user hosts, joined with the requester's identity + any
+// DM messages already exchanged.
+func pendingRequestRowsForHost(hostID uuid.UUID, rides []models.Ride) []fiber.Map {
+	hostedRideIDs := make([]uuid.UUID, 0, len(rides))
+	rideByID := make(map[uuid.UUID]models.Ride, len(rides))
+	for _, r := range rides {
+		if r.HostUserID == hostID {
+			hostedRideIDs = append(hostedRideIDs, r.ID)
+			rideByID[r.ID] = r
+		}
+	}
+	if len(hostedRideIDs) == 0 {
+		return []fiber.Map{}
+	}
+
+	type pendingRow struct {
+		BookingID         uuid.UUID
+		RideID            uuid.UUID
+		PassengerID       uuid.UUID
+		PassengerName     string
+		PassengerPic      string
+		PassengerVerified bool
+		CreatedAt         time.Time
+	}
+	var pending []pendingRow
+	if err := database.Database.Db.Raw(`
+		SELECT b.id              AS booking_id,
+		       b.ride_id,
+		       b.passenger_id,
+		       u.name             AS passenger_name,
+		       u.profile_picture_url AS passenger_pic,
+		       u.is_email_verified  AS passenger_verified,
+		       b.created_at
+		  FROM bookings b
+		  JOIN users u ON u.id = b.passenger_id
+		 WHERE b.ride_id IN ?
+		   AND b.request_status = 'pending'
+		 ORDER BY b.created_at DESC
+	`, hostedRideIDs).Scan(&pending).Error; err != nil {
+		log.Printf("pendingRequestRowsForHost: %v", err)
+		return []fiber.Map{}
+	}
+	if len(pending) == 0 {
+		return []fiber.Map{}
+	}
+
+	// Batch-fetch latest DM message + unread count per requester.
+	dmRoomIDs := make([]string, 0, len(pending))
+	for _, p := range pending {
+		rid := dmRoomID(hostID, p.PassengerID)
+		dmRoomIDs = append(dmRoomIDs, rid)
+	}
+
+	type dmLatestRow struct {
+		DMRoomID  string
+		Content   string
+		SenderID  uuid.UUID
+		CreatedAt time.Time
+	}
+	var latestDM []dmLatestRow
+	_ = database.Database.Db.Raw(`
+		SELECT DISTINCT ON (m.dm_room_id)
+		       m.dm_room_id, m.content, m.sender_id, m.created_at
+		  FROM messages m
+		 WHERE m.dm_room_id IN ?
+		 ORDER BY m.dm_room_id, m.created_at DESC
+	`, dmRoomIDs).Scan(&latestDM).Error
+	latestByRoom := make(map[string]dmLatestRow, len(latestDM))
+	for _, r := range latestDM {
+		latestByRoom[r.DMRoomID] = r
+	}
+
+	// Unread = DM messages newer than chat_reads.last_read_at,
+	// excluding ones the host themselves sent.
+	type unreadRow struct {
+		DMRoomID string
+		Cnt      int64
+	}
+	var unreadRows []unreadRow
+	_ = database.Database.Db.Raw(`
+		SELECT m.dm_room_id, COUNT(*) AS cnt
+		  FROM messages m
+		  LEFT JOIN chat_reads r
+		    ON r.dm_room_id = m.dm_room_id AND r.user_id = ?
+		 WHERE m.dm_room_id IN ?
+		   AND m.sender_id <> ?
+		   AND m.created_at > COALESCE(r.last_read_at, 'epoch'::timestamptz)
+		 GROUP BY m.dm_room_id
+	`, hostID, dmRoomIDs, hostID).Scan(&unreadRows).Error
+	unreadByRoom := make(map[string]int64, len(unreadRows))
+	for _, u := range unreadRows {
+		unreadByRoom[u.DMRoomID] = u.Cnt
+	}
+
+	out := make([]fiber.Map, 0, len(pending))
+	for _, p := range pending {
+		ride := rideByID[p.RideID]
+		rid := dmRoomID(hostID, p.PassengerID)
+		row := fiber.Map{
+			"booking_id":                    p.BookingID.String(),
+			"ride_id":                       p.RideID.String(),
+			"dm_room_id":                    rid,
+			"requester_id":                  p.PassengerID.String(),
+			"requester_name":                p.PassengerName,
+			"requester_profile_picture_url": p.PassengerPic,
+			"requester_is_verified":         p.PassengerVerified,
+			"ride_start_location":           ride.StartLocation,
+			"ride_end_location":             ride.EndLocation,
+			"ride_start_time":               ride.StartTime.Format(time.RFC3339),
+			"requested_at":                  p.CreatedAt.Format(time.RFC3339),
+			"unread_count":                  unreadByRoom[rid],
+		}
+		if last, ok := latestByRoom[rid]; ok {
+			row["last_message"] = fiber.Map{
+				"content":   last.Content,
+				"sender_id": last.SenderID.String(),
+				"timestamp": last.CreatedAt.Format(time.RFC3339),
+			}
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// dmRoomID returns the canonical DM room id between two users. The
+// UUIDs are string-sorted so both sides resolve to the same room.
+func dmRoomID(a, b uuid.UUID) string {
+	as, bs := a.String(), b.String()
+	if as < bs {
+		return "dm_" + as + "_" + bs
+	}
+	return "dm_" + bs + "_" + as
 }
 
 // ----------------------------------------------------------------------
@@ -561,7 +800,6 @@ func GetUserChats(c *fiber.Ctx) error {
 // ----------------------------------------------------------------------
 
 func WebSocketHandler(c *websocket.Conn) {
-	log.Printf("WebSocketHandler invoked. Query: %s", c.Query(""))
 	userID := c.Query("user_id")
 	roomID := c.Query("room_id")
 
@@ -572,7 +810,8 @@ func WebSocketHandler(c *websocket.Conn) {
 		return
 	}
 
-	if _, err := uuid.Parse(userID); err != nil {
+	userUUID, err := uuid.Parse(userID)
+	if err != nil {
 		log.Printf("WebSocket connection rejected: invalid user_id format")
 		c.WriteMessage(websocket.CloseMessage, []byte("invalid user_id format"))
 		c.Close()
@@ -587,6 +826,12 @@ func WebSocketHandler(c *websocket.Conn) {
 			c.Close()
 			return
 		}
+		if userID != userIds[0] && userID != userIds[1] {
+			log.Printf("WebSocket connection rejected: user %s not in DM room %s", userID, roomID)
+			c.WriteMessage(websocket.CloseMessage, []byte("not a participant"))
+			c.Close()
+			return
+		}
 		for _, uid := range userIds {
 			if _, err := uuid.Parse(uid); err != nil {
 				log.Printf("WebSocket connection rejected: invalid user ID in DM room: %s", uid)
@@ -595,18 +840,43 @@ func WebSocketHandler(c *websocket.Conn) {
 				return
 			}
 		}
-		log.Printf("Valid DM room ID: %s with users: %s, %s", roomID, userIds[0], userIds[1])
 	} else {
-		if _, err := uuid.Parse(roomID); err != nil {
+		rideUUID, err := uuid.Parse(roomID)
+		if err != nil {
 			log.Printf("WebSocket connection rejected: invalid room_id format")
 			c.WriteMessage(websocket.CloseMessage, []byte("invalid room_id format"))
 			c.Close()
 			return
 		}
+		// Only host + accepted can join the group ride room. Pending
+		// requesters go through DM rooms instead.
+		role, _, lookupErr := getRideViewerRole(userUUID, rideUUID)
+		if lookupErr != nil {
+			log.Printf("WebSocket connection rejected: membership lookup failed: %v", lookupErr)
+			c.WriteMessage(websocket.CloseMessage, []byte("membership lookup failed"))
+			c.Close()
+			return
+		}
+		if role != roleHost && role != roleAccepted {
+			log.Printf("WebSocket connection rejected: user %s role=%s not allowed in ride %s", userID, role, roomID)
+			c.WriteMessage(websocket.CloseMessage, []byte("not a participant"))
+			c.Close()
+			return
+		}
+	}
+
+	var socketUser models.User
+	if err := database.Database.Db.
+		Select("id", "name", "profile_picture_url").
+		First(&socketUser, userUUID).Error; err != nil {
+		log.Printf("WebSocket connection rejected: user lookup failed: %v", err)
+		c.WriteMessage(websocket.CloseMessage, []byte("user lookup failed"))
+		c.Close()
+		return
 	}
 
 	log.Printf("WebSocket connection established for user %s in room %s", userID, roomID)
-	initializer.NewClient(c, userID, roomID)
+	initializer.NewClient(c, userID, roomID, socketUser.Name, socketUser.ProfilePictureURL)
 	select {}
 }
 
@@ -616,12 +886,7 @@ func GetActiveConnections(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "WebSocket hub not initialized"})
 	}
 
-	roomStats := make(map[string]int)
-	totalConnections := 0
-	for roomID, clients := range hub.Rooms {
-		roomStats[roomID] = len(clients)
-		totalConnections += len(clients)
-	}
+	roomStats, totalConnections := hub.RoomStats()
 
 	return c.JSON(fiber.Map{
 		"total_connections": totalConnections,
@@ -663,6 +928,37 @@ func MarkRideRead(c *fiber.Ctx) error {
 		ON CONFLICT (user_id, ride_id) DO UPDATE SET last_read_at = EXCLUDED.last_read_at, updated_at = EXCLUDED.updated_at
 	`, read.UserID, rideUUID, now, now, now).Error; err != nil {
 		log.Printf("MarkRideRead failed: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to mark read"})
+	}
+	return c.JSON(fiber.Map{"ok": true})
+}
+
+// MarkDMRead is the DM analogue of MarkRideRead. Bumps the caller's
+// last_read_at for a specific dm_room_id so the chat-list unread
+// badges (host pending-requests, pending requester's own DM) update
+// the moment the user opens the thread.
+func MarkDMRead(c *fiber.Ctx) error {
+	user, ok := c.Locals("user").(models.User)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "User not authenticated or found"})
+	}
+	dmRoomID := c.Params("dm_room_id")
+	if !strings.HasPrefix(dmRoomID, "dm_") {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid dm room id format"})
+	}
+
+	now := time.Now()
+	// Upsert against the partial unique index `idx_chat_reads_user_dm`
+	// (user_id, dm_room_id) WHERE dm_room_id IS NOT NULL — created by
+	// scripts/migrate_chat_reads_dm_index.go. The WHERE clause in the
+	// ON CONFLICT target tells Postgres which partial index to infer.
+	if err := database.Database.Db.Exec(`
+		INSERT INTO chat_reads (id, user_id, dm_room_id, last_read_at, created_at, updated_at)
+		VALUES (gen_random_uuid(), ?, ?, ?, ?, ?)
+		ON CONFLICT (user_id, dm_room_id) WHERE dm_room_id IS NOT NULL
+		DO UPDATE SET last_read_at = EXCLUDED.last_read_at, updated_at = EXCLUDED.updated_at
+	`, user.ID, dmRoomID, now, now, now).Error; err != nil {
+		log.Printf("MarkDMRead failed: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to mark read"})
 	}
 	return c.JSON(fiber.Map{"ok": true})

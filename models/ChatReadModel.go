@@ -17,6 +17,6 @@ type ChatRead struct {
 	BaseModel
 	UserID     uuid.UUID  `gorm:"not null;uniqueIndex:idx_chat_reads_user_ride" json:"user_id"`
 	RideID     *uuid.UUID `gorm:"uniqueIndex:idx_chat_reads_user_ride" json:"ride_id,omitempty"`
-	DMRoomID   *string    `gorm:"index" json:"dm_room_id,omitempty"`
+	DMRoomID   *string    `gorm:"index;uniqueIndex:idx_chat_reads_user_dm" json:"dm_room_id,omitempty"`
 	LastReadAt time.Time  `gorm:"not null" json:"last_read_at"`
 }

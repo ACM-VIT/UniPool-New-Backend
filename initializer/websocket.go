@@ -1,12 +1,15 @@
 package initializer
 
 import (
+	"encoding/json"
 	"log"
+	"sync"
 
 	websocket "github.com/gofiber/websocket/v2"
 )
 
 type Hub struct {
+	mu         sync.RWMutex
 	Clients    map[*Client]bool
 	Broadcast  chan []byte
 	Register   chan *Client
@@ -20,17 +23,19 @@ type Client struct {
 	Send   chan []byte
 	UserID string
 	RoomID string
+	Name   string
+	Avatar string
 }
 
 type ChatMessage struct {
-	Type      string      `json:"type"` 
-	RoomID    string      `json:"room_id"`
-	SenderID  string      `json:"sender_id"`
-	Content   string      `json:"content"`
-	Timestamp string      `json:"timestamp"`
-	MessageID string      `json:"message_id"`
-	TempID    string      `json:"temp_id,omitempty"`
-	Sender    *UserInfo   `json:"sender,omitempty"`
+	Type      string    `json:"type"`
+	RoomID    string    `json:"room_id"`
+	SenderID  string    `json:"sender_id"`
+	Content   string    `json:"content"`
+	Timestamp string    `json:"timestamp"`
+	MessageID string    `json:"message_id"`
+	TempID    string    `json:"temp_id,omitempty"`
+	Sender    *UserInfo `json:"sender,omitempty"`
 }
 
 type MessageStatusUpdate struct {
@@ -47,6 +52,17 @@ type UserPresenceMessage struct {
 	RoomID   string `json:"room_id"`
 }
 
+type PresenceSnapshot struct {
+	Type   string              `json:"type"` // "presence_snapshot"
+	RoomID string              `json:"room_id"`
+	Users  []UserPresenceState `json:"users"`
+}
+
+type UserPresenceState struct {
+	UserID   string `json:"user_id"`
+	UserName string `json:"user_name"`
+}
+
 type TypingIndicator struct {
 	Type     string `json:"type"` // "typing"
 	UserID   string `json:"user_id"`
@@ -56,8 +72,8 @@ type TypingIndicator struct {
 }
 
 type UserInfo struct {
-	Name               string `json:"name"`
-	ProfilePictureURL  string `json:"profile_picture_url"`
+	Name              string `json:"name"`
+	ProfilePictureURL string `json:"profile_picture_url"`
 }
 
 var chatHub *Hub
@@ -79,13 +95,15 @@ func GetChatHub() *Hub {
 	return chatHub
 }
 
-func NewClient(conn *websocket.Conn, userID, roomID string) {
+func NewClient(conn *websocket.Conn, userID, roomID, userName, avatar string) {
 	client := &Client{
 		Hub:    chatHub,
 		Conn:   conn,
 		Send:   make(chan []byte, 256),
 		UserID: userID,
 		RoomID: roomID,
+		Name:   userName,
+		Avatar: avatar,
 	}
 
 	client.Hub.Register <- client
@@ -94,18 +112,47 @@ func NewClient(conn *websocket.Conn, userID, roomID string) {
 	go client.readPump()
 }
 
+func (c *Client) TrySend(message []byte) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	select {
+	case c.Send <- message:
+		return true
+	default:
+		return false
+	}
+}
+
 func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.Register:
+			h.mu.Lock()
+			wasOnline := h.userConnectionCountLocked(client.RoomID, client.UserID) > 0
 			h.Clients[client] = true
 			if h.Rooms[client.RoomID] == nil {
 				h.Rooms[client.RoomID] = make(map[*Client]bool)
 			}
 			h.Rooms[client.RoomID][client] = true
+			snapshot := h.presenceSnapshotLocked(client.RoomID)
+			if b, err := json.Marshal(snapshot); err == nil {
+				select {
+				case client.Send <- b:
+				default:
+				}
+			}
+			h.mu.Unlock()
+
+			if !wasOnline {
+				h.BroadcastToRoomExceptSender(client.RoomID, client, h.presenceMessage("user_joined", client))
+			}
 			log.Printf("Client %s joined room %s", client.UserID, client.RoomID)
 
 		case client := <-h.Unregister:
+			h.mu.Lock()
 			if _, ok := h.Clients[client]; ok {
 				delete(h.Clients, client)
 				if h.Rooms[client.RoomID] != nil {
@@ -115,23 +162,37 @@ func (h *Hub) run() {
 					}
 				}
 				close(client.Send)
+				stillOnline := h.userConnectionCountLocked(client.RoomID, client.UserID) > 0
+				h.mu.Unlock()
+				if !stillOnline {
+					h.BroadcastToRoom(client.RoomID, h.presenceMessage("user_left", client))
+				}
 				log.Printf("Client %s left room %s", client.UserID, client.RoomID)
+			} else {
+				h.mu.Unlock()
 			}
 
 		case message := <-h.Broadcast:
+			h.mu.Lock()
 			for client := range h.Clients {
 				select {
 				case client.Send <- message:
 				default:
 					close(client.Send)
 					delete(h.Clients, client)
+					if h.Rooms[client.RoomID] != nil {
+						delete(h.Rooms[client.RoomID], client)
+					}
 				}
 			}
+			h.mu.Unlock()
 		}
 	}
 }
 
 func (h *Hub) BroadcastToRoom(roomID string, message []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if clients, ok := h.Rooms[roomID]; ok {
 		for client := range clients {
 			select {
@@ -146,6 +207,8 @@ func (h *Hub) BroadcastToRoom(roomID string, message []byte) {
 }
 
 func (h *Hub) BroadcastToRoomExceptSender(roomID string, sender *Client, message []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if clients, ok := h.Rooms[roomID]; ok {
 		for client := range clients {
 			if client != sender {
@@ -159,4 +222,55 @@ func (h *Hub) BroadcastToRoomExceptSender(roomID string, sender *Client, message
 			}
 		}
 	}
+}
+
+func (h *Hub) RoomStats() (map[string]int, int) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	roomStats := make(map[string]int, len(h.Rooms))
+	totalConnections := 0
+	for roomID, clients := range h.Rooms {
+		roomStats[roomID] = len(clients)
+		totalConnections += len(clients)
+	}
+	return roomStats, totalConnections
+}
+
+func (h *Hub) userConnectionCountLocked(roomID, userID string) int {
+	count := 0
+	for client := range h.Rooms[roomID] {
+		if client.UserID == userID {
+			count++
+		}
+	}
+	return count
+}
+
+func (h *Hub) presenceSnapshotLocked(roomID string) PresenceSnapshot {
+	usersByID := make(map[string]string)
+	for client := range h.Rooms[roomID] {
+		usersByID[client.UserID] = client.Name
+	}
+
+	users := make([]UserPresenceState, 0, len(usersByID))
+	for userID, userName := range usersByID {
+		users = append(users, UserPresenceState{UserID: userID, UserName: userName})
+	}
+	return PresenceSnapshot{
+		Type:   "presence_snapshot",
+		RoomID: roomID,
+		Users:  users,
+	}
+}
+
+func (h *Hub) presenceMessage(presenceType string, client *Client) []byte {
+	msg := UserPresenceMessage{
+		Type:     presenceType,
+		UserID:   client.UserID,
+		UserName: client.Name,
+		RoomID:   client.RoomID,
+	}
+	b, _ := json.Marshal(msg)
+	return b
 }
