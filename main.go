@@ -64,6 +64,12 @@ func SetupRoutes(app *fiber.App) {
 	// email + verification status are NOT editable here — those flow
 	// from Firebase identity / institute matching.
 	app.Patch("/user/profile", users.UpdateProfile)
+	// Email verification — proves the signed-in user owns an
+	// institute email, even if they signed in with a personal
+	// Google account. /start sends a code via SES; /confirm
+	// matches it and stamps is_email_verified + institute_id.
+	app.Post("/user/verify/start", users.StartEmailVerification)
+	app.Post("/user/verify/confirm", users.ConfirmEmailVerification)
 	app.Get("/user/:id", users.GetUserByID)        // Gets user details by ID (must be after specific routes)
 	app.Delete("/user/delete", users.DeleteUser)   // Deletes a user
 
@@ -213,6 +219,10 @@ func main() {
 	// Public institute catalogue — frontend uses this to display the
 	// host's school on profile / ride cards without an authed call.
 	app.Get("/institutes", users.ListInstitutes)
+	// Typeahead picker on the verify-academic-status sheet. Public,
+	// case-insensitive LIKE match against name, returns domains
+	// inline so the client can validate the email locally.
+	app.Get("/institutes/search", users.SearchInstitutes)
 
 	app.Use(middleware.Authenticate)
 

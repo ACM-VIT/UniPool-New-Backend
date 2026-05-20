@@ -21,7 +21,13 @@ type Institute struct {
 // uniquely.
 type InstituteDomain struct {
 	BaseModel
-	Domain      string    `gorm:"type:varchar(120);not null;uniqueIndex" json:"domain"`
+	// Pinned index name. GORM derives `uni_institute_domains_domain`
+	// from `uniqueIndex` without an explicit name, but the derived
+	// name has shifted across GORM versions — AutoMigrate then tries
+	// to DROP the old constraint and create a new one, fails on the
+	// drop, and aborts the migration. Naming it explicitly stops the
+	// churn.
+	Domain      string    `gorm:"type:varchar(120);not null;uniqueIndex:idx_institute_domains_domain" json:"domain"`
 	InstituteID uuid.UUID `gorm:"type:uuid;not null;index" json:"institute_id"`
 	Institute   Institute `gorm:"foreignKey:InstituteID" json:"institute,omitempty"`
 }

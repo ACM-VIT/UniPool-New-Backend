@@ -15,19 +15,37 @@ func GetUser(c *fiber.Ctx) error {
 		var totalHostedRides int64
 		database.Database.Db.Model(&models.Ride{}).Where("host_user_id = ?", user.ID).Count(&totalHostedRides)
 
+		// Auth middleware selects a minimal column set for speed,
+		// which means `upi_vpa`, `is_email_verified`, `institute_id`,
+		// and `institute_email` aren't populated on `user` here.
+		// Hydrate them from a single follow-up read so the profile
+		// screen can render badges + the UPI row in one round-trip.
+		var full models.User
+		_ = database.Database.Db.
+			Preload("Institute").
+			Where("id = ?", user.ID).
+			First(&full).Error
+
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
 			"user": fiber.Map{
-				"id": user.ID,
-				"name": user.Name,
-				"email": user.Email,
+				"id":                  user.ID,
+				"name":                user.Name,
+				"email":               user.Email,
 				"profile_picture_url": user.ProfilePictureURL,
-				"contact_number": user.ContactNumber,
-				"gender": user.Gender,
-				"yob": user.YOB,
-				"default_address": user.DefaultAddress,
-				"created_at": user.CreatedAt,
-				"updated_at": user.UpdatedAt,
-				"total_hosted_rides": totalHostedRides,
+				"contact_number":      user.ContactNumber,
+				"gender":              user.Gender,
+				"yob":                 user.YOB,
+				"default_address":     user.DefaultAddress,
+				"created_at":          user.CreatedAt,
+				"updated_at":          user.UpdatedAt,
+				"total_hosted_rides":  totalHostedRides,
+				// Verification + payment surface for the personal-info
+				// screen. Empty strings/false/nil when unset.
+				"upi_vpa":           full.UPIVPA,
+				"is_email_verified": full.IsEmailVerified,
+				"institute_email":   full.InstituteEmail,
+				"institute":         full.Institute,
+				"institute_id":      full.InstituteID,
 			},
 		})
 	}

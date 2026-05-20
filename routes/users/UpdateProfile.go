@@ -105,9 +105,14 @@ func UpdateProfile(c *fiber.Ctx) error {
 	}
 
 	// Return the post-update user row so the client can update its
-	// cached state without a round-trip.
+	// cached state without a round-trip. Preloads Institute so the
+	// personal-info screen keeps showing the verified-school name
+	// after a UPI / contact edit, instead of losing it on save.
 	var fresh models.User
-	if err := database.Database.Db.Where("id = ?", user.ID).First(&fresh).Error; err == nil {
+	if err := database.Database.Db.
+		Preload("Institute").
+		Where("id = ?", user.ID).
+		First(&fresh).Error; err == nil {
 		return c.JSON(fiber.Map{"user": fresh})
 	}
 	return c.JSON(fiber.Map{"status": "OK"})
