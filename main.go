@@ -10,6 +10,7 @@ import (
 	"unipool-backend/routes/CRUD"
 	"unipool-backend/routes/bookings"
 	"unipool-backend/routes/chat"
+	"unipool-backend/routes/locations"
 	"unipool-backend/routes/notifications"
 	"unipool-backend/routes/reports"
 	"unipool-backend/routes/rides"
@@ -30,35 +31,38 @@ func SetupRoutes(app *fiber.App) {
 	app.Use(compress.New(compress.Config{Level: compress.LevelBestSpeed}))
 
 	app.Use(cors.New(cors.Config{
-		AllowOrigins: "*",
-		AllowMethods: "GET,POST,HEAD,PUT,DELETE,PATCH,OPTIONS",
-		AllowHeaders: "Origin,Content-Type,Accept,Authorization,X-Requested-With",
+		AllowOrigins:     "*",
+		AllowMethods:     "GET,POST,HEAD,PUT,DELETE,PATCH,OPTIONS",
+		AllowHeaders:     "Origin,Content-Type,Accept,Authorization,X-Requested-With",
 		AllowCredentials: false,
 	}))
 
 	// Ride CRUD routes
-	app.Post("/ride/create", rides.CreateRide)          // Creates a new ride
-	app.Get("/ride/fetch/:id", CRUD.GetRideByID)        // Gets details of a ride by it's ID
+	app.Post("/ride/create", rides.CreateRide)                 // Creates a new ride
+	app.Get("/ride/fetch/:id", CRUD.GetRideByID)               // Gets details of a ride by it's ID
 	app.Get("/ride/details/:id", rides.GetRideDetailsComplete) // Gets complete ride details with bookings and passengers
-	app.Get("/ride/all", CRUD.GetRides)                 // Gets all rides
-	app.Put("/ride/update/:id", CRUD.UpdateRideByID)    // Updates a ride by it's ID
-	app.Delete("/ride/delete/:id", CRUD.DeleteRideByID) // Deletes a ride by it's ID
-	app.Get("ride/search", rides.SearchRides)           // Search for rides
-	
+	app.Get("/ride/all", CRUD.GetRides)                        // Gets all rides
+	app.Put("/ride/update/:id", CRUD.UpdateRideByID)           // Updates a ride by it's ID
+	app.Delete("/ride/delete/:id", CRUD.DeleteRideByID)        // Deletes a ride by it's ID
+	// NOTE: `/ride/search` is now registered above as a public route
+	// (with OptionalAuthenticate) so guests can browse the catalogue
+	// without an account. Don't re-register it here under the hard
+	// auth gate.
+
 	// Ride settings routes
 	app.Get("/ride/:ride_id/settings", rides.GetRideSettings)    // Gets ride settings
 	app.Put("/ride/:ride_id/settings", rides.UpdateRideSettings) // Updates ride settings
 
 	// User CRUD routes
-	app.Post("/user", users.CreateOrUpdateUser)    // Create or update a user
-	app.Get("/user/details", users.GetUser)        // Gets user details
-	app.Get("/user/all", users.GetAllUsers)        // Gets all users
-	app.Get("/user/rides", users.FetchUserRides)   // Gets all the rides of a particular user
-	app.Get("/user/passengers", users.GetPassengers) // Gets all passengers the user has travelled with
-	app.Get("/user/default-address", users.GetDefaultAddress) // Gets user's default start address
-	app.Post("/user/default-address", users.SetDefaultAddress) // Sets user's default start address
-	app.Put("/user/default-address", users.SetDefaultAddress) // PUT also sets / clears user's default start address
-	app.Patch("/user/default-address", users.SetDefaultAddress) // PATCH also sets user's default start address
+	app.Post("/user", users.CreateOrUpdateUser)                  // Create or update a user
+	app.Get("/user/details", users.GetUser)                      // Gets user details
+	app.Get("/user/all", users.GetAllUsers)                      // Gets all users
+	app.Get("/user/rides", users.FetchUserRides)                 // Gets all the rides of a particular user
+	app.Get("/user/passengers", users.GetPassengers)             // Gets all passengers the user has travelled with
+	app.Get("/user/default-address", users.GetDefaultAddress)    // Gets user's default start address
+	app.Post("/user/default-address", users.SetDefaultAddress)   // Sets user's default start address
+	app.Put("/user/default-address", users.SetDefaultAddress)    // PUT also sets / clears user's default start address
+	app.Patch("/user/default-address", users.SetDefaultAddress)  // PATCH also sets user's default start address
 	app.Delete("/user/default-address", users.SetDefaultAddress) // DELETE clears user's default start address (uses empty payload path)
 	// Self-edit profile fields (UPI VPA, contact number). Name +
 	// email + verification status are NOT editable here — those flow
@@ -70,8 +74,8 @@ func SetupRoutes(app *fiber.App) {
 	// matches it and stamps is_email_verified + institute_id.
 	app.Post("/user/verify/start", users.StartEmailVerification)
 	app.Post("/user/verify/confirm", users.ConfirmEmailVerification)
-	app.Get("/user/:id", users.GetUserByID)        // Gets user details by ID (must be after specific routes)
-	app.Delete("/user/delete", users.DeleteUser)   // Deletes a user
+	app.Get("/user/:id", users.GetUserByID)      // Gets user details by ID (must be after specific routes)
+	app.Delete("/user/delete", users.DeleteUser) // Deletes a user
 
 	// User token management routes
 	app.Post("/users/me/token", users.UpdateUserToken)   // Update user's FCM token
@@ -189,23 +193,23 @@ func main() {
 		sqlDB, err := database.Database.Db.DB()
 		if err != nil {
 			return c.Status(500).JSON(fiber.Map{
-				"status": "unhealthy",
+				"status":   "unhealthy",
 				"database": "error getting db instance",
-				"error": err.Error(),
+				"error":    err.Error(),
 			})
 		}
-		
+
 		if err := sqlDB.Ping(); err != nil {
 			return c.Status(500).JSON(fiber.Map{
-				"status": "unhealthy", 
+				"status":   "unhealthy",
 				"database": "ping failed",
-				"error": err.Error(),
+				"error":    err.Error(),
 			})
 		}
-		
+
 		return c.JSON(fiber.Map{
-			"status": "healthy",
-			"database": "connected",
+			"status":    "healthy",
+			"database":  "connected",
 			"timestamp": time.Now().UTC(),
 		})
 	})
@@ -215,6 +219,15 @@ func main() {
 	// and, with /rides/nearby, plot the actual ride pins on the map.
 	app.Get("/rides/nearby-count", rides.NearbyRidesCount)
 	app.Get("/rides/nearby", rides.NearbyRides)
+
+	// `/ride/search` is public too: guests need to be able to browse
+	// the catalogue before they're nudged to sign in. OptionalAuthenticate
+	// populates c.Locals("user") when the caller IS signed in, so
+	// signed-in searchers still get their own rides filtered out and
+	// per-result viewer_state computed; guests get the same results
+	// with viewer_state="available" everywhere.
+	app.Get("/ride/search", middleware.OptionalAuthenticate, rides.SearchRides)
+	app.Get("/locations/search", locations.SearchLocations)
 
 	// Public institute catalogue — frontend uses this to display the
 	// host's school on profile / ride cards without an authed call.

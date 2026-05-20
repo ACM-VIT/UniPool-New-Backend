@@ -475,16 +475,22 @@ func parseSearchParams(c *fiber.Ctx) (SearchParams, error) {
 		}
 	}
 	
-	userIntf := c.Locals("user")
-	if userIntf == nil {
-		return params, errors.New("user not authenticated")
+	// Search is a public endpoint via OptionalAuthenticate, so a
+	// missing or invalid user is fine — we treat the caller as a
+	// guest. Downstream:
+	//   - WHERE host_user_id != uuid.Nil matches every real ride
+	//     (no host has a nil ID), so guests see the full catalogue.
+	//   - LoadViewerBookings short-circuits on viewerID == uuid.Nil
+	//     and returns an empty map.
+	//   - ResolveViewerState falls through to StateAvailable for a
+	//     nil viewer, which is exactly what we want a guest to see
+	//     on every result.
+	if userIntf := c.Locals("user"); userIntf != nil {
+		if user, ok := userIntf.(models.User); ok {
+			params.User = user
+		}
 	}
-	user, ok := userIntf.(models.User)
-	if !ok {
-		return params, errors.New("invalid user data")
-	}
-	params.User = user
-	
+
 	return params, nil
 }
 

@@ -14,6 +14,54 @@ import (
 	"gorm.io/gorm"
 )
 
+// OptionalAuthenticate mirrors Authenticate but never short-circuits
+// with a 401. If the request carries a valid Firebase token AND an
+// existing user row, c.Locals("user") is populated exactly as the
+// hard middleware would; if anything is missing or invalid, the
+// handler still runs — c.Locals("user") just returns nil.
+//
+// Used for public read endpoints (search, nearby) where we want the
+// signed-in user to get personalized results (their own rides
+// filtered out, viewer_state populated) but guests can still hit
+// the same endpoint without an account.
+func OptionalAuthenticate(c *fiber.Ctx) error {
+	authHeader := c.Get("Authorization")
+	if authHeader == "" {
+		return c.Next()
+	}
+	token := strings.TrimSpace(strings.Replace(authHeader, "Bearer", "", 1))
+	if token == "" {
+		return c.Next()
+	}
+
+	client, err := initializer.FirebaseApp.Auth(context.Background())
+	if err != nil {
+		return c.Next()
+	}
+	decodedToken, err := client.VerifyIDToken(context.Background(), token)
+	if err != nil || decodedToken == nil || decodedToken.Claims == nil || decodedToken.Claims["email"] == nil {
+		return c.Next()
+	}
+	email, ok := decodedToken.Claims["email"].(string)
+	if !ok || email == "" {
+		return c.Next()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	var user models.User
+	err = database.Database.Db.WithContext(ctx).
+		Select("id", "email", "name", "profile_picture_url", "contact_number", "gender", "yob", "default_address", "institute_id", "is_email_verified").
+		Where("email = ?", email).
+		First(&user).Error
+	if err == nil {
+		c.Locals("user", user)
+	}
+	// Whether or not we resolved a user row, never block the request.
+	return c.Next()
+}
+
 func Authenticate(c *fiber.Ctx) error {
 	// Skip authentication for WebSocket handshake – token will be validated inside chat logic.
 	if c.Path() == "/ws" {
