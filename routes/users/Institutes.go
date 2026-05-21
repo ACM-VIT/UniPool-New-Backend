@@ -14,7 +14,25 @@ import (
 // from main on startup (idempotent — uses ON-CONFLICT semantics via
 // "WHERE NOT EXISTS"). New institutes are added by editing the slice
 // below + redeploying. Long-term, admins create them via a dashboard.
+//
+// Also runs a small purge step for domains we explicitly DON'T want
+// surfaced any more (`legacyDomainExclusions` below) — that keeps the
+// student-only invariant on every boot even when a SWOT re-seed or
+// hand-edit slips a blocked domain back in.
 func SeedDefaultInstitutes() {
+	// Domains that should never appear in the picker. The faculty
+	// `vit.ac.in` lives here because the verification flow is for
+	// students; surfacing the faculty domain made it the obvious
+	// auto-fill choice and silently gated everyone behind it.
+	legacyDomainExclusions := []string{"vit.ac.in"}
+	for _, d := range legacyDomainExclusions {
+		if err := database.Database.Db.
+			Exec(`DELETE FROM institute_domains WHERE LOWER(domain) = ?`, strings.ToLower(d)).
+			Error; err != nil {
+			log.Printf("institutes seed: purge %q failed: %v", d, err)
+		}
+	}
+
 	type seed struct {
 		Name    string
 		Country string
@@ -24,7 +42,10 @@ func SeedDefaultInstitutes() {
 		{
 			Name:    "Vellore Institute of Technology",
 			Country: "India",
-			Domains: []string{"vit.ac.in", "vitstudent.ac.in", "vitap.ac.in", "vitbhopal.ac.in"},
+			// vit.ac.in intentionally absent — it's the faculty
+			// domain, not student. vitstudent.ac.in is the canonical
+			// student domain and the one the picker should default to.
+			Domains: []string{"vitstudent.ac.in", "vitap.ac.in", "vitbhopal.ac.in"},
 		},
 	}
 
@@ -44,7 +65,19 @@ func SeedDefaultInstitutes() {
 				continue
 			}
 			var existing models.InstituteDomain
-			if err := database.Database.Db.Where("domain = ?", d).First(&existing).Error; err == nil {
+			err := database.Database.Db.Where("domain = ?", d).First(&existing).Error
+			if err == nil {
+				// Re-link instead of skipping. The previous "skip if
+				// exists" path left swot-seeded domains pointed at a
+				// stale `institutes` row, which is why VIT's search
+				// result was showing up with no domains attached.
+				if existing.InstituteID != inst.ID {
+					if upErr := database.Database.Db.
+						Model(&existing).
+						Update("institute_id", inst.ID).Error; upErr != nil {
+						log.Printf("institutes seed: relink %q -> %s failed: %v", d, s.Name, upErr)
+					}
+				}
 				continue
 			}
 			if err := database.Database.Db.Create(&models.InstituteDomain{
@@ -162,12 +195,27 @@ func SearchInstitutes(c *fiber.Ctx) error {
 					WHEN LOWER(i.name) LIKE ? THEN 5
 					ELSE 6
 				END ASC,
+				-- Secondary tiebreaker: within the same tier, prefer
+				-- schools whose actual student domain starts with the
+				-- query ("vit" → Vellore's vitstudent.ac.in beats
+				-- Vemana / Vishnu who share the same VIT acronym but
+				-- don't have vit-prefixed domains). Caught the
+				-- Vellore-buried-under-Vemana case.
+				CASE
+					WHEN EXISTS (
+					  SELECT 1 FROM institute_domains d
+					   WHERE d.institute_id = i.id
+					     AND LOWER(d.domain) LIKE ?
+					) THEN 0
+					ELSE 1
+				END ASC,
 				LENGTH(i.name) ASC,
 				i.name ASC
 			LIMIT 15`
 		args = []any{
 			pattern, acronymPattern, pattern,
 			acronym, acronymPattern, prefixPattern, prefixPattern, pattern,
+			prefixPattern,
 		}
 	} else {
 		sql = `
@@ -189,12 +237,22 @@ func SearchInstitutes(c *fiber.Ctx) error {
 					WHEN LOWER(i.name) LIKE ? THEN 3
 					ELSE 4
 				END ASC,
+				-- Same domain-prefix tiebreaker as the acronym branch.
+				CASE
+					WHEN EXISTS (
+					  SELECT 1 FROM institute_domains d
+					   WHERE d.institute_id = i.id
+					     AND LOWER(d.domain) LIKE ?
+					) THEN 0
+					ELSE 1
+				END ASC,
 				LENGTH(i.name) ASC,
 				i.name ASC
 			LIMIT 15`
 		args = []any{
 			pattern, pattern,
 			prefixPattern, prefixPattern, pattern,
+			prefixPattern,
 		}
 	}
 	if err := database.Database.Db.Raw(sql, args...).Scan(&institutes).Error; err != nil {
@@ -217,6 +275,18 @@ func SearchInstitutes(c *fiber.Ctx) error {
 	var domains []models.InstituteDomain
 	if err := database.Database.Db.
 		Where("institute_id IN ?", ids).
+		// Prefer the student-facing domain (e.g. `vitstudent.ac.in`)
+		// over the institutional one when an institute has multiple.
+		// The picker uses index 0 to pre-fill the email placeholder,
+		// so this directly drives the default that 90%+ of users want.
+		Order(`
+			CASE
+				WHEN LOWER(domain) LIKE '%student%' THEN 0
+				WHEN LOWER(domain) LIKE '%alum%'    THEN 2
+				ELSE 1
+			END ASC,
+			domain ASC
+		`).
 		Find(&domains).Error; err != nil {
 		log.Printf("SearchInstitutes: domains: %v", err)
 		// Domains-less fallback rather than 500.

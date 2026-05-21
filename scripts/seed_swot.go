@@ -68,6 +68,17 @@ var ccTLDCountry = map[string]string{
 	"ec": "Ecuador",
 }
 
+// Hard-blocklist of domains swot lists that we explicitly never
+// want to surface in the picker — typically institutional / faculty
+// domains that collide with a student-only counterpart we DO want.
+//   - `vit.ac.in` is VIT's faculty domain; the student equivalent
+//     is `vitstudent.ac.in`. Leaving the faculty domain in made it
+//     the obvious auto-fill choice and silently locked students
+//     out of verification.
+var domainExclusions = map[string]bool{
+	"vit.ac.in": true,
+}
+
 // Non-domain top-level segments in swot's tree that we want to
 // keep treating as domains (city / region gTLDs). Everything else
 // at the root is either a country code (handled by ccTLDCountry)
@@ -207,6 +218,11 @@ func walkSwot(root string) ([]domainRecord, error) {
 		}
 		fqdn := strings.ToLower(strings.Join(segs, "."))
 		if fqdn == "" {
+			return nil
+		}
+		// Skip the hard-blocklist (faculty domains we don't want
+		// showing up in the picker — see `domainExclusions`).
+		if domainExclusions[fqdn] {
 			return nil
 		}
 
