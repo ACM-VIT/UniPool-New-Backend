@@ -109,7 +109,7 @@ func SetupRoutes(app *fiber.App) {
 	app.Get("/booking/:id", CRUD.GetBookingByID)                 // Retrieves a specific booking by its ID
 	app.Get("/booking/ride/:ride_id", CRUD.GetBookingsByRideID)  // Retrieves all bookings for a specific ride
 	app.Patch("/booking/update/:id", CRUD.UpdateBooking)         // Updates an existing booking
-	app.Delete("/booking/delete/:id", CRUD.DeleteBooking)        // Deletes a booking
+	app.Delete("/booking/delete/:id", bookings.DeleteBooking)    // Deletes a booking
 	app.Put("/bookings/accept/:bookingID", bookings.AcceptRoute) // Accepts a booking
 	app.Put("/bookings/reject/:bookingID", bookings.RejectRoute) // Rejects a booking
 	app.Post("/bookings/request", bookings.Request)              // Requests a booking aka Create a booking
@@ -163,12 +163,6 @@ func SetupRoutes(app *fiber.App) {
 	app.Get("/rides/involved", rides.GetInvolvedRides)
 	app.Get("/passengers/all", rides.GetAllPassengers)
 	app.Delete("/rides/:ride_id/participants/:user_id", rides.RemoveRideParticipant)
-
-	app.Post("/booking/create", CRUD.CreateBooking)           // Creates a new booking
-	app.Get("/booking/list", CRUD.GetBookings)                // Retrieves all bookings
-	app.Get("/booking/:id", CRUD.GetBookingByID)              // Retrieves a specific booking by its ID
-	app.Patch("/booking/update/:id", CRUD.UpdateBooking)      // Updates an existing booking
-	app.Delete("/booking/delete/:id", bookings.DeleteBooking) // Deletes a booking
 
 }
 
