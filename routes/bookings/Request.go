@@ -66,7 +66,7 @@ func Request(c *fiber.Ctx) error {
 		if fcmService != nil {
 			rideRoute := ride.StartLocation + " to " + ride.EndLocation
 			go func() {
-				if err := fcmService.SendBookingRequestNotification(ride.HostUserID, user.Name, rideRoute, booking.ID); err != nil {
+				if err := fcmService.SendBookingRequestNotification(ride.HostUserID, user.ID, user.Name, rideRoute, ride.ID, booking.ID); err != nil {
 					log.Printf("Error sending booking request notification: %v", err)
 				}
 			}()

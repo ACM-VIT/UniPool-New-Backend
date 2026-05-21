@@ -153,7 +153,7 @@ func AcceptRoute(c *fiber.Ctx) error {
 	if fcmService != nil {
 		rideRoute := ride.StartLocation + " to " + ride.EndLocation
 		go func() {
-			if err := fcmService.SendBookingAcceptedNotification(booking.PassengerID, rideRoute, booking.ID); err != nil {
+			if err := fcmService.SendBookingAcceptedNotification(booking.PassengerID, rideRoute, ride.ID, booking.ID); err != nil {
 				log.Printf("Error sending booking accepted notification: %v", err)
 			}
 		}()

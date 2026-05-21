@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"unipool-backend/database"
 	"unipool-backend/initializer"
 	"unipool-backend/models"
@@ -17,6 +18,12 @@ type FCMService struct {
 }
 
 var fcmService *FCMService
+
+func dmRoomID(a, b uuid.UUID) string {
+	ids := []string{a.String(), b.String()}
+	sort.Strings(ids)
+	return "dm_" + ids[0] + "_" + ids[1]
+}
 
 // InitFCMService initializes the FCM service
 func InitFCMService() error {
@@ -105,33 +112,39 @@ func (f *FCMService) SendNotificationToMultipleUsers(userIDs []uuid.UUID, title,
 }
 
 // Notification types and helper methods
-func (f *FCMService) SendBookingRequestNotification(rideOwnerID uuid.UUID, passengerName, rideRoute string, bookingID uuid.UUID) error {
+func (f *FCMService) SendBookingRequestNotification(rideOwnerID uuid.UUID, passengerID uuid.UUID, passengerName, rideRoute string, rideID uuid.UUID, bookingID uuid.UUID) error {
 	title := "New Ride Request"
 	body := fmt.Sprintf("%s wants to join your ride to %s", passengerName, rideRoute)
 	data := map[string]string{
-		"type":       "booking_request",
-		"booking_id": bookingID.String(),
-		"action":     "view_booking",
+		"type":           "booking_request",
+		"ride_id":        rideID.String(),
+		"booking_id":     bookingID.String(),
+		"passenger_id":   passengerID.String(),
+		"passenger_name": passengerName,
+		"dm_room_id":     dmRoomID(rideOwnerID, passengerID),
+		"action":         "open_dm",
 	}
 	return f.SendNotification(rideOwnerID, title, body, data)
 }
 
-func (f *FCMService) SendBookingAcceptedNotification(passengerID uuid.UUID, rideRoute string, bookingID uuid.UUID) error {
+func (f *FCMService) SendBookingAcceptedNotification(passengerID uuid.UUID, rideRoute string, rideID uuid.UUID, bookingID uuid.UUID) error {
 	title := "Ride Request Accepted! 🎉"
 	body := fmt.Sprintf("Your request for the ride to %s has been accepted", rideRoute)
 	data := map[string]string{
 		"type":       "booking_accepted",
+		"ride_id":    rideID.String(),
 		"booking_id": bookingID.String(),
-		"action":     "view_ride",
+		"action":     "open_chat",
 	}
 	return f.SendNotification(passengerID, title, body, data)
 }
 
-func (f *FCMService) SendBookingRejectedNotification(passengerID uuid.UUID, rideRoute string, bookingID uuid.UUID) error {
+func (f *FCMService) SendBookingRejectedNotification(passengerID uuid.UUID, rideRoute string, rideID uuid.UUID, bookingID uuid.UUID) error {
 	title := "Ride Request Declined"
 	body := fmt.Sprintf("Unfortunately, your request for the ride to %s was declined", rideRoute)
 	data := map[string]string{
 		"type":       "booking_rejected",
+		"ride_id":    rideID.String(),
 		"booking_id": bookingID.String(),
 		"action":     "search_rides",
 	}
@@ -152,15 +165,18 @@ func (f *FCMService) SendChatMessageNotification(userID uuid.UUID, senderName, m
 	return f.SendNotification(userID, title, body, data)
 }
 
-func (f *FCMService) SendDirectMessageNotification(userID uuid.UUID, senderName, message string) error {
+func (f *FCMService) SendDirectMessageNotification(userID uuid.UUID, senderID uuid.UUID, senderName, message, dmRoomID string) error {
 	title := fmt.Sprintf("New message from %s", senderName)
 	body := fmt.Sprintf("💬 %s", message)
 	if len(body) > 100 {
 		body = body[:97] + "..."
 	}
 	data := map[string]string{
-		"type":    "direct_message",
-		"action":  "open_dm",
+		"type":        "direct_message",
+		"dm_room_id":  dmRoomID,
+		"sender_id":   senderID.String(),
+		"sender_name": senderName,
+		"action":      "open_dm",
 	}
 	return f.SendNotification(userID, title, body, data)
 }

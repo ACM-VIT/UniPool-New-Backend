@@ -16,7 +16,7 @@ func RejectRoute(c *fiber.Ctx) error {
 	if userInterface == nil {
 		return c.Status(401).JSON(fiber.Map{
 			"success": false,
-			"error": "User not authenticated",
+			"error":   "User not authenticated",
 		})
 	}
 
@@ -24,7 +24,7 @@ func RejectRoute(c *fiber.Ctx) error {
 	if !ok {
 		return c.Status(401).JSON(fiber.Map{
 			"success": false,
-			"error": "Invalid user data",
+			"error":   "Invalid user data",
 		})
 	}
 
@@ -42,8 +42,8 @@ func RejectRoute(c *fiber.Ctx) error {
 		log.Printf("Error finding booking with ID %v: %v\n", bookingID, err)
 		tx.Rollback()
 		return c.Status(404).JSON(fiber.Map{
-			"success": false,
-			"error": "Booking not found",
+			"success":    false,
+			"error":      "Booking not found",
 			"booking_id": bookingID,
 		})
 	}
@@ -53,8 +53,8 @@ func RejectRoute(c *fiber.Ctx) error {
 		log.Printf("Error finding ride with ID %v: %v\n", booking.RideID, err)
 		tx.Rollback()
 		return c.Status(404).JSON(fiber.Map{
-			"success": false,
-			"error": "Ride not found",
+			"success":    false,
+			"error":      "Ride not found",
 			"booking_id": bookingID,
 		})
 	}
@@ -63,8 +63,8 @@ func RejectRoute(c *fiber.Ctx) error {
 		log.Printf("User %v is not authorized to reject bookings for ride %v (host: %v)\n", user.ID, ride.ID, ride.HostUserID)
 		tx.Rollback()
 		return c.Status(403).JSON(fiber.Map{
-			"success": false,
-			"error": "Only the ride host can reject booking requests",
+			"success":    false,
+			"error":      "Only the ride host can reject booking requests",
 			"booking_id": bookingID,
 		})
 	}
@@ -74,19 +74,18 @@ func RejectRoute(c *fiber.Ctx) error {
 		log.Printf("Error updating booking status for ID %v: %v\n", bookingID, err)
 		tx.Rollback()
 		return c.Status(500).JSON(fiber.Map{
-			"success": false,
-			"error": "Error updating booking status",
+			"success":    false,
+			"error":      "Error updating booking status",
 			"booking_id": bookingID,
 		})
 	}
-
 
 	// Commit the transaction
 	if err := tx.Commit().Error; err != nil {
 		log.Printf("Error committing transaction: %v\n", err)
 		return c.Status(500).JSON(fiber.Map{
-			"success": false,
-			"error": "Error committing transaction",
+			"success":    false,
+			"error":      "Error committing transaction",
 			"booking_id": bookingID,
 		})
 	}
@@ -96,7 +95,7 @@ func RejectRoute(c *fiber.Ctx) error {
 	if fcmService != nil {
 		rideRoute := ride.StartLocation + " to " + ride.EndLocation
 		go func() {
-			if err := fcmService.SendBookingRejectedNotification(booking.PassengerID, rideRoute, booking.ID); err != nil {
+			if err := fcmService.SendBookingRejectedNotification(booking.PassengerID, rideRoute, ride.ID, booking.ID); err != nil {
 				log.Printf("Error sending booking rejected notification: %v", err)
 			}
 		}()
@@ -104,9 +103,9 @@ func RejectRoute(c *fiber.Ctx) error {
 
 	log.Printf("Booking with ID %v rejected successfully\n", bookingID)
 	return c.Status(200).JSON(fiber.Map{
-		"success": true,
-		"message": "Booking rejected successfully",
+		"success":    true,
+		"message":    "Booking rejected successfully",
 		"booking_id": bookingID,
-		"booking": booking,
+		"booking":    booking,
 	})
 }

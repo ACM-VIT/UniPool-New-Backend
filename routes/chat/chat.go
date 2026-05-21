@@ -450,7 +450,7 @@ func fanOutDMNotification(dmRoomID string, sender models.User, content string) {
 	if err != nil {
 		return
 	}
-	if err := fcm.SendDirectMessageNotification(otherID, sender.Name, content); err != nil {
+	if err := fcm.SendDirectMessageNotification(otherID, sender.ID, sender.Name, content, dmRoomID); err != nil {
 		log.Printf("notifications: dm %s -> user %s failed: %v", dmRoomID, otherID, err)
 	}
 }
