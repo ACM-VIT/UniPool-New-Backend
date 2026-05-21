@@ -157,34 +157,11 @@ func createIndexes(db *gorm.DB) error {
 	}
 	log.Printf("Installed %d/%d extensions successfully", extensionCount, len(extensions))
 
-	// Ensure new chat-read table exists even when SHOULD_MIGRATE isn't
-	// set. Auto-migrate handles new columns when explicitly enabled;
-	// these CREATE ... IF NOT EXISTS statements are a cheap safety
-	// net. CockroachDB doesn't support multi-statement prepared queries
-	// so we issue them one at a time.
-	chatReadsDDL := []string{
-		`CREATE TABLE IF NOT EXISTS chat_reads (
-			id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-			updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-			deleted_at   TIMESTAMPTZ,
-			user_id      UUID NOT NULL,
-			ride_id      UUID,
-			dm_room_id   TEXT,
-			last_read_at TIMESTAMPTZ NOT NULL
-		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_reads_user_ride
-			ON chat_reads(user_id, ride_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_chat_reads_dm
-			ON chat_reads(dm_room_id)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_reads_user_dm
-			ON chat_reads(user_id, dm_room_id)`,
-	}
-	for _, stmt := range chatReadsDDL {
-		if err := db.Exec(stmt).Error; err != nil {
-			log.Printf("Warning: chat_reads bootstrap DDL failed: %v", err)
-		}
-	}
+	// chat_reads table + its unique indexes are now created by GORM
+	// AutoMigrate from the model's `uniqueIndex:` tags (idx_chat_reads_user_ride
+	// and idx_chat_reads_user_dm). The old inline CREATE-TABLE-IF-NOT-EXISTS
+	// bootstrap is gone — keeping the schema definition in one place
+	// (the model) instead of split between model + database.go.
 
 	indexes := []struct {
 		name string
