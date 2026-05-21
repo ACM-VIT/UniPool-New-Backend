@@ -26,6 +26,13 @@ type BookingDetail struct {
 	PassengerEmail             string `json:"passenger_email"`
 	PassengerProfilePictureURL string `json:"passenger_profile_picture_url"`
 	PassengerContactNumber     string `json:"passenger_contact_number"`
+	// Extra surfaces consumed by the passenger profile sheet on the
+	// host's Ride Management screen. UPI VPA powers the "Pay" pill,
+	// is_email_verified drives the verified checkmark, institute lets
+	// the host see "VIT" / "Stanford" at a glance.
+	PassengerUPIVPA            string `json:"passenger_upi_vpa,omitempty"`
+	PassengerIsVerified        bool   `json:"passenger_is_verified"`
+	PassengerInstituteName     string `json:"passenger_institute_name,omitempty"`
 }
 
 type RideDetailsComplete struct {
@@ -152,7 +159,8 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 	if len(passengerIDs) > 0 {
 		var passengers []models.User
 		if err := database.Database.Db.
-			Select("id, name, email, profile_picture_url, contact_number").
+			Preload("Institute").
+			Select("id, name, email, profile_picture_url, contact_number, upi_vpa, is_email_verified, institute_id").
 			Where("id IN ?", passengerIDs).
 			Find(&passengers).Error; err != nil {
 			log.Printf("batch passenger lookup failed: %v", err)
@@ -183,6 +191,10 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 		if b.RequestStatus == "accepted" {
 			bookedSeats++
 		}
+		passengerInstituteName := ""
+		if passenger.Institute != nil {
+			passengerInstituteName = passenger.Institute.Name
+		}
 		bookingDetails = append(bookingDetails, BookingDetail{
 			ID:                         b.ID.String(),
 			PassengerID:                b.PassengerID.String(),
@@ -192,6 +204,9 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 			PassengerEmail:             passenger.Email,
 			PassengerProfilePictureURL: passenger.ProfilePictureURL,
 			PassengerContactNumber:     passenger.ContactNumber,
+			PassengerUPIVPA:            passenger.UPIVPA,
+			PassengerIsVerified:        passenger.IsEmailVerified,
+			PassengerInstituteName:     passengerInstituteName,
 		})
 	}
 
