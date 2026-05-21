@@ -47,6 +47,14 @@ type ratingSummaryResponse struct {
 	Count   int64     `json:"count"`
 }
 
+type PendingRatingRide struct {
+	RideID        uuid.UUID `json:"ride_id"`
+	StartLocation string    `json:"start_location"`
+	EndLocation   string    `json:"end_location"`
+	StartTime     time.Time `json:"start_time"`
+	PendingCount  int       `json:"pending_count"`
+}
+
 // GetUserRatingSummary returns the public aggregate for one user.
 // Individual comments stay private for now; surfaces only need the
 // average + count to show useful trust context without leaking detail.
@@ -243,6 +251,16 @@ func GetPendingRatings(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
 	}
 
+	out, err := BuildPendingRatings(user.ID)
+	if err != nil {
+		log.Printf("GetPendingRatings: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup failed"})
+	}
+
+	return c.JSON(fiber.Map{"rides": out})
+}
+
+func BuildPendingRatings(userID uuid.UUID) ([]PendingRatingRide, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
@@ -259,32 +277,24 @@ func GetPendingRatings(c *fiber.Ctx) error {
 			AND (
 				host_user_id = ?
 				OR id IN (
-					SELECT ride_id FROM bookings
+				SELECT ride_id FROM bookings
 					WHERE passenger_id = ? AND request_status = 'accepted'
 				)
 			)
-		`, windowFloor, windowCeil, user.ID, user.ID).
+		`, windowFloor, windowCeil, userID, userID).
 		Order("start_time DESC").
 		Find(&rides).Error; err != nil {
-		log.Printf("GetPendingRatings: rides query: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup failed"})
+		return nil, err
 	}
 	if len(rides) == 0 {
-		return c.JSON(fiber.Map{"rides": []any{}})
+		return []PendingRatingRide{}, nil
 	}
 
-	type result struct {
-		RideID        uuid.UUID `json:"ride_id"`
-		StartLocation string    `json:"start_location"`
-		EndLocation   string    `json:"end_location"`
-		StartTime     time.Time `json:"start_time"`
-		PendingCount  int       `json:"pending_count"`
-	}
-	out := make([]result, 0, len(rides))
+	out := make([]PendingRatingRide, 0, len(rides))
 	for _, r := range rides {
 		// Count counterparts for this ride.
 		var targetIDs []uuid.UUID
-		if r.HostUserID == user.ID {
+		if r.HostUserID == userID {
 			type row struct{ PassengerID uuid.UUID }
 			var rows []row
 			database.Database.Db.WithContext(ctx).
@@ -304,13 +314,13 @@ func GetPendingRatings(c *fiber.Ctx) error {
 		var alreadyCount int64
 		database.Database.Db.WithContext(ctx).
 			Model(&models.RideRating{}).
-			Where("ride_id = ? AND rater_user_id = ? AND rated_user_id IN ?", r.ID, user.ID, targetIDs).
+			Where("ride_id = ? AND rater_user_id = ? AND rated_user_id IN ?", r.ID, userID, targetIDs).
 			Count(&alreadyCount)
 		pending := len(targetIDs) - int(alreadyCount)
 		if pending <= 0 {
 			continue
 		}
-		out = append(out, result{
+		out = append(out, PendingRatingRide{
 			RideID:        r.ID,
 			StartLocation: r.StartLocation,
 			EndLocation:   r.EndLocation,
@@ -319,7 +329,7 @@ func GetPendingRatings(c *fiber.Ctx) error {
 		})
 	}
 
-	return c.JSON(fiber.Map{"rides": out})
+	return out, nil
 }
 
 type submitRatingItem struct {

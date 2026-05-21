@@ -3,6 +3,7 @@ package database
 import (
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
 	// "runtime"
@@ -25,6 +26,20 @@ func GlobalActivationScope(db *gorm.DB) *gorm.DB {
 }
 
 var Database DbInstance
+
+func envInt(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		log.Printf("Invalid %s=%q, using %d", name, raw, fallback)
+		return fallback
+	}
+	return value
+}
 
 func ConnectToDB() {
 	connectionString := os.Getenv("DB_URL")
@@ -54,11 +69,25 @@ func ConnectToDB() {
 		log.Fatalf("Error getting generic DB: %v", err)
 	}
 
-	poolSize := 10
-	sqlDB.SetMaxOpenConns(poolSize)
-	sqlDB.SetMaxIdleConns(poolSize / 2)        // 5 idle connections
-	sqlDB.SetConnMaxLifetime(10 * time.Minute) // Reduced to 10 minutes
-	sqlDB.SetConnMaxIdleTime(2 * time.Minute)  // Reduced to 2 minutes
+	maxOpenConns := envInt("DB_MAX_OPEN_CONNS", 30)
+	maxIdleConns := envInt("DB_MAX_IDLE_CONNS", 15)
+	if maxIdleConns > maxOpenConns {
+		maxIdleConns = maxOpenConns
+	}
+	connMaxLifetimeMinutes := envInt("DB_CONN_MAX_LIFETIME_MINUTES", 10)
+	connMaxIdleMinutes := envInt("DB_CONN_MAX_IDLE_MINUTES", 2)
+
+	sqlDB.SetMaxOpenConns(maxOpenConns)
+	sqlDB.SetMaxIdleConns(maxIdleConns)
+	sqlDB.SetConnMaxLifetime(time.Duration(connMaxLifetimeMinutes) * time.Minute)
+	sqlDB.SetConnMaxIdleTime(time.Duration(connMaxIdleMinutes) * time.Minute)
+	log.Printf(
+		"Database pool configured: max_open=%d max_idle=%d max_lifetime=%dm max_idle_time=%dm",
+		maxOpenConns,
+		maxIdleConns,
+		connMaxLifetimeMinutes,
+		connMaxIdleMinutes,
+	)
 
 	if err := sqlDB.Ping(); err != nil {
 		log.Fatalf("Error pinging database: %v", err)
@@ -169,14 +198,21 @@ func createIndexes(db *gorm.DB) error {
 		{"idx_rides_start_time", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_start_time ON rides(start_time)"},
 		{"idx_rides_is_ongoing", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_is_ongoing ON rides(is_ongoing)"},
 		{"idx_rides_deleted_at", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_deleted_at ON rides(deleted_at)"},
+		{"idx_rides_start_lat_lng", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_start_lat_lng ON rides(start_latitude, start_longitude) WHERE start_latitude IS NOT NULL AND start_longitude IS NOT NULL"},
+		{"idx_rides_start_geog", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_start_geog ON rides USING GIST ((ST_SetSRID(ST_MakePoint(start_longitude::float8, start_latitude::float8), 4326)::geography)) WHERE start_latitude IS NOT NULL AND start_longitude IS NOT NULL"},
+		{"idx_rides_open_upcoming", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_open_upcoming ON rides(start_time, host_user_id) WHERE deleted_at IS NULL AND is_ongoing = 0"},
 
 		{"idx_bookings_ride_id", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_ride_id ON bookings(ride_id)"},
 		{"idx_bookings_passenger_id", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_passenger_id ON bookings(passenger_id)"},
 		{"idx_bookings_request_status", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_request_status ON bookings(request_status)"},
 		{"idx_bookings_deleted_at", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_deleted_at ON bookings(deleted_at)"},
+		{"idx_bookings_passenger_status", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_passenger_status ON bookings(passenger_id, request_status) WHERE deleted_at IS NULL"},
+		{"idx_bookings_ride_status", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_ride_status ON bookings(ride_id, request_status) WHERE deleted_at IS NULL"},
 
 		{"idx_bookings_ride_passenger", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_ride_passenger ON bookings(ride_id, passenger_id)"},
 		{"idx_rides_host_time", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_host_time ON rides(host_user_id, start_time)"},
+		{"idx_ratings_rater_ride_rated", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ratings_rater_ride_rated ON ride_ratings(rater_user_id, ride_id, rated_user_id)"},
+		{"idx_ratings_ride_rater", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ratings_ride_rater ON ride_ratings(ride_id, rater_user_id)"},
 
 		// Chat-list & message-history hot paths.
 		{"idx_messages_ride_created", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_ride_created ON messages(ride_id, created_at DESC)"},

@@ -16,16 +16,16 @@ import (
 // happened and still un-dismissed (i.e. the user hasn't tapped Pay
 // or No-show yet).
 type TripCard struct {
-	BookingID         string  `json:"booking_id"`
-	RideID            string  `json:"ride_id"`
-	HostUserID        string  `json:"host_user_id"`
-	HostName          string  `json:"host_name"`
-	HostProfilePicURL string  `json:"host_profile_picture_url,omitempty"`
-	HostUPIVPA        string  `json:"host_upi_vpa,omitempty"` // optional; surfaced for deeplink
-	StartLocation     string  `json:"start_location"`
-	EndLocation       string  `json:"end_location"`
-	StartTime         string  `json:"start_time"`
-	TotalPrice        int     `json:"total_price"`
+	BookingID         string `json:"booking_id"`
+	RideID            string `json:"ride_id"`
+	HostUserID        string `json:"host_user_id"`
+	HostName          string `json:"host_name"`
+	HostProfilePicURL string `json:"host_profile_picture_url,omitempty"`
+	HostUPIVPA        string `json:"host_upi_vpa,omitempty"` // optional; surfaced for deeplink
+	StartLocation     string `json:"start_location"`
+	EndLocation       string `json:"end_location"`
+	StartTime         string `json:"start_time"`
+	TotalPrice        int    `json:"total_price"`
 	// State the client uses to pick which UI variant of the card:
 	//   "upcoming"   — trip is in the future, info card only
 	//   "in_window"  — between start_time and start_time+24h, show Pay button
@@ -40,33 +40,42 @@ type TripCard struct {
 // as "render nothing"; no UI noise).
 //
 // Selection (in priority order):
-//   1. Next upcoming accepted booking starting in the next 12h.
-//   2. Most recent accepted booking with start_time in the past 7d
-//      that hasn't been dismissed (dismissed_at IS NULL).
-//   3. None.
+//  1. Next upcoming accepted booking starting in the next 12h.
+//  2. Most recent accepted booking with start_time in the past 7d
+//     that hasn't been dismissed (dismissed_at IS NULL).
+//  3. None.
 func GetActiveTripCard(c *fiber.Ctx) error {
 	user, ok := c.Locals("user").(models.User)
 	if !ok {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
 	}
 
+	card := BuildActiveTripCard(user.ID)
+	if card == nil {
+		return c.Status(fiber.StatusNoContent).Send(nil)
+	}
+
+	return c.JSON(fiber.Map{"trip_card": card})
+}
+
+func BuildActiveTripCard(userID uuid.UUID) *TripCard {
 	now := time.Now()
 	soon := now.Add(12 * time.Hour)
 	weekAgo := now.Add(-7 * 24 * time.Hour)
 
 	// Try the "upcoming within 12h" bucket first.
-	upcoming, found := findCandidate(user.ID, "upcoming", now, soon, weekAgo)
+	upcoming, found := findCandidate(userID, "upcoming", now, soon, weekAgo)
 	if found {
-		return c.JSON(fiber.Map{"trip_card": upcoming})
+		return &upcoming
 	}
 
 	// Fall back to "recently happened, still un-dismissed" within 7d.
-	recent, found := findCandidate(user.ID, "recent", now, soon, weekAgo)
+	recent, found := findCandidate(userID, "recent", now, soon, weekAgo)
 	if found {
-		return c.JSON(fiber.Map{"trip_card": recent})
+		return &recent
 	}
 
-	return c.Status(fiber.StatusNoContent).Send(nil)
+	return nil
 }
 
 // findCandidate runs the booking lookup in the requested mode and

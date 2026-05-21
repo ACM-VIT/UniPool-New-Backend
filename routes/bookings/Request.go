@@ -2,6 +2,7 @@ package bookings
 
 import (
 	"log"
+	"strings"
 	"unipool-backend/database"
 	"unipool-backend/models"
 	"unipool-backend/services"
@@ -47,6 +48,26 @@ func Request(c *fiber.Ctx) error {
 	if database.Database.Db.Where("ride_id = ? AND passenger_id = ?", booking.RideID, PassengerID).First(&existingBooking).Error == nil {
 		log.Println("Similar booking already exists")
 		return c.Status(400).SendString("Similar booking already exists")
+	}
+
+	// Women-only ride gate: if the target ride is flagged as
+	// same-gender (currently always female-only — we only let female
+	// hosts set the flag at create-ride time), reject requests from
+	// non-female users with a clear 403 so the client can surface a
+	// friendly "this ride is women-only" sheet instead of a generic
+	// failure. Done BEFORE the insert so we never write a doomed
+	// booking row.
+	var targetRide models.Ride
+	if err := database.Database.Db.Select("id, is_same_gender").First(&targetRide, booking.RideID).Error; err != nil {
+		log.Printf("ride lookup for women-only check failed: %v", err)
+		return c.Status(404).SendString("Ride not found")
+	}
+	if targetRide.IsSameGender == 1 && strings.ToLower(user.Gender) != "female" {
+		log.Printf("non-female user %v tried to join women-only ride %v", user.ID, targetRide.ID)
+		return c.Status(403).JSON(fiber.Map{
+			"error": "This ride is reserved for women passengers",
+			"code":  "women_only",
+		})
 	}
 
 	// Associate the PassengerID with the booking

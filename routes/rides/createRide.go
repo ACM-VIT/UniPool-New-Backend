@@ -2,6 +2,7 @@ package rides
 
 import (
 	"log"
+	"strings"
 	"time"
 	"unipool-backend/database"
 	"unipool-backend/models"
@@ -91,8 +92,19 @@ func CreateRide(c *fiber.Ctx) error {
 			   })
 	   }
 
-	// Log gender-specific ride information
+	// Women-only rides: server-side gate. Only female hosts can flag a
+	// ride as same-gender. Without this check, anyone (incl. male
+	// hosts) could send `is_same_gender=1` and the ride would surface
+	// as "Women-only" on the search screen — making the safety signal
+	// meaningless. UI hides the toggle for non-female users, but the
+	// server is the source of truth.
 	if ride.IsSameGender == 1 {
+		if strings.ToLower(hostUser.Gender) != "female" {
+			log.Printf("Non-female user %v tried to create a same-gender ride", hostUserID)
+			return c.Status(403).JSON(fiber.Map{
+				"error": "Only female hosts can create women-only rides",
+			})
+		}
 		log.Printf("This ride has been created for the same gender only.")
 	} else if ride.IsSameGender == 0 {
 		log.Printf("This ride has been created for any gender.")

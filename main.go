@@ -8,6 +8,7 @@ import (
 	"unipool-backend/initializer"
 	"unipool-backend/middleware"
 	"unipool-backend/routes/CRUD"
+	"unipool-backend/routes/appstate"
 	"unipool-backend/routes/bookings"
 	"unipool-backend/routes/chat"
 	"unipool-backend/routes/locations"
@@ -263,6 +264,12 @@ func main() {
 	// Public aggregate only: average/count ratings for trust surfaces.
 	// Individual comments and rater identities remain private.
 	app.Get("/user/:id/rating-summary", rides.GetUserRatingSummary)
+
+	// Bootstrap read model for app startup/home. Optional auth lets
+	// guests receive public nearby activity while signed-in users get
+	// their user summary, upcoming trips, active trip card, and pending
+	// ratings in one cached request.
+	app.Get("/app/state", middleware.OptionalAuthenticate, appstate.GetState)
 
 	app.Use(middleware.Authenticate)
 
