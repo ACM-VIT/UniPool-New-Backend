@@ -260,6 +260,10 @@ func main() {
 	// inline so the client can validate the email locally.
 	app.Get("/institutes/search", users.SearchInstitutes)
 
+	// Public aggregate only: average/count ratings for trust surfaces.
+	// Individual comments and rater identities remain private.
+	app.Get("/user/:id/rating-summary", rides.GetUserRatingSummary)
+
 	app.Use(middleware.Authenticate)
 
 	app.Get("/", func(c *fiber.Ctx) error {

@@ -41,6 +41,41 @@ type ratingEligibilityResponse struct {
 	Targets       []pendingRateTarget `json:"targets"`
 }
 
+type ratingSummaryResponse struct {
+	UserID  uuid.UUID `json:"user_id"`
+	Average *float64  `json:"average"`
+	Count   int64     `json:"count"`
+}
+
+// GetUserRatingSummary returns the public aggregate for one user.
+// Individual comments stay private for now; surfaces only need the
+// average + count to show useful trust context without leaking detail.
+func GetUserRatingSummary(c *fiber.Ctx) error {
+	userID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid user id"})
+	}
+
+	var summary struct {
+		Average *float64
+		Count   int64
+	}
+	if err := database.Database.Db.
+		Model(&models.RideRating{}).
+		Select("AVG(stars)::float8 AS average, COUNT(*) AS count").
+		Where("rated_user_id = ?", userID).
+		Scan(&summary).Error; err != nil {
+		log.Printf("GetUserRatingSummary failed for user %s: %v", userID, err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "rating lookup failed"})
+	}
+
+	return c.JSON(ratingSummaryResponse{
+		UserID:  userID,
+		Average: summary.Average,
+		Count:   summary.Count,
+	})
+}
+
 // GetRideRatingEligibility tells the client whether the calling
 // user can rate someone on this ride, and if so, who. Drives both
 // the 12h-after-trip in-app prompt and the post-trip rating screen.

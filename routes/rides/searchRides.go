@@ -26,11 +26,13 @@ type RideCard struct {
 	// HostUserGender lets the client surface a same-gender affinity
 	// signal (e.g. soft pink tint when a female passenger searches and
 	// the host is also female). Omit when unset to avoid leaking blanks.
-	HostUserGender   string    `json:"host_user_gender,omitempty"`
-	SameGenderFemale bool      `json:"same_gender_female,omitempty"`
-	StartLocation    string    `json:"start_location"`
-	EndLocation      string    `json:"end_location"`
-	StartTime        time.Time `json:"start_time"`
+	HostUserGender    string    `json:"host_user_gender,omitempty"`
+	SameGenderFemale  bool      `json:"same_gender_female,omitempty"`
+	HostRatingAverage *float64  `json:"host_rating_average,omitempty"`
+	HostRatingCount   int64     `json:"host_rating_count,omitempty"`
+	StartLocation     string    `json:"start_location"`
+	EndLocation       string    `json:"end_location"`
+	StartTime         time.Time `json:"start_time"`
 	// CreatedAt feeds the "Just listed" match reason — we only surface the
 	// flag on the frontend, but the timestamp is exposed in case clients
 	// want their own freshness UX.
@@ -857,6 +859,34 @@ func SearchRides(c *fiber.Ctx) error {
 		}
 	}
 
+	type hostRating struct {
+		RatedUserID uuid.UUID
+		Average     *float64
+		Count       int64
+	}
+	hostRatings := make(map[uuid.UUID]hostRating)
+	if len(rides) > 0 {
+		hostIDs := make([]uuid.UUID, 0, len(rides))
+		seenHost := make(map[uuid.UUID]bool, len(rides))
+		for _, r := range rides {
+			if !seenHost[r.HostUserID] {
+				hostIDs = append(hostIDs, r.HostUserID)
+				seenHost[r.HostUserID] = true
+			}
+		}
+		var ratings []hostRating
+		if err := database.Database.Db.Model(&models.RideRating{}).
+			Select("rated_user_id, AVG(stars)::float8 AS average, COUNT(*) AS count").
+			Where("rated_user_id IN ?", hostIDs).
+			Group("rated_user_id").
+			Find(&ratings).Error; err != nil {
+			log.Printf("host rating lookup failed (continuing without): %v", err)
+		}
+		for _, r := range ratings {
+			hostRatings[r.RatedUserID] = r
+		}
+	}
+
 	// Batch-load the caller's bookings for *every* ride in this
 	// result set so the viewer-state resolver below doesn't trigger
 	// a per-ride query. Single round-trip even for 50 results.
@@ -876,6 +906,8 @@ func SearchRides(c *fiber.Ctx) error {
 			HostUserYOB:               ride.HostUser.YOB,
 			HostUserGender:            ride.HostUser.Gender,
 			SameGenderFemale:          normalizeGender(params.User.Gender) == "female" && normalizeGender(ride.HostUser.Gender) == "female",
+			HostRatingAverage:         hostRatings[ride.HostUserID].Average,
+			HostRatingCount:           hostRatings[ride.HostUserID].Count,
 			StartLocation:             ride.StartLocation,
 			EndLocation:               ride.EndLocation,
 			StartTime:                 ride.StartTime,
