@@ -85,12 +85,12 @@ func GetBookings(c *fiber.Ctx) error {
 
 	userUUID := user.ID
 
-	cutoff := time.Now().Add(-24 * time.Hour)
 	if err := database.Database.Db.
 		Joins("JOIN rides ON rides.id = bookings.ride_id").
 		Preload("Ride").
 		Preload("Passenger").
-		Where("bookings.passenger_id = ? AND rides.start_time <= ?", userUUID, cutoff).
+		Where("bookings.passenger_id = ?", userUUID).
+		Order("rides.start_time ASC").
 		Find(&bookings).Error; err != nil {
 		log.Printf("Error finding bookings: %v\n", err)
 		return c.Status(502).SendString("Error finding bookings")
