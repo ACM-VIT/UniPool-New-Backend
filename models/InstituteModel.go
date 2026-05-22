@@ -21,13 +21,16 @@ type Institute struct {
 // uniquely.
 type InstituteDomain struct {
 	BaseModel
-	// Pinned index name. GORM derives `uni_institute_domains_domain`
-	// from `uniqueIndex` without an explicit name, but the derived
-	// name has shifted across GORM versions — AutoMigrate then tries
-	// to DROP the old constraint and create a new one, fails on the
-	// drop, and aborts the migration. Naming it explicitly stops the
-	// churn.
-	Domain      string    `gorm:"type:varchar(120);not null;uniqueIndex:idx_institute_domains_domain" json:"domain"`
+	// `index:..,unique` instead of `uniqueIndex:..`. GORM's column
+	// migrator treats a `uniqueIndex` tag as also implying a column
+	// UNIQUE attribute, and on every AutoMigrate run it unconditionally
+	// emits a DROP for the default-convention constraint name
+	// `uni_institute_domains_domain`. On the first run that drop
+	// succeeds (the legacy constraint was real); on every restart
+	// after it fails with SQLSTATE 42704 and aborts the whole
+	// migration. Declaring the index via `index:..,unique` keeps the
+	// uniqueness without tripping the column-unique cleanup path.
+	Domain      string    `gorm:"type:varchar(120);not null;index:idx_institute_domains_domain,unique" json:"domain"`
 	InstituteID uuid.UUID `gorm:"type:uuid;not null;index" json:"institute_id"`
 	Institute   Institute `gorm:"foreignKey:InstituteID" json:"institute,omitempty"`
 }
