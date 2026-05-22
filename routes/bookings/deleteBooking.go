@@ -5,6 +5,7 @@ import (
 	"log"
 	"unipool-backend/database"
 	"unipool-backend/models"
+	"unipool-backend/services"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -103,6 +104,40 @@ func DeleteBooking(c *fiber.Ctx) error {
 	if err := tx.Commit().Error; err != nil {
 		log.Printf("Error committing booking delete transaction: %v\n", err)
 		return &fiber.Error{Code: 500, Message: "Database error"}
+	}
+
+	// Passenger-initiated withdrawal of an accepted booking: notify
+	// the host so they don't keep counting on the seat being filled.
+	// Three guards keep the noise low:
+	//   1. Only when the user removing the booking is the passenger
+	//      themselves (host-initiated removes don't need to notify
+	//      the host).
+	//   2. Only when the booking was actually accepted. Withdrawing
+	//      a still-pending request shouldn't ping anyone (the host
+	//      hadn't decided yet).
+	//   3. Best-effort, async, never blocks the response.
+	if booking.PassengerID == user.ID && booking.RequestStatus == "accepted" {
+		fcmService := services.GetFCMService()
+		if fcmService != nil {
+			passengerName := user.Name
+			rideRoute := ride.StartLocation + " to " + ride.EndLocation
+			rideID := ride.ID
+			bookingID := booking.ID
+			passengerID := user.ID
+			hostUserID := ride.HostUserID
+			go func() {
+				if err := fcmService.SendBookingWithdrawnNotification(
+					hostUserID,
+					passengerID,
+					passengerName,
+					rideRoute,
+					rideID,
+					bookingID,
+				); err != nil {
+					log.Printf("Error sending booking withdrawn notification: %v", err)
+				}
+			}()
+		}
 	}
 
 	log.Printf("Booking with id %v deleted\n", booking.ID)

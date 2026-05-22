@@ -151,6 +151,27 @@ func (f *FCMService) SendBookingRejectedNotification(passengerID uuid.UUID, ride
 	return f.SendNotification(passengerID, title, body, data)
 }
 
+// SendBookingWithdrawnNotification is sent to the HOST when an
+// accepted passenger backs out before the ride happens. Same data
+// shape as the other booking-event pushes so the client's notification
+// router can deep-link to the ride details page cleanly.
+//
+// Wording avoids blame ("can't make it" rather than "cancelled"):
+// the goal is a graceful release, not a shame signal.
+func (f *FCMService) SendBookingWithdrawnNotification(rideOwnerID uuid.UUID, passengerID uuid.UUID, passengerName, rideRoute string, rideID uuid.UUID, bookingID uuid.UUID) error {
+	title := "A passenger can't make it"
+	body := fmt.Sprintf("%s let you know they can't ride to %s. The seat is open again.", passengerName, rideRoute)
+	data := map[string]string{
+		"type":           "booking_withdrawn",
+		"ride_id":        rideID.String(),
+		"booking_id":     bookingID.String(),
+		"passenger_id":   passengerID.String(),
+		"passenger_name": passengerName,
+		"action":         "view_ride",
+	}
+	return f.SendNotification(rideOwnerID, title, body, data)
+}
+
 func (f *FCMService) SendChatMessageNotification(userID uuid.UUID, senderName, message, rideRoute string, rideID uuid.UUID) error {
 	title := fmt.Sprintf("New message from %s", senderName)
 	body := fmt.Sprintf("💬 %s", message)
