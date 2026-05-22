@@ -1,6 +1,7 @@
 package main
 
 import (
+	"embed"
 	"log"
 	"os"
 	"time"
@@ -24,6 +25,13 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/compress"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 )
+
+// Schema migrations live in `migrations/` as numbered .sql files and
+// are baked into the binary. Run them with `unipool-backend migrate`;
+// see database/migrate.go for the runtime behavior.
+//
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
 
 func SetupMiddleware(app *fiber.App) {
 	// gzip every JSON response. Chat-list / user-rides / ride-search
@@ -168,6 +176,28 @@ func SetupRoutes(app *fiber.App) {
 }
 
 func main() {
+	// Subcommand dispatch. Anything other than `serve` (the default)
+	// runs and exits without spinning up Fiber, the websocket hub, or
+	// the FCM scheduler.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "migrate":
+			if err := database.RunMigrations(migrationsFS); err != nil {
+				log.Fatalf("migrate failed: %v", err)
+			}
+			return
+		case "migrate-status":
+			if err := database.MigrationStatus(migrationsFS); err != nil {
+				log.Fatalf("migrate-status failed: %v", err)
+			}
+			return
+		case "serve":
+			// fall through to normal startup
+		default:
+			log.Fatalf("unknown subcommand %q (expected: serve, migrate, migrate-status)", os.Args[1])
+		}
+	}
+
 	initializer.InitFirebase()
 
 	// Initialize FCM service

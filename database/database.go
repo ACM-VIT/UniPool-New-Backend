@@ -9,8 +9,6 @@ import (
 	// "runtime"
 	"time"
 
-	"unipool-backend/models"
-
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -95,54 +93,16 @@ func ConnectToDB() {
 
 	log.Println("Connected to database and verified connection")
 
-	if os.Getenv("SHOULD_MIGRATE") == "TRUE" {
-		log.Println("Running DB Migrations...")
-
-		// One-model-at-a-time so a single failure doesn't abort the
-		// whole batch, plus targeted tolerance for SQLSTATE 42704
-		// ("undefined object"). GORM v2's column migrator keeps emitting
-		// unconditional `DROP CONSTRAINT uni_<table>_<col>` against
-		// every table with a `uniqueIndex` tag, even after the legacy
-		// default-named constraint has already been dropped. On
-		// CockroachDB those repeat drops fail with 42704 and would
-		// kill the rest of the migration if we batched everything.
-		// Any other error stays fatal.
-		//
-		// Order matters: Institute + InstituteDomain first so the
-		// users.institute_id FK resolves on a fresh DB; everything
-		// else after.
-		migrations := []interface{}{
-			&models.Institute{},
-			&models.InstituteDomain{},
-			&models.User{},
-			&models.Ride{},
-			&models.Booking{},
-			&models.UserMetadata{},
-			&models.Message{},
-			&models.ChatRead{},
-			&models.Report{},
-			&models.EmailVerification{},
-			&models.NotificationPreference{},
-			&models.RideRating{},
-		}
-		for _, model := range migrations {
-			if err := db.AutoMigrate(model); err != nil {
-				// Specifically swallow "undefined object" (42704) from
-				// the legacy-constraint cleanup; anything else is real
-				// schema drift and should crash us so we notice.
-				if strings.Contains(err.Error(), "SQLSTATE 42704") ||
-					strings.Contains(err.Error(), "does not exist") {
-					log.Printf("AutoMigrate: tolerating legacy-cleanup error for %T: %v", model, err)
-					continue
-				}
-				log.Fatalf("Error running migration for %T: %v", model, err)
-			}
-		}
-
-		log.Println("DB Migrations completed")
-	}
-
-	// Create indexes for better query performance
+	// Schema migrations are managed by goose under `migrations/`. The
+	// service binary does NOT run them on boot any more; deploy steps
+	// must invoke `unipool-backend migrate` explicitly before bringing
+	// new code online. See database/migrate.go for the rationale.
+	//
+	// We still create performance indexes here on every boot because
+	// (a) `CREATE INDEX CONCURRENTLY IF NOT EXISTS` is genuinely
+	// idempotent and (b) it lets us add new indexes without a
+	// migration round-trip while we're still building. New indexes
+	// SHOULD move into proper migrations once the schema settles.
 	if err := createIndexes(db); err != nil {
 		log.Printf("Warning: Failed to create some indexes: %v", err)
 	}
