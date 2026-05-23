@@ -98,7 +98,15 @@ func StartEmailVerification(c *fiber.Ctx) error {
 	}
 
 	target := strings.ToLower(strings.TrimSpace(body.Email))
-	if target == "" || !strings.Contains(target, "@") {
+	// `target` must be of the form `local@domain` with both halves
+	// non-empty. The client validates this too but a malformed value
+	// can still arrive from older app versions or hand-crafted
+	// requests; without this gate SES rejects with a cryptic "Missing
+	// local name" failure that surfaces in the logs but never gives
+	// the client a clean signal. Observed twice in the wild for an
+	// empty-local email that came through the institute prefill path.
+	atIdx := strings.Index(target, "@")
+	if atIdx <= 0 || atIdx == len(target)-1 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "please enter a valid email"})
 	}
 
