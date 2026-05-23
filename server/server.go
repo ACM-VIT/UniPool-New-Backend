@@ -66,6 +66,13 @@ func WireRoutes(app *fiber.App, auth fiber.Handler, optionalAuth fiber.Handler) 
 	// per-result viewer_state computed; guests get the same results
 	// with viewer_state="available" everywhere.
 	app.Get("/ride/search", optionalAuth, rides.SearchRides)
+
+	// `/ride/preview/:id` is the sanitised public view that drives the
+	// share landing page at unipool.acmvit.in/ride/:id. Strict subset
+	// of GetRideDetailsComplete — no passenger PII, no exact GPS, no
+	// host email/phone. Used by anyone who clicks a shared link and
+	// hasn't installed the app yet.
+	app.Get("/ride/preview/:id", rides.GetRidePreview)
 	app.Get("/locations/search", locations.SearchLocations)
 
 	// Public institute catalogue.
