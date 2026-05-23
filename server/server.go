@@ -78,6 +78,13 @@ func WireRoutes(app *fiber.App, auth fiber.Handler, optionalAuth fiber.Handler) 
 	// Bootstrap read model for app startup/home.
 	app.Get("/app/state", optionalAuth, appstate.GetState)
 
+	// "Already going there?" probe used by CreateRide before the
+	// user commits to posting a new ride. Strict-radius match on
+	// both endpoints + a tight time window, returns up to N hits.
+	// Public (with optional auth) so signed-in callers get their
+	// own rides filtered out of the suggestion list.
+	app.Get("/ride/matching-create", optionalAuth, rides.MatchingCreate)
+
 	// OTA: self-hosted Expo Updates protocol v1 endpoints. These run
 	// BEFORE the auth gate because the client fetches a manifest on
 	// every cold start — long before sign-in. Upload is gated by
