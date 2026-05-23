@@ -1,8 +1,8 @@
 # Integration tests
 
-This repo ships HTTP-level regression tests covering the core user flows
-(ride search, ride create, booking lifecycle, chat send + list, user
-profile UPI, public nearby endpoints).
+HTTP-level regression tests covering the core user flows (ride search,
+ride create, booking lifecycle, chat send + list, mark-read membership,
+user profile UPI, public nearby endpoints).
 
 The tests exist because of the May 2026 PostGIS `ST_MakePoint` cast bug
 that returned empty `/ride/search` results to every user for several
@@ -28,33 +28,45 @@ docker exec unipool-test-crdb cockroach sql --insecure \
 
 # Every test run:
 export TEST_DB_URL='postgresql://root@127.0.0.1:26259/unipool_test?sslmode=disable'
-go test -count=1 .
+go test ./tests/integration -count=1
 ```
 
 Without `TEST_DB_URL` set, every integration test calls `t.Skip` so
 `go test ./...` stays green on machines without the container.
 
-## What's covered
+## Layout
 
-| File | Endpoint(s) | Regression class |
-|---|---|---|
-| `rides_search_test.go` | `GET /ride/search` | PostGIS spatial query, primary + fallback path, own-rides filter |
-| `rides_create_test.go` | `POST /ride/create` | Auth gate, past-time rejection, host-injection security |
-| `bookings_test.go` | `POST /bookings/request`, `PUT /bookings/{accept,reject}/:id` | Booking lifecycle, host-only state transitions |
-| `chat_test.go` | `GET /chats/me`, `POST /chat/:ride_id/message` | Chat membership gating, preview shape, ordering |
-| `user_profile_test.go` | `PATCH /user/profile`, `GET /user/details` | UPI VPA validation + persistence |
-| `public_endpoints_test.go` | `GET /rides/nearby{,-count}`, `GET /institutes{,/search}` | Public PostGIS path, institute listing |
+```
+tests/
+└── integration/
+    ├── harness.go               shared fixtures + helpers (DB, fiber app, seed*, Do, ReadJSON, AsUser)
+    ├── rides_search_test.go     GET /ride/search
+    ├── rides_create_test.go     POST /ride/create
+    ├── bookings_test.go         request -> accept/reject lifecycle
+    ├── chat_test.go             /chats/me, /chat/:id/message, mark-read membership
+    ├── user_profile_test.go     PATCH /user/profile, GET /user/details
+    ├── public_endpoints_test.go /rides/nearby{,-count}, /institutes{,/search}
+    └── perf_regressions_test.go locks in the BuildPendingRatings, BuildActiveTripCard,
+                                 GetRideDetailsComplete refactors
+
+server/                          extracted from main.go so tests can call
+                                 WireRoutes(app, testAuth, testOptionalAuth)
+                                 with the same route table prod uses
+
+migsource/                       embedded migrations FS — lives in its own
+                                 package because go:embed can't traverse `..`
+```
 
 ## Adding new tests
 
-The harness lives in `integration_harness_test.go`. Use the existing
-fixture helpers (`seedInstitute`, `seedUser`, `seedRide`) and the `do()`
-HTTP helper. Authenticated requests pass `asUser(email)` as the headers
-arg — the harness's `testAuth` middleware reads
-`X-Test-User-Email` and looks up the user the same way the prod
-middleware does after Firebase verification.
+Use the existing fixture helpers (`SeedInstitute`, `SeedUser`,
+`SeedRide`) and the `Do(...)` HTTP helper from `harness.go`.
+Authenticated requests pass `AsUser(email)` as the headers arg — the
+harness's `testAuth` middleware reads `X-Test-User-Email` and looks up
+the user the same way the prod middleware does after Firebase
+verification.
 
-Each test should call `resetDB(t)` first so it starts from an empty
+Each test should call `ResetDB(t)` first so it starts from an empty
 database. The single shared `*gorm.DB` is reused across tests for
 speed; only the row data is truncated between tests, not the schema.
 

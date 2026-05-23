@@ -1,4 +1,4 @@
-package main
+package integration
 
 // Regression tests for the chat surface: list, send, read tracking.
 // The chat list query touches three tables (rides + bookings +
@@ -14,36 +14,36 @@ import (
 )
 
 func TestChatsMe_IncludesHostedAndPendingAndAccepted(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
 
-	viewer := seedUser(t, db, "Viewer", "viewer@vitstudent.ac.in", &inst.ID)
-	otherHost := seedUser(t, db, "Other Host", "other-host@vitstudent.ac.in", &inst.ID)
+	viewer := SeedUser(t, db, "Viewer", "viewer@vitstudent.ac.in", &inst.ID)
+	otherHost := SeedUser(t, db, "Other Host", "other-host@vitstudent.ac.in", &inst.ID)
 
 	// Viewer hosts one ride.
-	hostedRide := seedRide(t, db, viewer, RideOpts{StartLocation: "A", EndLocation: "B"})
+	hostedRide := SeedRide(t, db, viewer, RideOpts{StartLocation: "A", EndLocation: "B"})
 
 	// Viewer is an accepted passenger on another ride.
-	acceptedRide := seedRide(t, db, otherHost, RideOpts{StartLocation: "C", EndLocation: "D"})
+	acceptedRide := SeedRide(t, db, otherHost, RideOpts{StartLocation: "C", EndLocation: "D"})
 	if err := db.Create(&models.Booking{RideID: acceptedRide.ID, PassengerID: viewer.ID, RequestStatus: "accepted"}).Error; err != nil {
 		t.Fatalf("seed booking: %v", err)
 	}
 
 	// Viewer is a pending passenger on a third ride.
-	pendingRide := seedRide(t, db, otherHost, RideOpts{StartLocation: "E", EndLocation: "F"})
+	pendingRide := SeedRide(t, db, otherHost, RideOpts{StartLocation: "E", EndLocation: "F"})
 	if err := db.Create(&models.Booking{RideID: pendingRide.ID, PassengerID: viewer.ID, RequestStatus: "pending"}).Error; err != nil {
 		t.Fatalf("seed pending booking: %v", err)
 	}
 
 	// And a ride the viewer was rejected from — must NOT appear.
-	rejectedRide := seedRide(t, db, otherHost, RideOpts{StartLocation: "G", EndLocation: "H"})
+	rejectedRide := SeedRide(t, db, otherHost, RideOpts{StartLocation: "G", EndLocation: "H"})
 	if err := db.Create(&models.Booking{RideID: rejectedRide.ID, PassengerID: viewer.ID, RequestStatus: "rejected"}).Error; err != nil {
 		t.Fatalf("seed rejected booking: %v", err)
 	}
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodGet, "/chats/me", nil, asUser(viewer.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/chats/me", nil, AsUser(viewer.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -53,7 +53,7 @@ func TestChatsMe_IncludesHostedAndPendingAndAccepted(t *testing.T) {
 			ViewerRole string `json:"viewer_role"`
 		} `json:"chat_rooms"`
 	}
-	readJSON(t, resp, &body)
+	ReadJSON(t, resp, &body)
 
 	gotRides := make(map[string]string)
 	for _, r := range body.ChatRooms {
@@ -74,27 +74,27 @@ func TestChatsMe_IncludesHostedAndPendingAndAccepted(t *testing.T) {
 }
 
 func TestChatSendMessage_PersistsAndShowsInPreview(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "msg-host@vitstudent.ac.in", &inst.ID)
-	passenger := seedUser(t, db, "Pax", "msg-pax@vitstudent.ac.in", &inst.ID)
-	ride := seedRide(t, db, host, RideOpts{})
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "msg-host@vitstudent.ac.in", &inst.ID)
+	passenger := SeedUser(t, db, "Pax", "msg-pax@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{})
 	if err := db.Create(&models.Booking{RideID: ride.ID, PassengerID: passenger.ID, RequestStatus: "accepted"}).Error; err != nil {
 		t.Fatalf("seed booking: %v", err)
 	}
 
-	app := setupTestApp(t)
+	app := SetupTestApp(t)
 	// Host sends a message.
-	resp := do(t, app, http.MethodPost, "/chat/"+ride.ID.String()+"/message",
-		map[string]any{"content": "Hello, world"}, asUser(host.Email))
+	resp := Do(t, app, http.MethodPost, "/chat/"+ride.ID.String()+"/message",
+		map[string]any{"content": "Hello, world"}, AsUser(host.Email))
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("send: expected 201, got %d", resp.StatusCode)
 	}
-	readJSON(t, resp, nil)
+	ReadJSON(t, resp, nil)
 
 	// Passenger fetches /chats/me; the preview should carry the message.
-	resp = do(t, app, http.MethodGet, "/chats/me", nil, asUser(passenger.Email))
+	resp = Do(t, app, http.MethodGet, "/chats/me", nil, AsUser(passenger.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("chats/me: expected 200, got %d", resp.StatusCode)
 	}
@@ -106,7 +106,7 @@ func TestChatSendMessage_PersistsAndShowsInPreview(t *testing.T) {
 			} `json:"last_message"`
 		} `json:"chat_rooms"`
 	}
-	readJSON(t, resp, &listBody)
+	ReadJSON(t, resp, &listBody)
 
 	var room *struct {
 		ID          string `json:"id"`
@@ -132,21 +132,21 @@ func TestChatSendMessage_PersistsAndShowsInPreview(t *testing.T) {
 }
 
 func TestChatSendMessage_NonMemberForbidden(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "nmsg-host@vitstudent.ac.in", &inst.ID)
-	intruder := seedUser(t, db, "Intruder", "nmsg-intr@vitstudent.ac.in", &inst.ID)
-	ride := seedRide(t, db, host, RideOpts{})
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "nmsg-host@vitstudent.ac.in", &inst.ID)
+	intruder := SeedUser(t, db, "Intruder", "nmsg-intr@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{})
 
-	app := setupTestApp(t)
+	app := SetupTestApp(t)
 	// Intruder has NO booking on this ride. Should be rejected with 403.
-	resp := do(t, app, http.MethodPost, "/chat/"+ride.ID.String()+"/message",
-		map[string]any{"content": "spy"}, asUser(intruder.Email))
+	resp := Do(t, app, http.MethodPost, "/chat/"+ride.ID.String()+"/message",
+		map[string]any{"content": "spy"}, AsUser(intruder.Email))
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403 for non-member, got %d", resp.StatusCode)
 	}
-	readJSON(t, resp, nil)
+	ReadJSON(t, resp, nil)
 
 	// And no message row should have landed.
 	var count int64
@@ -157,20 +157,20 @@ func TestChatSendMessage_NonMemberForbidden(t *testing.T) {
 }
 
 func TestChatSendMessage_RejectsEmptyContent(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "emp-host@vitstudent.ac.in", &inst.ID)
-	ride := seedRide(t, db, host, RideOpts{})
-	app := setupTestApp(t)
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "emp-host@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{})
+	app := SetupTestApp(t)
 
 	for _, content := range []string{"", "   ", "\t\n  "} {
-		resp := do(t, app, http.MethodPost, "/chat/"+ride.ID.String()+"/message",
-			map[string]any{"content": content}, asUser(host.Email))
+		resp := Do(t, app, http.MethodPost, "/chat/"+ride.ID.String()+"/message",
+			map[string]any{"content": content}, AsUser(host.Email))
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("content %q: expected 400, got %d", content, resp.StatusCode)
 		}
-		readJSON(t, resp, nil)
+		ReadJSON(t, resp, nil)
 	}
 }
 
@@ -180,15 +180,15 @@ func TestChatSendMessage_RejectsEmptyContent(t *testing.T) {
 // home chat list jumps around between sessions; this test pins that
 // down.
 func TestChatsMe_OrderingByStartTime(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "ord-host@vitstudent.ac.in", &inst.ID)
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "ord-host@vitstudent.ac.in", &inst.ID)
 
 	// Three hosted rides — viewer_role = host so they all land in /chats/me.
-	rideA := seedRide(t, db, host, RideOpts{StartLocation: "A"})
-	rideB := seedRide(t, db, host, RideOpts{StartLocation: "B"})
-	rideC := seedRide(t, db, host, RideOpts{StartLocation: "C"})
+	rideA := SeedRide(t, db, host, RideOpts{StartLocation: "A"})
+	rideB := SeedRide(t, db, host, RideOpts{StartLocation: "B"})
+	rideC := SeedRide(t, db, host, RideOpts{StartLocation: "C"})
 
 	// Set deterministic start times so we can predict the order.
 	if err := db.Model(&models.Ride{}).Where("id = ?", rideA.ID).Update("start_time", rideA.StartTime.Add(1)).Error; err != nil {
@@ -201,8 +201,8 @@ func TestChatsMe_OrderingByStartTime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodGet, "/chats/me", nil, asUser(host.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/chats/me", nil, AsUser(host.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -212,7 +212,7 @@ func TestChatsMe_OrderingByStartTime(t *testing.T) {
 			StartLocation string `json:"start_location"`
 		} `json:"chat_rooms"`
 	}
-	readJSON(t, resp, &body)
+	ReadJSON(t, resp, &body)
 
 	if len(body.ChatRooms) != 3 {
 		t.Fatalf("expected 3 chat rooms, got %d", len(body.ChatRooms))
@@ -255,51 +255,51 @@ var _ = sort.Strings
 // participants.
 
 func TestMarkRideRead_RejectsNonMember(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "mr-host@vitstudent.ac.in", &inst.ID)
-	intruder := seedUser(t, db, "Intruder", "mr-intr@vitstudent.ac.in", &inst.ID)
-	ride := seedRide(t, db, host, RideOpts{})
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "mr-host@vitstudent.ac.in", &inst.ID)
+	intruder := SeedUser(t, db, "Intruder", "mr-intr@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{})
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodPost, "/chat/"+ride.ID.String()+"/read", nil, asUser(intruder.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodPost, "/chat/"+ride.ID.String()+"/read", nil, AsUser(intruder.Email))
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403 for non-member, got %d", resp.StatusCode)
 	}
-	readJSON(t, resp, nil)
+	ReadJSON(t, resp, nil)
 }
 
 func TestMarkRideRead_AcceptsHostAndPassenger(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "mr-host2@vitstudent.ac.in", &inst.ID)
-	pax := seedUser(t, db, "Pax", "mr-pax@vitstudent.ac.in", &inst.ID)
-	ride := seedRide(t, db, host, RideOpts{})
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "mr-host2@vitstudent.ac.in", &inst.ID)
+	pax := SeedUser(t, db, "Pax", "mr-pax@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{})
 	if err := db.Create(&models.Booking{
 		RideID: ride.ID, PassengerID: pax.ID, RequestStatus: "accepted",
 	}).Error; err != nil {
 		t.Fatalf("seed booking: %v", err)
 	}
 
-	app := setupTestApp(t)
+	app := SetupTestApp(t)
 	for _, viewer := range []models.User{host, pax} {
-		resp := do(t, app, http.MethodPost, "/chat/"+ride.ID.String()+"/read", nil, asUser(viewer.Email))
+		resp := Do(t, app, http.MethodPost, "/chat/"+ride.ID.String()+"/read", nil, AsUser(viewer.Email))
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("expected 200 for participant %s, got %d", viewer.Email, resp.StatusCode)
 		}
-		readJSON(t, resp, nil)
+		ReadJSON(t, resp, nil)
 	}
 }
 
 func TestMarkRideRead_AcceptsPendingPassenger(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "mr-host3@vitstudent.ac.in", &inst.ID)
-	pax := seedUser(t, db, "Pax", "mr-pend@vitstudent.ac.in", &inst.ID)
-	ride := seedRide(t, db, host, RideOpts{})
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "mr-host3@vitstudent.ac.in", &inst.ID)
+	pax := SeedUser(t, db, "Pax", "mr-pend@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{})
 	if err := db.Create(&models.Booking{
 		RideID: ride.ID, PassengerID: pax.ID, RequestStatus: "pending",
 	}).Error; err != nil {
@@ -310,67 +310,67 @@ func TestMarkRideRead_AcceptsPendingPassenger(t *testing.T) {
 	// accepted, but the read-mark for the GROUP chat (which they don't
 	// see yet) still belongs to them so the pending->accepted
 	// transition leaves them at the right unread badge. Allow.
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodPost, "/chat/"+ride.ID.String()+"/read", nil, asUser(pax.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodPost, "/chat/"+ride.ID.String()+"/read", nil, AsUser(pax.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200 for pending passenger, got %d", resp.StatusCode)
 	}
-	readJSON(t, resp, nil)
+	ReadJSON(t, resp, nil)
 }
 
 func TestMarkDMRead_RejectsNonParticipant(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	a := seedUser(t, db, "A", "dm-a@vitstudent.ac.in", &inst.ID)
-	b := seedUser(t, db, "B", "dm-b@vitstudent.ac.in", &inst.ID)
-	intruder := seedUser(t, db, "I", "dm-intr@vitstudent.ac.in", &inst.ID)
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	a := SeedUser(t, db, "A", "dm-a@vitstudent.ac.in", &inst.ID)
+	b := SeedUser(t, db, "B", "dm-b@vitstudent.ac.in", &inst.ID)
+	intruder := SeedUser(t, db, "I", "dm-intr@vitstudent.ac.in", &inst.ID)
 
 	// dm_room_id = "dm_<lower_uuid>_<higher_uuid>"
 	ids := []string{a.ID.String(), b.ID.String()}
 	sort.Strings(ids)
 	dmRoomID := "dm_" + ids[0] + "_" + ids[1]
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodPost, "/dm/"+dmRoomID+"/read", nil, asUser(intruder.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodPost, "/dm/"+dmRoomID+"/read", nil, AsUser(intruder.Email))
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403 for non-participant, got %d", resp.StatusCode)
 	}
-	readJSON(t, resp, nil)
+	ReadJSON(t, resp, nil)
 }
 
 func TestMarkDMRead_AcceptsParticipant(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	a := seedUser(t, db, "A", "dm-a2@vitstudent.ac.in", &inst.ID)
-	b := seedUser(t, db, "B", "dm-b2@vitstudent.ac.in", &inst.ID)
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	a := SeedUser(t, db, "A", "dm-a2@vitstudent.ac.in", &inst.ID)
+	b := SeedUser(t, db, "B", "dm-b2@vitstudent.ac.in", &inst.ID)
 	ids := []string{a.ID.String(), b.ID.String()}
 	sort.Strings(ids)
 	dmRoomID := "dm_" + ids[0] + "_" + ids[1]
 
-	app := setupTestApp(t)
+	app := SetupTestApp(t)
 	for _, viewer := range []models.User{a, b} {
-		resp := do(t, app, http.MethodPost, "/dm/"+dmRoomID+"/read", nil, asUser(viewer.Email))
+		resp := Do(t, app, http.MethodPost, "/dm/"+dmRoomID+"/read", nil, AsUser(viewer.Email))
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("expected 200 for participant %s, got %d", viewer.Email, resp.StatusCode)
 		}
-		readJSON(t, resp, nil)
+		ReadJSON(t, resp, nil)
 	}
 }
 
 func TestMarkDMRead_RejectsMalformedRoomID(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	u := seedUser(t, db, "U", "dm-mal@vitstudent.ac.in", &inst.ID)
-	app := setupTestApp(t)
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	u := SeedUser(t, db, "U", "dm-mal@vitstudent.ac.in", &inst.ID)
+	app := SetupTestApp(t)
 
 	for _, bad := range []string{"dm_", "dm__abc", "dm_abc_", "dm_only-one-uuid"} {
-		resp := do(t, app, http.MethodPost, "/dm/"+bad+"/read", nil, asUser(u.Email))
+		resp := Do(t, app, http.MethodPost, "/dm/"+bad+"/read", nil, AsUser(u.Email))
 		if resp.StatusCode < 400 || resp.StatusCode >= 500 {
 			t.Errorf("malformed %q: expected 4xx, got %d", bad, resp.StatusCode)
 		}
-		readJSON(t, resp, nil)
+		ReadJSON(t, resp, nil)
 	}
 }

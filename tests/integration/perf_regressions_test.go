@@ -1,4 +1,4 @@
-package main
+package integration
 
 // Regression tests for the perf refactors landed in 89771c9.
 //
@@ -26,20 +26,20 @@ import (
 // --- /trip-card/active -----------------------------------------------
 
 func TestActiveTripCard_PrefersUpcomingBucket(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "tc-host@vitstudent.ac.in", &inst.ID)
-	viewer := seedUser(t, db, "Viewer", "tc-viewer@vitstudent.ac.in", &inst.ID)
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "tc-host@vitstudent.ac.in", &inst.ID)
+	viewer := SeedUser(t, db, "Viewer", "tc-viewer@vitstudent.ac.in", &inst.ID)
 
 	// One ride 2 days ago (in the "recent" bucket), one 2 hours away
 	// (in the "upcoming" bucket). Both have an accepted booking for
 	// the viewer. The new bucketed query MUST pick upcoming first.
-	pastRide := seedRide(t, db, host, RideOpts{
+	pastRide := SeedRide(t, db, host, RideOpts{
 		StartLocation: "A", EndLocation: "B",
 		StartTime: time.Now().Add(-48 * time.Hour).UTC(),
 	})
-	soonRide := seedRide(t, db, host, RideOpts{
+	soonRide := SeedRide(t, db, host, RideOpts{
 		StartLocation: "C", EndLocation: "D",
 		StartTime: time.Now().Add(2 * time.Hour).UTC(),
 	})
@@ -51,8 +51,8 @@ func TestActiveTripCard_PrefersUpcomingBucket(t *testing.T) {
 		}
 	}
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodGet, "/trip-card/active", nil, asUser(viewer.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/trip-card/active", nil, AsUser(viewer.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -62,7 +62,7 @@ func TestActiveTripCard_PrefersUpcomingBucket(t *testing.T) {
 			Stage  string `json:"stage"`
 		} `json:"trip_card"`
 	}
-	readJSON(t, resp, &body)
+	ReadJSON(t, resp, &body)
 	if body.TripCard.RideID != soonRide.ID.String() {
 		t.Errorf("upcoming bucket should win: got ride %s, want %s", body.TripCard.RideID, soonRide.ID)
 	}
@@ -72,15 +72,15 @@ func TestActiveTripCard_PrefersUpcomingBucket(t *testing.T) {
 }
 
 func TestActiveTripCard_FallsBackToRecentUndismissed(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "tc-host2@vitstudent.ac.in", &inst.ID)
-	viewer := seedUser(t, db, "Viewer", "tc-viewer2@vitstudent.ac.in", &inst.ID)
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "tc-host2@vitstudent.ac.in", &inst.ID)
+	viewer := SeedUser(t, db, "Viewer", "tc-viewer2@vitstudent.ac.in", &inst.ID)
 
 	// One ride 6 hours ago (in recent bucket, undismissed). NO upcoming
 	// rides at all — recent bucket should win.
-	r := seedRide(t, db, host, RideOpts{
+	r := SeedRide(t, db, host, RideOpts{
 		StartLocation: "X", EndLocation: "Y",
 		StartTime: time.Now().Add(-6 * time.Hour).UTC(),
 	})
@@ -90,8 +90,8 @@ func TestActiveTripCard_FallsBackToRecentUndismissed(t *testing.T) {
 		t.Fatalf("seed booking: %v", err)
 	}
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodGet, "/trip-card/active", nil, asUser(viewer.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/trip-card/active", nil, AsUser(viewer.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -101,7 +101,7 @@ func TestActiveTripCard_FallsBackToRecentUndismissed(t *testing.T) {
 			Stage  string `json:"stage"`
 		} `json:"trip_card"`
 	}
-	readJSON(t, resp, &body)
+	ReadJSON(t, resp, &body)
 	if body.TripCard.RideID != r.ID.String() {
 		t.Errorf("recent bucket: got %s want %s", body.TripCard.RideID, r.ID)
 	}
@@ -112,13 +112,13 @@ func TestActiveTripCard_FallsBackToRecentUndismissed(t *testing.T) {
 }
 
 func TestActiveTripCard_RecentBucketSkipsDismissed(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "tc-host3@vitstudent.ac.in", &inst.ID)
-	viewer := seedUser(t, db, "Viewer", "tc-viewer3@vitstudent.ac.in", &inst.ID)
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "tc-host3@vitstudent.ac.in", &inst.ID)
+	viewer := SeedUser(t, db, "Viewer", "tc-viewer3@vitstudent.ac.in", &inst.ID)
 
-	r := seedRide(t, db, host, RideOpts{
+	r := SeedRide(t, db, host, RideOpts{
 		StartTime: time.Now().Add(-6 * time.Hour).UTC(),
 	})
 	now := time.Now()
@@ -132,26 +132,26 @@ func TestActiveTripCard_RecentBucketSkipsDismissed(t *testing.T) {
 		t.Fatalf("seed booking: %v", err)
 	}
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodGet, "/trip-card/active", nil, asUser(viewer.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/trip-card/active", nil, AsUser(viewer.Email))
 	if resp.StatusCode != http.StatusNoContent {
 		// readJSON to drain body if 200 was returned
-		raw := readJSON(t, resp, nil)
+		raw := ReadJSON(t, resp, nil)
 		t.Errorf("expected 204 (dismissed -> no card), got %d body=%s", resp.StatusCode, string(raw))
 	}
 }
 
 func TestActiveTripCard_HostProfileFieldsIncluded(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host Bob", "tc-host4@vitstudent.ac.in", &inst.ID)
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host Bob", "tc-host4@vitstudent.ac.in", &inst.ID)
 	db.Model(&models.User{}).Where("id = ?", host.ID).Updates(map[string]any{
 		"profile_picture_url": "https://example.com/host.png",
 		"upi_vpa":             "host@upi",
 	})
-	viewer := seedUser(t, db, "Viewer", "tc-viewer4@vitstudent.ac.in", &inst.ID)
-	r := seedRide(t, db, host, RideOpts{
+	viewer := SeedUser(t, db, "Viewer", "tc-viewer4@vitstudent.ac.in", &inst.ID)
+	r := SeedRide(t, db, host, RideOpts{
 		StartTime:  time.Now().Add(2 * time.Hour).UTC(),
 		TotalPrice: 250,
 	})
@@ -161,8 +161,8 @@ func TestActiveTripCard_HostProfileFieldsIncluded(t *testing.T) {
 		t.Fatalf("seed booking: %v", err)
 	}
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodGet, "/trip-card/active", nil, asUser(viewer.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/trip-card/active", nil, AsUser(viewer.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -174,7 +174,7 @@ func TestActiveTripCard_HostProfileFieldsIncluded(t *testing.T) {
 			TotalPrice        int    `json:"total_price"`
 		} `json:"trip_card"`
 	}
-	readJSON(t, resp, &body)
+	ReadJSON(t, resp, &body)
 	if body.TripCard.HostName != "Host Bob" {
 		t.Errorf("host_name: got %q", body.TripCard.HostName)
 	}
@@ -192,17 +192,17 @@ func TestActiveTripCard_HostProfileFieldsIncluded(t *testing.T) {
 // --- /user/pending-ratings -------------------------------------------
 
 func TestPendingRatings_HostWithMultiplePassengers(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "pr-host@vitstudent.ac.in", &inst.ID)
-	p1 := seedUser(t, db, "P1", "pr-p1@vitstudent.ac.in", &inst.ID)
-	p2 := seedUser(t, db, "P2", "pr-p2@vitstudent.ac.in", &inst.ID)
-	p3 := seedUser(t, db, "P3", "pr-p3@vitstudent.ac.in", &inst.ID)
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "pr-host@vitstudent.ac.in", &inst.ID)
+	p1 := SeedUser(t, db, "P1", "pr-p1@vitstudent.ac.in", &inst.ID)
+	p2 := SeedUser(t, db, "P2", "pr-p2@vitstudent.ac.in", &inst.ID)
+	p3 := SeedUser(t, db, "P3", "pr-p3@vitstudent.ac.in", &inst.ID)
 
 	// Ride started 14 hours ago — past the 12h "rating opens" threshold
 	// but well inside the 30d window.
-	r := seedRide(t, db, host, RideOpts{
+	r := SeedRide(t, db, host, RideOpts{
 		StartTime: time.Now().Add(-14 * time.Hour).UTC(),
 	})
 	for _, p := range []models.User{p1, p2, p3} {
@@ -213,8 +213,8 @@ func TestPendingRatings_HostWithMultiplePassengers(t *testing.T) {
 		}
 	}
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodGet, "/user/pending-ratings", nil, asUser(host.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/user/pending-ratings", nil, AsUser(host.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -224,7 +224,7 @@ func TestPendingRatings_HostWithMultiplePassengers(t *testing.T) {
 			PendingCount int    `json:"pending_count"`
 		} `json:"rides"`
 	}
-	readJSON(t, resp, &body)
+	ReadJSON(t, resp, &body)
 	if len(body.Rides) != 1 {
 		t.Fatalf("expected 1 ride, got %d", len(body.Rides))
 	}
@@ -234,13 +234,13 @@ func TestPendingRatings_HostWithMultiplePassengers(t *testing.T) {
 }
 
 func TestPendingRatings_DropsToZeroWhenAllRated(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "pr-host2@vitstudent.ac.in", &inst.ID)
-	p1 := seedUser(t, db, "P1", "pr-p4@vitstudent.ac.in", &inst.ID)
-	p2 := seedUser(t, db, "P2", "pr-p5@vitstudent.ac.in", &inst.ID)
-	r := seedRide(t, db, host, RideOpts{
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "pr-host2@vitstudent.ac.in", &inst.ID)
+	p1 := SeedUser(t, db, "P1", "pr-p4@vitstudent.ac.in", &inst.ID)
+	p2 := SeedUser(t, db, "P2", "pr-p5@vitstudent.ac.in", &inst.ID)
+	r := SeedRide(t, db, host, RideOpts{
 		StartTime: time.Now().Add(-15 * time.Hour).UTC(), // past 12h opens-threshold
 	})
 	for _, p := range []models.User{p1, p2} {
@@ -263,27 +263,27 @@ func TestPendingRatings_DropsToZeroWhenAllRated(t *testing.T) {
 		}
 	}
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodGet, "/user/pending-ratings", nil, asUser(host.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/user/pending-ratings", nil, AsUser(host.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	var body struct {
 		Rides []map[string]any `json:"rides"`
 	}
-	readJSON(t, resp, &body)
+	ReadJSON(t, resp, &body)
 	if len(body.Rides) != 0 {
 		t.Errorf("expected empty rides (all rated), got %d", len(body.Rides))
 	}
 }
 
 func TestPendingRatings_PassengerOnlyHostCounterpart(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "pr-host3@vitstudent.ac.in", &inst.ID)
-	pax := seedUser(t, db, "Pax", "pr-pax@vitstudent.ac.in", &inst.ID)
-	r := seedRide(t, db, host, RideOpts{
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "pr-host3@vitstudent.ac.in", &inst.ID)
+	pax := SeedUser(t, db, "Pax", "pr-pax@vitstudent.ac.in", &inst.ID)
+	r := SeedRide(t, db, host, RideOpts{
 		StartTime: time.Now().Add(-14 * time.Hour).UTC(),
 	})
 	if err := db.Create(&models.Booking{
@@ -292,8 +292,8 @@ func TestPendingRatings_PassengerOnlyHostCounterpart(t *testing.T) {
 		t.Fatalf("seed booking: %v", err)
 	}
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodGet, "/user/pending-ratings", nil, asUser(pax.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/user/pending-ratings", nil, AsUser(pax.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -302,7 +302,7 @@ func TestPendingRatings_PassengerOnlyHostCounterpart(t *testing.T) {
 			PendingCount int `json:"pending_count"`
 		} `json:"rides"`
 	}
-	readJSON(t, resp, &body)
+	ReadJSON(t, resp, &body)
 	if len(body.Rides) != 1 || body.Rides[0].PendingCount != 1 {
 		t.Errorf("passenger should see 1 pending (rate host); got %d rides, count=%v",
 			len(body.Rides), body.Rides)
@@ -312,15 +312,15 @@ func TestPendingRatings_PassengerOnlyHostCounterpart(t *testing.T) {
 // --- /ride/details/:id -----------------------------------------------
 
 func TestRideDetails_HostWithInstitute(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT Vellore", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "rd-host@vitstudent.ac.in", &inst.ID)
-	viewer := seedUser(t, db, "Viewer", "rd-viewer@vitstudent.ac.in", &inst.ID)
-	r := seedRide(t, db, host, RideOpts{})
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT Vellore", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "rd-host@vitstudent.ac.in", &inst.ID)
+	viewer := SeedUser(t, db, "Viewer", "rd-viewer@vitstudent.ac.in", &inst.ID)
+	r := SeedRide(t, db, host, RideOpts{})
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodGet, "/ride/details/"+r.ID.String(), nil, asUser(viewer.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/ride/details/"+r.ID.String(), nil, AsUser(viewer.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -334,7 +334,7 @@ func TestRideDetails_HostWithInstitute(t *testing.T) {
 		HostInstituteName         *string `json:"host_institute_name"`
 		HostSameInstituteAsViewer bool    `json:"host_same_institute_as_viewer"`
 	}
-	readJSON(t, resp, &body)
+	ReadJSON(t, resp, &body)
 	if body.Host.ID != host.ID.String() {
 		t.Errorf("host.id: got %s want %s", body.Host.ID, host.ID)
 	}
@@ -347,17 +347,17 @@ func TestRideDetails_HostWithInstitute(t *testing.T) {
 }
 
 func TestRideDetails_HostWithoutInstituteIsHandled(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
+	db := ConnectTestDB(t)
+	ResetDB(t)
 	// Host has no InstituteID — verify the LEFT JOIN returns NULL
 	// institute_name without exploding the row.
-	host := seedUser(t, db, "Indie Host", "rd-indie@gmail.com", nil)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	viewer := seedUser(t, db, "Viewer", "rd-viewer2@vitstudent.ac.in", &inst.ID)
-	r := seedRide(t, db, host, RideOpts{})
+	host := SeedUser(t, db, "Indie Host", "rd-indie@gmail.com", nil)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	viewer := SeedUser(t, db, "Viewer", "rd-viewer2@vitstudent.ac.in", &inst.ID)
+	r := SeedRide(t, db, host, RideOpts{})
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodGet, "/ride/details/"+r.ID.String(), nil, asUser(viewer.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/ride/details/"+r.ID.String(), nil, AsUser(viewer.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -368,7 +368,7 @@ func TestRideDetails_HostWithoutInstituteIsHandled(t *testing.T) {
 		HostInstituteName         *string `json:"host_institute_name"`
 		HostSameInstituteAsViewer bool    `json:"host_same_institute_as_viewer"`
 	}
-	readJSON(t, resp, &body)
+	ReadJSON(t, resp, &body)
 	if body.Host.ID != host.ID.String() {
 		t.Errorf("host.id: got %s want %s", body.Host.ID, host.ID)
 	}
@@ -384,13 +384,13 @@ func TestRideDetails_HostWithoutInstituteIsHandled(t *testing.T) {
 }
 
 func TestRideDetails_IncludesBookingsAndPassengers(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "rd-host3@vitstudent.ac.in", &inst.ID)
-	p1 := seedUser(t, db, "Pax One", "rd-p1@vitstudent.ac.in", &inst.ID)
-	p2 := seedUser(t, db, "Pax Two", "rd-p2@vitstudent.ac.in", &inst.ID)
-	r := seedRide(t, db, host, RideOpts{})
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "rd-host3@vitstudent.ac.in", &inst.ID)
+	p1 := SeedUser(t, db, "Pax One", "rd-p1@vitstudent.ac.in", &inst.ID)
+	p2 := SeedUser(t, db, "Pax Two", "rd-p2@vitstudent.ac.in", &inst.ID)
+	r := SeedRide(t, db, host, RideOpts{})
 	for _, p := range []models.User{p1, p2} {
 		if err := db.Create(&models.Booking{
 			RideID: r.ID, PassengerID: p.ID, RequestStatus: "accepted",
@@ -399,8 +399,8 @@ func TestRideDetails_IncludesBookingsAndPassengers(t *testing.T) {
 		}
 	}
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodGet, "/ride/details/"+r.ID.String(), nil, asUser(host.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/ride/details/"+r.ID.String(), nil, AsUser(host.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -411,7 +411,7 @@ func TestRideDetails_IncludesBookingsAndPassengers(t *testing.T) {
 			RequestStatus string `json:"request_status"`
 		} `json:"bookings"`
 	}
-	readJSON(t, resp, &body)
+	ReadJSON(t, resp, &body)
 	if len(body.Bookings) != 2 {
 		t.Fatalf("expected 2 bookings, got %d", len(body.Bookings))
 	}

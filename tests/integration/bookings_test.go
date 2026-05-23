@@ -1,4 +1,4 @@
-package main
+package integration
 
 // Regression tests for the booking lifecycle: request -> accept/reject.
 // The lifecycle spans three endpoints (request, accept, reject) and
@@ -14,17 +14,17 @@ import (
 )
 
 func TestBooking_RequestCreatesPending(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "book-host@vitstudent.ac.in", &inst.ID)
-	passenger := seedUser(t, db, "Passenger", "book-pax@vitstudent.ac.in", &inst.ID)
-	ride := seedRide(t, db, host, RideOpts{})
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "book-host@vitstudent.ac.in", &inst.ID)
+	passenger := SeedUser(t, db, "Passenger", "book-pax@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{})
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodPost, "/bookings/request",
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodPost, "/bookings/request",
 		map[string]any{"ride_id": ride.ID, "request_status": "pending"},
-		asUser(passenger.Email))
+		AsUser(passenger.Email))
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("expected 201, got %d", resp.StatusCode)
 	}
@@ -33,7 +33,7 @@ func TestBooking_RequestCreatesPending(t *testing.T) {
 		RideID        string `json:"ride_id"`
 		RequestStatus string `json:"request_status"`
 	}
-	readJSON(t, resp, &body)
+	ReadJSON(t, resp, &body)
 	if body.RequestStatus != "pending" {
 		t.Errorf("expected pending, got %q", body.RequestStatus)
 	}
@@ -52,25 +52,25 @@ func TestBooking_RequestCreatesPending(t *testing.T) {
 }
 
 func TestBooking_DuplicateRequestRejected(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "book-host2@vitstudent.ac.in", &inst.ID)
-	passenger := seedUser(t, db, "Passenger", "book-pax2@vitstudent.ac.in", &inst.ID)
-	ride := seedRide(t, db, host, RideOpts{})
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "book-host2@vitstudent.ac.in", &inst.ID)
+	passenger := SeedUser(t, db, "Passenger", "book-pax2@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{})
 
-	app := setupTestApp(t)
-	first := do(t, app, http.MethodPost, "/bookings/request",
+	app := SetupTestApp(t)
+	first := Do(t, app, http.MethodPost, "/bookings/request",
 		map[string]any{"ride_id": ride.ID, "request_status": "pending"},
-		asUser(passenger.Email))
+		AsUser(passenger.Email))
 	if first.StatusCode != http.StatusCreated {
 		t.Fatalf("first request: expected 201, got %d", first.StatusCode)
 	}
-	readJSON(t, first, nil)
+	ReadJSON(t, first, nil)
 
-	dup := do(t, app, http.MethodPost, "/bookings/request",
+	dup := Do(t, app, http.MethodPost, "/bookings/request",
 		map[string]any{"ride_id": ride.ID, "request_status": "pending"},
-		asUser(passenger.Email))
+		AsUser(passenger.Email))
 	if dup.StatusCode != http.StatusBadRequest {
 		t.Fatalf("duplicate: expected 400, got %d", dup.StatusCode)
 	}
@@ -83,23 +83,23 @@ func TestBooking_DuplicateRequestRejected(t *testing.T) {
 }
 
 func TestBooking_HostCanAccept(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "accept-host@vitstudent.ac.in", &inst.ID)
-	passenger := seedUser(t, db, "Passenger", "accept-pax@vitstudent.ac.in", &inst.ID)
-	ride := seedRide(t, db, host, RideOpts{})
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "accept-host@vitstudent.ac.in", &inst.ID)
+	passenger := SeedUser(t, db, "Passenger", "accept-pax@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{})
 	booking := models.Booking{RideID: ride.ID, PassengerID: passenger.ID, RequestStatus: "pending"}
 	if err := db.Create(&booking).Error; err != nil {
 		t.Fatalf("seed booking: %v", err)
 	}
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodPut, "/bookings/accept/"+booking.ID.String(), nil, asUser(host.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodPut, "/bookings/accept/"+booking.ID.String(), nil, AsUser(host.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	readJSON(t, resp, nil)
+	ReadJSON(t, resp, nil)
 
 	var refreshed models.Booking
 	if err := db.First(&refreshed, booking.ID).Error; err != nil {
@@ -120,32 +120,32 @@ func TestBooking_HostCanAccept(t *testing.T) {
 }
 
 func TestBooking_NonHostCannotAccept(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "naccept-host@vitstudent.ac.in", &inst.ID)
-	passenger := seedUser(t, db, "Passenger", "naccept-pax@vitstudent.ac.in", &inst.ID)
-	intruder := seedUser(t, db, "Intruder", "naccept-intr@vitstudent.ac.in", &inst.ID)
-	ride := seedRide(t, db, host, RideOpts{})
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "naccept-host@vitstudent.ac.in", &inst.ID)
+	passenger := SeedUser(t, db, "Passenger", "naccept-pax@vitstudent.ac.in", &inst.ID)
+	intruder := SeedUser(t, db, "Intruder", "naccept-intr@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{})
 	booking := models.Booking{RideID: ride.ID, PassengerID: passenger.ID, RequestStatus: "pending"}
 	if err := db.Create(&booking).Error; err != nil {
 		t.Fatalf("seed booking: %v", err)
 	}
 
-	app := setupTestApp(t)
+	app := SetupTestApp(t)
 	// Passenger tries to self-accept.
-	resp := do(t, app, http.MethodPut, "/bookings/accept/"+booking.ID.String(), nil, asUser(passenger.Email))
+	resp := Do(t, app, http.MethodPut, "/bookings/accept/"+booking.ID.String(), nil, AsUser(passenger.Email))
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("passenger self-accept: expected 403, got %d", resp.StatusCode)
 	}
-	readJSON(t, resp, nil)
+	ReadJSON(t, resp, nil)
 
 	// A third user tries.
-	resp = do(t, app, http.MethodPut, "/bookings/accept/"+booking.ID.String(), nil, asUser(intruder.Email))
+	resp = Do(t, app, http.MethodPut, "/bookings/accept/"+booking.ID.String(), nil, AsUser(intruder.Email))
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("intruder accept: expected 403, got %d", resp.StatusCode)
 	}
-	readJSON(t, resp, nil)
+	ReadJSON(t, resp, nil)
 
 	var refreshed models.Booking
 	db.First(&refreshed, booking.ID)
@@ -155,23 +155,23 @@ func TestBooking_NonHostCannotAccept(t *testing.T) {
 }
 
 func TestBooking_HostCanReject(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Host", "rej-host@vitstudent.ac.in", &inst.ID)
-	passenger := seedUser(t, db, "Passenger", "rej-pax@vitstudent.ac.in", &inst.ID)
-	ride := seedRide(t, db, host, RideOpts{})
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "rej-host@vitstudent.ac.in", &inst.ID)
+	passenger := SeedUser(t, db, "Passenger", "rej-pax@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{})
 	booking := models.Booking{RideID: ride.ID, PassengerID: passenger.ID, RequestStatus: "pending"}
 	if err := db.Create(&booking).Error; err != nil {
 		t.Fatalf("seed booking: %v", err)
 	}
 
-	app := setupTestApp(t)
-	resp := do(t, app, http.MethodPut, "/bookings/reject/"+booking.ID.String(), nil, asUser(host.Email))
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodPut, "/bookings/reject/"+booking.ID.String(), nil, AsUser(host.Email))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	readJSON(t, resp, nil)
+	ReadJSON(t, resp, nil)
 	var refreshed models.Booking
 	if err := db.First(&refreshed, booking.ID).Error; err != nil {
 		t.Fatalf("reload: %v", err)

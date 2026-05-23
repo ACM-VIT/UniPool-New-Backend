@@ -1,4 +1,4 @@
-package main
+package integration
 
 // Regression tests for POST /ride/create. Catches a few classes of bug:
 //   - Auth gate enforcement (no session = 401)
@@ -21,9 +21,9 @@ import (
 )
 
 func TestCreateRide_AuthRequired(t *testing.T) {
-	_ = connectTestDB(t)
-	resetDB(t)
-	app := setupTestApp(t)
+	_ = ConnectTestDB(t)
+	ResetDB(t)
+	app := SetupTestApp(t)
 
 	body := map[string]any{
 		"start_location": "VIT Main Gate",
@@ -33,18 +33,18 @@ func TestCreateRide_AuthRequired(t *testing.T) {
 		"booked_seats":   0,
 		"total_price":    150,
 	}
-	resp := do(t, app, http.MethodPost, "/ride/create", body, nil)
+	resp := Do(t, app, http.MethodPost, "/ride/create", body, nil)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401 without auth, got %d", resp.StatusCode)
 	}
 }
 
 func TestCreateRide_PersistsAndAttributesHost(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Driver", "driver@vitstudent.ac.in", &inst.ID)
-	app := setupTestApp(t)
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Driver", "driver@vitstudent.ac.in", &inst.ID)
+	app := SetupTestApp(t)
 
 	body := map[string]any{
 		"start_location":  "VIT Main Gate",
@@ -58,11 +58,11 @@ func TestCreateRide_PersistsAndAttributesHost(t *testing.T) {
 		"booked_seats":    0,
 		"total_price":     150,
 	}
-	resp := do(t, app, http.MethodPost, "/ride/create", body, asUser(host.Email))
+	resp := Do(t, app, http.MethodPost, "/ride/create", body, AsUser(host.Email))
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200/201, got %d", resp.StatusCode)
 	}
-	readJSON(t, resp, nil)
+	ReadJSON(t, resp, nil)
 
 	var saved models.Ride
 	if err := db.Where("host_user_id = ?", host.ID).First(&saved).Error; err != nil {
@@ -88,11 +88,11 @@ func TestCreateRide_PersistsAndAttributesHost(t *testing.T) {
 // would silently let users post ghost trips that the search UI then
 // surfaces alongside real ones.
 func TestCreateRide_RejectsPastStart(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Driver", "driver-past@vitstudent.ac.in", &inst.ID)
-	app := setupTestApp(t)
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Driver", "driver-past@vitstudent.ac.in", &inst.ID)
+	app := SetupTestApp(t)
 
 	body := map[string]any{
 		"start_location": "VIT",
@@ -102,7 +102,7 @@ func TestCreateRide_RejectsPastStart(t *testing.T) {
 		"booked_seats":   0,
 		"total_price":    50,
 	}
-	resp := do(t, app, http.MethodPost, "/ride/create", body, asUser(host.Email))
+	resp := Do(t, app, http.MethodPost, "/ride/create", body, AsUser(host.Email))
 	if resp.StatusCode < 400 || resp.StatusCode >= 500 {
 		t.Fatalf("expected 4xx for past start time, got %d", resp.StatusCode)
 	}
@@ -117,12 +117,12 @@ func TestCreateRide_RejectsPastStart(t *testing.T) {
 // if a caller stuffs someone else's host_user_id into the body, the
 // server must overwrite it with the authenticated user's ID.
 func TestCreateRide_IgnoresClientHostID(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Driver", "driver-spoof@vitstudent.ac.in", &inst.ID)
-	other := seedUser(t, db, "Other", "other-spoof@vitstudent.ac.in", &inst.ID)
-	app := setupTestApp(t)
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Driver", "driver-spoof@vitstudent.ac.in", &inst.ID)
+	other := SeedUser(t, db, "Other", "other-spoof@vitstudent.ac.in", &inst.ID)
+	app := SetupTestApp(t)
 
 	body := map[string]any{
 		"host_user_id":   other.ID, // attempt to impersonate
@@ -133,11 +133,11 @@ func TestCreateRide_IgnoresClientHostID(t *testing.T) {
 		"booked_seats":   0,
 		"total_price":    100,
 	}
-	resp := do(t, app, http.MethodPost, "/ride/create", body, asUser(host.Email))
+	resp := Do(t, app, http.MethodPost, "/ride/create", body, AsUser(host.Email))
 	if resp.StatusCode >= 400 {
 		t.Fatalf("expected ride creation to succeed for authed user, got %d", resp.StatusCode)
 	}
-	readJSON(t, resp, nil)
+	ReadJSON(t, resp, nil)
 
 	var saved []models.Ride
 	if err := db.Where("start_location = ?", "VIT").Find(&saved).Error; err != nil {
@@ -156,11 +156,11 @@ func TestCreateRide_IgnoresClientHostID(t *testing.T) {
 // path ever stops setting HostUserID; surfaces as a 500 today, but the
 // assertion here is direct.
 func TestCreateRide_HostUserIDIsNotNil(t *testing.T) {
-	db := connectTestDB(t)
-	resetDB(t)
-	inst := seedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
-	host := seedUser(t, db, "Driver", "driver-nil@vitstudent.ac.in", &inst.ID)
-	app := setupTestApp(t)
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Driver", "driver-nil@vitstudent.ac.in", &inst.ID)
+	app := SetupTestApp(t)
 
 	body := map[string]any{
 		"start_location": "VIT",
@@ -170,11 +170,11 @@ func TestCreateRide_HostUserIDIsNotNil(t *testing.T) {
 		"booked_seats":   0,
 		"total_price":    80,
 	}
-	resp := do(t, app, http.MethodPost, "/ride/create", body, asUser(host.Email))
+	resp := Do(t, app, http.MethodPost, "/ride/create", body, AsUser(host.Email))
 	if resp.StatusCode >= 400 {
 		t.Fatalf("expected success, got %d", resp.StatusCode)
 	}
-	readJSON(t, resp, nil)
+	ReadJSON(t, resp, nil)
 	var saved models.Ride
 	if err := db.Where("host_user_id = ?", host.ID).First(&saved).Error; err != nil {
 		t.Fatalf("ride not found by host: %v", err)
