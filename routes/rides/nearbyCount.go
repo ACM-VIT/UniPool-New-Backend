@@ -13,6 +13,7 @@ import (
 
 type NearbyRideSummary struct {
 	ID             string    `json:"id"`
+	HostUserID     string    `json:"host_user_id"`
 	StartLocation  string    `json:"start_location"`
 	EndLocation    string    `json:"end_location"`
 	StartLatitude  float64   `json:"start_latitude"`
@@ -82,6 +83,7 @@ func LoadNearbyRides(ctx context.Context, lat, lng, radius float64, limit int) (
 		Model(&models.Ride{}).
 		Select(`
 			id,
+			host_user_id,
 			start_location,
 			end_location,
 			start_latitude,
