@@ -101,6 +101,11 @@ func (f *FCMService) SendNotification(userID uuid.UUID, title, body string, data
 }
 
 // SendNotificationToMultipleUsers sends notifications to multiple users
+//
+// Deprecated: this fans out N goroutines each doing its own
+// First(&user) lookup and its own messaging.Send() HTTP call. Use
+// SendBatch instead — one DB round-trip + one batched FCM call,
+// regardless of recipient count.
 func (f *FCMService) SendNotificationToMultipleUsers(userIDs []uuid.UUID, title, body string, data map[string]string) {
 	for _, userID := range userIDs {
 		go func(id uuid.UUID) {
@@ -108,6 +113,128 @@ func (f *FCMService) SendNotificationToMultipleUsers(userIDs []uuid.UUID, title,
 				log.Printf("Error sending notification to user %s: %v", id, err)
 			}
 		}(userID)
+	}
+}
+
+// FCMRecipient pairs a user ID with its FCM token. Producers of this
+// type batch-load tokens once via LoadFCMTokens; consumers pass the
+// slice to SendBatch.
+type FCMRecipient struct {
+	UserID uuid.UUID
+	Token  string
+}
+
+// LoadFCMTokens returns one FCMRecipient per user ID that has a
+// non-empty fcm_token, in a single DB round-trip. Users with no token
+// (notifications never enabled, or token cleared after an invalid
+// send) are omitted silently — matching SendNotification's existing
+// "no token is not an error" posture.
+//
+// Pre-fix every push call site paid a First(&user) per recipient
+// just to read the FCMToken column. For a 10-person chat fan-out
+// that's ten 25ms round-trips before any FCM HTTP fires.
+func LoadFCMTokens(userIDs []uuid.UUID) ([]FCMRecipient, error) {
+	if len(userIDs) == 0 {
+		return nil, nil
+	}
+	type row struct {
+		ID       uuid.UUID `gorm:"column:id"`
+		FCMToken string    `gorm:"column:fcm_token"`
+	}
+	var rows []row
+	if err := database.Database.Db.
+		Table("users").
+		Select("id, fcm_token").
+		Where("id IN ? AND fcm_token IS NOT NULL AND fcm_token <> ''", userIDs).
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]FCMRecipient, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, FCMRecipient{UserID: r.ID, Token: r.FCMToken})
+	}
+	return out, nil
+}
+
+// SendBatch fans the same notification out to every recipient in ONE
+// FCM HTTP call via messaging.SendEach. Firebase caps each call at
+// 500 messages — we chunk above that to stay safe, although every
+// current call site (chat fan-out, accept/reject) is well under.
+//
+// Tokens that come back as IsRegistrationTokenNotRegistered (the
+// user uninstalled the app, or the token aged out) are cleared
+// from the users table in a single batched UPDATE so future sends
+// skip them.
+//
+// Returns nothing — push is best-effort. Errors and per-token
+// failures are logged but never propagated; callers fire-and-forget
+// just like SendNotification's existing per-token call sites.
+func (f *FCMService) SendBatch(recipients []FCMRecipient, title, body string, data map[string]string) {
+	if f == nil || len(recipients) == 0 {
+		return
+	}
+
+	const chunkSize = 500 // Firebase SendEach hard cap
+	for start := 0; start < len(recipients); start += chunkSize {
+		end := start + chunkSize
+		if end > len(recipients) {
+			end = len(recipients)
+		}
+		chunk := recipients[start:end]
+
+		messages := make([]*messaging.Message, 0, len(chunk))
+		for _, r := range chunk {
+			messages = append(messages, &messaging.Message{
+				Token:        r.Token,
+				Notification: &messaging.Notification{Title: title, Body: body},
+				Data:         data,
+				Android: &messaging.AndroidConfig{
+					Priority: "high",
+					Notification: &messaging.AndroidNotification{
+						ChannelID: "default",
+						Priority:  messaging.PriorityHigh,
+					},
+				},
+				APNS: &messaging.APNSConfig{
+					Payload: &messaging.APNSPayload{
+						Aps: &messaging.Aps{
+							Alert: &messaging.ApsAlert{Title: title, Body: body},
+							Sound: "default",
+						},
+					},
+				},
+			})
+		}
+
+		resp, err := f.client.SendEach(context.Background(), messages)
+		if err != nil {
+			log.Printf("SendBatch: chunk send failed (size %d): %v", len(messages), err)
+			continue
+		}
+
+		// Collect the user IDs whose tokens are dead so we can wipe
+		// them in a single UPDATE rather than per-row.
+		var deadUserIDs []uuid.UUID
+		for i, r := range resp.Responses {
+			if r.Success {
+				continue
+			}
+			if messaging.IsInvalidArgument(r.Error) || messaging.IsRegistrationTokenNotRegistered(r.Error) {
+				deadUserIDs = append(deadUserIDs, chunk[i].UserID)
+			} else if r.Error != nil {
+				log.Printf("SendBatch: user %s send failed: %v", chunk[i].UserID, r.Error)
+			}
+		}
+		if len(deadUserIDs) > 0 {
+			if err := database.Database.Db.
+				Table("users").
+				Where("id IN ?", deadUserIDs).
+				Update("fcm_token", "").Error; err != nil {
+				log.Printf("SendBatch: clearing dead tokens for %d users failed: %v", len(deadUserIDs), err)
+			} else {
+				log.Printf("SendBatch: cleared FCM tokens for %d users (uninstalled or invalid)", len(deadUserIDs))
+			}
+		}
 	}
 }
 

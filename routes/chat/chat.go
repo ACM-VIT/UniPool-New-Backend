@@ -2,6 +2,7 @@ package chat
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"sort"
 	"strconv"
@@ -438,27 +439,40 @@ func fanOutRideNotifications(rideUUID uuid.UUID, sender models.User, content str
 		}
 	}
 
-	rideRoute := ride.StartLocation + " to " + ride.EndLocation
-
-	// Reuse the outer wg variable from the parallel-fetch block above
-	// for the FCM fan-out loop.
-	for userID := range recipients {
-		wg.Add(1)
-		uid := userID
-		go func() {
-			defer wg.Done()
-			// Respect both global chat-message opt-out AND per-ride
-			// mute toggle (chat settings sheet). Per-ride takes
-			// priority — see helpers.IsNotificationAllowed.
-			if allowed, _ := helpers.IsNotificationAllowed(uid, helpers.NotifChatMessages, rideUUID); !allowed {
-				return
-			}
-			if err := fcm.SendChatMessageNotification(uid, sender.Name, content, rideRoute, rideUUID); err != nil {
-				log.Printf("notifications: ride %s -> user %s failed: %v", rideUUID, uid, err)
-			}
-		}()
+	// Batched recipient pipeline. Pre-fix this loop spawned one
+	// goroutine per recipient and each one did:
+	//   1. IsNotificationAllowed → 2 DB lookups
+	//   2. fcm.SendChatMessageNotification → 1 DB lookup + 1 FCM HTTP
+	// At 10 accepted passengers that was ~30 DB round-trips and 10
+	// separate FCM HTTP calls. Now: 2 DB queries (allowed-filter +
+	// token-batch) and 1 FCM HTTP call (SendEach fan-out) regardless
+	// of recipient count.
+	recipientIDs := make([]uuid.UUID, 0, len(recipients))
+	for uid := range recipients {
+		recipientIDs = append(recipientIDs, uid)
 	}
-	wg.Wait()
+	allowedIDs := helpers.FilterAllowedRecipients(recipientIDs, helpers.NotifChatMessages, rideUUID)
+	tokens, err := services.LoadFCMTokens(allowedIDs)
+	if err != nil {
+		log.Printf("notifications: token batch lookup for ride %s failed: %v", rideUUID, err)
+		return
+	}
+	if len(tokens) == 0 {
+		return
+	}
+
+	// Mirror SendChatMessageNotification's title/body/data shape so
+	// the client routing logic is unchanged.
+	title := fmt.Sprintf("New message from %s", sender.Name)
+	body := fmt.Sprintf("💬 %s", content)
+	if len(body) > 100 {
+		body = body[:97] + "..."
+	}
+	fcm.SendBatch(tokens, title, body, map[string]string{
+		"type":    "chat_message",
+		"ride_id": rideUUID.String(),
+		"action":  "open_chat",
+	})
 }
 
 // fanOutDMNotification handles the simpler "send FCM to the other half
@@ -959,6 +973,22 @@ func MarkRideRead(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid ride id"})
 	}
 
+	// Membership check: only ride participants (host + accepted +
+	// pending requesters) get to bump the read cursor. Without this
+	// gate an attacker who knows a ride_id can spam read-marks
+	// against arbitrary rides — harmless in isolation but it (a)
+	// leaks "the caller is acknowledged in this ride" through the
+	// upsert side effect, and (b) lets a stranger silently dirty
+	// the read-state table for arbitrary users. Mirrors the same
+	// guard SendMessage and the WebSocket attach already use.
+	role, _, roleErr := getRideViewerRole(user.ID, rideUUID)
+	if roleErr != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "membership lookup failed"})
+	}
+	if role != roleHost && role != roleAccepted && role != rolePending {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not a participant in this ride"})
+	}
+
 	now := time.Now()
 	read := models.ChatRead{
 		UserID:     user.ID,
@@ -992,15 +1022,29 @@ func MarkDMRead(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid dm room id format"})
 	}
 
+	// Membership check: the dm_room_id encodes the two participants'
+	// UUIDs as `dm_<a>_<b>` (sorted). Reject if the caller's UUID
+	// isn't one of the two. Without this gate any authed user could
+	// mark anyone else's DMs read.
+	parts := strings.SplitN(strings.TrimPrefix(dmRoomID, "dm_"), "_", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid dm room id format"})
+	}
+	callerID := user.ID.String()
+	if parts[0] != callerID && parts[1] != callerID {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not a participant in this dm"})
+	}
+
 	now := time.Now()
-	// Upsert against the partial unique index `idx_chat_reads_user_dm`
-	// (user_id, dm_room_id) WHERE dm_room_id IS NOT NULL — created by
-	// scripts/migrate_chat_reads_dm_index.go. The WHERE clause in the
-	// ON CONFLICT target tells Postgres which partial index to infer.
+	// Upsert against the unique index `idx_chat_reads_user_dm_v2`
+	// (user_id, dm_room_id) installed by migration 00002. NULL
+	// dm_room_id rows (the ride-chat case) hit the separate
+	// idx_chat_reads_user_ride constraint and never reach this
+	// handler.
 	if err := database.Database.Db.Exec(`
 		INSERT INTO chat_reads (id, user_id, dm_room_id, last_read_at, created_at, updated_at)
 		VALUES (gen_random_uuid(), ?, ?, ?, ?, ?)
-		ON CONFLICT (user_id, dm_room_id) WHERE dm_room_id IS NOT NULL
+		ON CONFLICT (user_id, dm_room_id)
 		DO UPDATE SET last_read_at = EXCLUDED.last_read_at, updated_at = EXCLUDED.updated_at
 	`, user.ID, dmRoomID, now, now, now).Error; err != nil {
 		log.Printf("MarkDMRead failed: %v", err)
