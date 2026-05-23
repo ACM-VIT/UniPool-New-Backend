@@ -15,6 +15,7 @@ import (
 	"unipool-backend/routes/chat"
 	"unipool-backend/routes/locations"
 	"unipool-backend/routes/notifications"
+	"unipool-backend/routes/ota"
 	"unipool-backend/routes/reports"
 	"unipool-backend/routes/rides"
 	"unipool-backend/routes/users"
@@ -76,6 +77,15 @@ func WireRoutes(app *fiber.App, auth fiber.Handler, optionalAuth fiber.Handler) 
 
 	// Bootstrap read model for app startup/home.
 	app.Get("/app/state", optionalAuth, appstate.GetState)
+
+	// OTA: self-hosted Expo Updates protocol v1 endpoints. These run
+	// BEFORE the auth gate because the client fetches a manifest on
+	// every cold start — long before sign-in. Upload is gated by
+	// OTA_ADMIN_TOKEN inside the handler itself; the GETs are public
+	// (they only expose published bundles, no user data).
+	app.Get("/api/manifest", ota.ManifestHandler)
+	app.Get("/api/assets", ota.AssetHandler)
+	app.Post("/api/ota/upload", ota.UploadHandler)
 
 	// The auth gate. Every route registered after this line requires
 	// a successfully authenticated caller (c.Locals("user") populated).
