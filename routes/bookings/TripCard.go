@@ -120,6 +120,15 @@ func BuildActiveTripCard(userID uuid.UUID) *TripCard {
 		Joins("JOIN rides r ON r.id = b.ride_id").
 		Joins("JOIN users u ON u.id = r.host_user_id").
 		Where("b.passenger_id = ? AND b.request_status = ?", userID, "accepted").
+		// Skip self-bookings (legacy data where host_user_id ==
+		// passenger_id from before the /bookings/request guard
+		// existed). Surfacing a "Pay {host_name}" card to a viewer
+		// who IS the host doesn't make sense — they can't pay
+		// themselves, the chat ack flow becomes nonsensical, and
+		// the rating saga earlier today traced back to exactly one
+		// of these rows. Filter at the query so this case never
+		// reaches the client.
+		Where("r.host_user_id <> b.passenger_id").
 		Where(`
 			(r.start_time BETWEEN ? AND ?)
 			OR (r.start_time BETWEEN ? AND ? AND b.dismissed_at IS NULL)
