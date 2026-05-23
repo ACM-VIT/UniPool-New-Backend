@@ -98,7 +98,10 @@ func Authenticate(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"error": "Invalid token"})
 	}
 
-	email := decodedToken.Claims["email"].(string)
+	email, ok := decodedToken.Claims["email"].(string)
+	if !ok || strings.TrimSpace(email) == "" {
+		return c.Status(401).JSON(fiber.Map{"error": "Invalid token"})
+	}
 
 	name, nameOk := decodedToken.Claims["name"].(string)
 	if !nameOk {
@@ -130,7 +133,7 @@ func Authenticate(c *fiber.Ctx) error {
 		}
 
 		err = database.Database.Db.WithContext(ctx).
-			Select("id", "email", "name", "profile_picture_url", "contact_number", "gender", "yob", "default_address", "created_at", "updated_at").
+			Select("id", "email", "name", "profile_picture_url", "contact_number", "gender", "yob", "default_address", "institute_id", "is_email_verified", "institute_email", "upi_vpa", "created_at", "updated_at").
 			Where("email = ?", email).
 			First(&user).Error
 

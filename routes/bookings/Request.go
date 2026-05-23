@@ -3,7 +3,9 @@ package bookings
 import (
 	"log"
 	"strings"
+	"time"
 	"unipool-backend/database"
+	"unipool-backend/helpers"
 	"unipool-backend/models"
 	"unipool-backend/services"
 
@@ -42,12 +44,22 @@ func Request(c *fiber.Ctx) error {
 		log.Println("Error parsing booking request:", err)
 		return c.Status(400).SendString("Invalid request body")
 	}
+	if booking.RequestStatus != "" && booking.RequestStatus != "pending" {
+		return c.Status(400).JSON(fiber.Map{
+			"error": "New booking requests must start as pending",
+			"code":  "invalid_request_status",
+		})
+	}
+	booking.RequestStatus = "pending"
 
 	// Check if a booking with the same RideID and PassengerID already exists
 	existingBooking := models.Booking{}
 	if database.Database.Db.Where("ride_id = ? AND passenger_id = ?", booking.RideID, PassengerID).First(&existingBooking).Error == nil {
 		log.Println("Similar booking already exists")
-		return c.Status(400).SendString("Similar booking already exists")
+		return c.Status(409).JSON(fiber.Map{
+			"error": "Similar booking already exists",
+			"code":  "already_booked",
+		})
 	}
 
 	// Pre-flight on the target ride. Three things to check before we
@@ -59,10 +71,13 @@ func Request(c *fiber.Ctx) error {
 	//      passenger_id on the same ride, the rate flow refused to
 	//      submit, etc. Defence-in-depth at the booking-creation
 	//      step so the bad row can't exist at all.
-	//   3. Women-only ride enforcement (existing behaviour). Done
+	//   3. The ride is still upcoming and has a passenger seat left.
+	//   4. Women-only ride enforcement (existing behaviour). Done
 	//      BEFORE the insert so we never write a doomed booking row.
 	var targetRide models.Ride
-	if err := database.Database.Db.Select("id, host_user_id, is_same_gender").First(&targetRide, booking.RideID).Error; err != nil {
+	if err := database.Database.Db.
+		Select("id, host_user_id, is_same_gender, start_time, is_ongoing, total_seats, booked_seats").
+		First(&targetRide, booking.RideID).Error; err != nil {
 		log.Printf("ride lookup for booking pre-flight failed: %v", err)
 		return c.Status(404).SendString("Ride not found")
 	}
@@ -71,6 +86,25 @@ func Request(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{
 			"error": "You can't request a seat on your own ride",
 			"code":  "self_booking",
+		})
+	}
+	if targetRide.IsOngoing != 0 || !targetRide.StartTime.After(time.Now().UTC()) {
+		return c.Status(409).JSON(fiber.Map{
+			"error": "This ride has already started",
+			"code":  "ride_started",
+		})
+	}
+	var acceptedCount int64
+	if err := database.Database.Db.Model(&models.Booking{}).
+		Where("ride_id = ? AND request_status = ?", targetRide.ID, "accepted").
+		Count(&acceptedCount).Error; err != nil {
+		log.Printf("accepted booking count failed for ride %v: %v", targetRide.ID, err)
+		return c.Status(500).JSON(fiber.Map{"error": "Could not check ride capacity"})
+	}
+	if !helpers.CanAcceptAnotherPassenger(targetRide.TotalSeats, uint(acceptedCount)) {
+		return c.Status(409).JSON(fiber.Map{
+			"error": "No available seats for this ride",
+			"code":  "ride_full",
 		})
 	}
 	if targetRide.IsSameGender == 1 && strings.ToLower(user.Gender) != "female" {

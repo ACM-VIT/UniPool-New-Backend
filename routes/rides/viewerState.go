@@ -3,6 +3,7 @@ package rides
 import (
 	"time"
 	"unipool-backend/database"
+	"unipool-backend/helpers"
 	"unipool-backend/models"
 
 	"github.com/google/uuid"
@@ -39,11 +40,12 @@ const (
 // of computing the booleans on the client means the source of truth
 // for "can this user cancel?" lives in one place.
 type ViewerActions struct {
-	CanRequestSeat       bool `json:"can_request_seat"`
-	CanCancelBooking     bool `json:"can_cancel_booking"`
-	CanCancelRide        bool `json:"can_cancel_ride"`
-	CanAcceptPassengers  bool `json:"can_accept_passengers"`
-	CanOpenChat          bool `json:"can_open_chat"`
+	CanRequestSeat      bool `json:"can_request_seat"`
+	CanCancelBooking    bool `json:"can_cancel_booking"`
+	CanCancelRide       bool `json:"can_cancel_ride"`
+	CanAcceptPassengers bool `json:"can_accept_passengers"`
+	CanOpenChat         bool `json:"can_open_chat"`
+	CanRate             bool `json:"can_rate"`
 }
 
 // ViewerContext bundles the precomputed state + actions so endpoints
@@ -116,8 +118,10 @@ func ResolveViewerState(
 		}
 	}
 
-	// No booking, not host — check seat availability.
-	if ride.BookedSeats >= ride.TotalSeats {
+	// No booking, not host — check passenger-seat availability.
+	// total_seats includes the host, while booked_seats counts
+	// accepted passengers only; keep this aligned with helpers/seats.go.
+	if !helpers.CanAcceptAnotherPassenger(ride.TotalSeats, ride.BookedSeats) {
 		return ViewerContext{State: StateFull, Actions: ViewerActions{}}
 	}
 

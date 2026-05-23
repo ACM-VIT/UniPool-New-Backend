@@ -7,7 +7,9 @@ package integration
 
 import (
 	"net/http"
+	"net/url"
 	"testing"
+	"time"
 )
 
 // TestRideSearch_CoordinateBothEnds drives the most common search
@@ -27,12 +29,12 @@ func TestRideSearch_CoordinateBothEnds(t *testing.T) {
 	mainGateLat, mainGateLon := 12.9692, 79.1559
 	katpadiLat, katpadiLon := 12.9698, 79.1370
 	target := SeedRide(t, db, host, RideOpts{
-		StartLocation:  "VIT Main Gate",
-		EndLocation:    "Katpadi Junction",
-		StartLat:       FloatPtr(mainGateLat),
-		StartLon:       FloatPtr(mainGateLon),
-		EndLat:         FloatPtr(katpadiLat),
-		EndLon:         FloatPtr(katpadiLon),
+		StartLocation: "VIT Main Gate",
+		EndLocation:   "Katpadi Junction",
+		StartLat:      FloatPtr(mainGateLat),
+		StartLon:      FloatPtr(mainGateLon),
+		EndLat:        FloatPtr(katpadiLat),
+		EndLon:        FloatPtr(katpadiLon),
 	})
 
 	// And a control ride 50km away — must NOT come back.
@@ -98,7 +100,9 @@ func TestRideSearch_StartCoordOnly(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	var body struct{ Rides []map[string]any `json:"rides"` }
+	var body struct {
+		Rides []map[string]any `json:"rides"`
+	}
 	ReadJSON(t, resp, &body)
 	if len(body.Rides) == 0 {
 		t.Fatalf("start-only search returned 0 rides; suggests broken ST_MakePoint(start_*) path")
@@ -126,7 +130,9 @@ func TestRideSearch_EndCoordOnly(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	var body struct{ Rides []map[string]any `json:"rides"` }
+	var body struct {
+		Rides []map[string]any `json:"rides"`
+	}
 	ReadJSON(t, resp, &body)
 	if len(body.Rides) == 0 {
 		t.Fatalf("end-only search returned 0 rides; suggests broken ST_MakePoint(end_*) path")
@@ -157,7 +163,9 @@ func TestRideSearch_NoCoordsTextFallback(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	var body struct{ Rides []map[string]any `json:"rides"` }
+	var body struct {
+		Rides []map[string]any `json:"rides"`
+	}
 	ReadJSON(t, resp, &body)
 	if len(body.Rides) == 0 {
 		t.Fatalf("text search returned 0 rides")
@@ -191,7 +199,9 @@ func TestRideSearch_ExcludesOwnRides(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	var body struct{ Rides []map[string]any `json:"rides"` }
+	var body struct {
+		Rides []map[string]any `json:"rides"`
+	}
 	ReadJSON(t, resp, &body)
 	for _, r := range body.Rides {
 		if id, _ := r["id"].(string); id == mine.ID.String() {
@@ -337,4 +347,194 @@ func TestRideSearch_StrictMatchesEmptyWithoutCoords(t *testing.T) {
 	if len(body.StrictMatches) != 0 {
 		t.Errorf("expected 0 strict matches without coords, got %d", len(body.StrictMatches))
 	}
+}
+
+func TestRideSearch_TargetTimeRanksCloseEarlierDepartures(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "time-rank@vitstudent.ac.in", &inst.ID)
+
+	target := nextLocalSearchTime(t, 9, 0)
+	closeEarlier := SeedRide(t, db, host, RideOpts{
+		StartLocation: "VIT Main Gate",
+		EndLocation:   "Katpadi Junction",
+		StartLat:      FloatPtr(12.9692), StartLon: FloatPtr(79.1559),
+		EndLat: FloatPtr(12.9698), EndLon: FloatPtr(79.1370),
+		StartTime: target.Add(-15 * time.Minute).UTC(),
+	})
+	early := SeedRide(t, db, host, RideOpts{
+		StartLocation: "VIT Main Gate",
+		EndLocation:   "Katpadi Junction",
+		StartLat:      FloatPtr(12.9692), StartLon: FloatPtr(79.1559),
+		EndLat: FloatPtr(12.9698), EndLon: FloatPtr(79.1370),
+		StartTime: target.Add(-60 * time.Minute).UTC(),
+	})
+	late := SeedRide(t, db, host, RideOpts{
+		StartLocation: "VIT Main Gate",
+		EndLocation:   "Katpadi Junction",
+		StartLat:      FloatPtr(12.9692), StartLon: FloatPtr(79.1559),
+		EndLat: FloatPtr(12.9698), EndLon: FloatPtr(79.1370),
+		StartTime: target.Add(90 * time.Minute).UTC(),
+	})
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet,
+		"/ride/search?start_lat=12.9692&start_lon=79.1559&end_lat=12.9698&end_lon=79.1370&date="+
+			target.Format("2006-01-02")+"&target_time="+url.QueryEscape(target.Format(time.RFC3339)),
+		nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Rides []map[string]any `json:"rides"`
+	}
+	ReadJSON(t, resp, &body)
+	if len(body.Rides) < 3 {
+		t.Fatalf("expected 3 rides, got %d (%v)", len(body.Rides), idsOf(body.Rides))
+	}
+	if got := body.Rides[0]["id"]; got != closeEarlier.ID.String() {
+		t.Fatalf("15-min-earlier ride should rank first; got %v, order=%v", got, idsOf(body.Rides))
+	}
+	if indexOfID(body.Rides, early.ID.String()) > indexOfID(body.Rides, late.ID.String()) {
+		t.Errorf("early usable ride should beat very late ride; order=%v", idsOf(body.Rides))
+	}
+}
+
+func TestRideSearch_DateFilterDoesNotLeakFarFutureRides(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "date-rank@vitstudent.ac.in", &inst.ID)
+
+	target := nextLocalSearchTime(t, 9, 0)
+	todayRide := SeedRide(t, db, host, RideOpts{
+		StartLat: FloatPtr(12.9692), StartLon: FloatPtr(79.1559),
+		EndLat: FloatPtr(12.9698), EndLon: FloatPtr(79.1370),
+		StartTime: target.UTC(),
+	})
+	farFuture := SeedRide(t, db, host, RideOpts{
+		StartLat: FloatPtr(12.9692), StartLon: FloatPtr(79.1559),
+		EndLat: FloatPtr(12.9698), EndLon: FloatPtr(79.1370),
+		StartTime: target.AddDate(0, 0, 100).UTC(),
+	})
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet,
+		"/ride/search?start_lat=12.9692&start_lon=79.1559&end_lat=12.9698&end_lon=79.1370&date="+
+			target.Format("2006-01-02")+"&target_time="+url.QueryEscape(target.Format(time.RFC3339)),
+		nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Rides []map[string]any `json:"rides"`
+	}
+	ReadJSON(t, resp, &body)
+	assertIDPresent(t, body.Rides, todayRide.ID.String())
+	if indexOfID(body.Rides, farFuture.ID.String()) != -1 {
+		t.Fatalf("far future ride leaked into selected-date search; order=%v", idsOf(body.Rides))
+	}
+}
+
+func TestRideSearch_ContextualRouteOverlapBeatsNearbyOffRoute(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "route-overlap@vitstudent.ac.in", &inst.ID)
+
+	target := nextLocalSearchTime(t, 9, 0)
+	onRoute := SeedRide(t, db, host, RideOpts{
+		StartLocation: "Campus Gate",
+		EndLocation:   "Further Down Main Road",
+		StartLat:      FloatPtr(12.0000), StartLon: FloatPtr(79.0000),
+		EndLat: FloatPtr(12.0000), EndLon: FloatPtr(79.0200),
+		StartTime: target.UTC(),
+	})
+	offRoute := SeedRide(t, db, host, RideOpts{
+		StartLocation: "Campus Gate",
+		EndLocation:   "Side Road",
+		StartLat:      FloatPtr(12.0000), StartLon: FloatPtr(79.0000),
+		EndLat: FloatPtr(12.0100), EndLon: FloatPtr(79.0100),
+		StartTime: target.UTC(),
+	})
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet,
+		"/ride/search?start_lat=12.0000&start_lon=79.0000&end_lat=12.0000&end_lon=79.0100&date="+
+			target.Format("2006-01-02")+"&target_time="+url.QueryEscape(target.Format(time.RFC3339)),
+		nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Rides []map[string]any `json:"rides"`
+	}
+	ReadJSON(t, resp, &body)
+	if len(body.Rides) < 2 {
+		t.Fatalf("expected both contextual candidates, got %v", idsOf(body.Rides))
+	}
+	if got := body.Rides[0]["id"]; got != onRoute.ID.String() {
+		t.Fatalf("on-route candidate should beat nearby off-route candidate; got %v, offRoute=%s, order=%v",
+			got, offRoute.ID, idsOf(body.Rides))
+	}
+}
+
+func TestRideSearch_CoordinateSearchDoesNotPromoteMissingCoordinateRows(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "missing-coords@vitstudent.ac.in", &inst.ID)
+
+	target := nextLocalSearchTime(t, 9, 0)
+	exact := SeedRide(t, db, host, RideOpts{
+		StartLocation: "VIT Main Gate",
+		EndLocation:   "Katpadi Junction",
+		StartLat:      FloatPtr(12.9692), StartLon: FloatPtr(79.1559),
+		EndLat: FloatPtr(12.9698), EndLon: FloatPtr(79.1370),
+		StartTime: target.UTC(),
+	})
+	missingCoords := SeedRide(t, db, host, RideOpts{
+		StartLocation: "VIT Main Gate",
+		EndLocation:   "Katpadi Junction",
+		StartTime:     target.Add(-15 * time.Minute).UTC(),
+	})
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet,
+		"/ride/search?start_lat=12.9692&start_lon=79.1559&end_lat=12.9698&end_lon=79.1370&date="+
+			target.Format("2006-01-02")+"&target_time="+url.QueryEscape(target.Format(time.RFC3339)),
+		nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Rides []map[string]any `json:"rides"`
+	}
+	ReadJSON(t, resp, &body)
+	if len(body.Rides) == 0 || body.Rides[0]["id"] != exact.ID.String() {
+		t.Fatalf("exact coordinate ride should rank first; order=%v", idsOf(body.Rides))
+	}
+	if indexOfID(body.Rides, missingCoords.ID.String()) != -1 {
+		t.Fatalf("missing-coordinate ride should not enter coordinate result pool; order=%v", idsOf(body.Rides))
+	}
+}
+
+func nextLocalSearchTime(t *testing.T, hour, minute int) time.Time {
+	t.Helper()
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().In(loc).Add(24 * time.Hour)
+	return time.Date(base.Year(), base.Month(), base.Day(), hour, minute, 0, 0, loc)
+}
+
+func indexOfID(rides []map[string]any, id string) int {
+	for i, r := range rides {
+		if got, _ := r["id"].(string); got == id {
+			return i
+		}
+	}
+	return -1
 }

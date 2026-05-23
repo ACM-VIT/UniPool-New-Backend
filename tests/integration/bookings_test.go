@@ -9,6 +9,7 @@ package integration
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	"unipool-backend/models"
 )
@@ -71,8 +72,15 @@ func TestBooking_DuplicateRequestRejected(t *testing.T) {
 	dup := Do(t, app, http.MethodPost, "/bookings/request",
 		map[string]any{"ride_id": ride.ID, "request_status": "pending"},
 		AsUser(passenger.Email))
-	if dup.StatusCode != http.StatusBadRequest {
-		t.Fatalf("duplicate: expected 400, got %d", dup.StatusCode)
+	if dup.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate: expected 409, got %d", dup.StatusCode)
+	}
+	var dupBody struct {
+		Code string `json:"code"`
+	}
+	ReadJSON(t, dup, &dupBody)
+	if dupBody.Code != "already_booked" {
+		t.Fatalf("duplicate code: got %q want already_booked", dupBody.Code)
 	}
 
 	var count int64
@@ -80,6 +88,49 @@ func TestBooking_DuplicateRequestRejected(t *testing.T) {
 	if count != 1 {
 		t.Errorf("expected exactly 1 booking row, got %d", count)
 	}
+}
+
+func TestBooking_RequestFullRideRejected(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "full-host@vitstudent.ac.in", &inst.ID)
+	taker := SeedUser(t, db, "Taker", "full-taker@vitstudent.ac.in", &inst.ID)
+	passenger := SeedUser(t, db, "Passenger", "full-pax@vitstudent.ac.in", &inst.ID)
+	// total_seats includes host; total=2 means one passenger seat.
+	ride := SeedRide(t, db, host, RideOpts{TotalSeats: 2, BookedSeats: 0})
+	if err := db.Create(&models.Booking{
+		RideID: ride.ID, PassengerID: taker.ID, RequestStatus: "accepted",
+	}).Error; err != nil {
+		t.Fatalf("seed accepted booking: %v", err)
+	}
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodPost, "/bookings/request",
+		map[string]any{"ride_id": ride.ID, "request_status": "pending"},
+		AsUser(passenger.Email))
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 for full ride, got %d", resp.StatusCode)
+	}
+	ReadJSON(t, resp, nil)
+}
+
+func TestBooking_RequestPastRideRejected(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "past-host@vitstudent.ac.in", &inst.ID)
+	passenger := SeedUser(t, db, "Passenger", "past-pax@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{StartTime: time.Now().Add(-time.Hour).UTC()})
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodPost, "/bookings/request",
+		map[string]any{"ride_id": ride.ID, "request_status": "pending"},
+		AsUser(passenger.Email))
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 for started ride, got %d", resp.StatusCode)
+	}
+	ReadJSON(t, resp, nil)
 }
 
 func TestBooking_HostCanAccept(t *testing.T) {
@@ -178,5 +229,40 @@ func TestBooking_HostCanReject(t *testing.T) {
 	}
 	if refreshed.RequestStatus != "rejected" {
 		t.Errorf("expected rejected, got %q", refreshed.RequestStatus)
+	}
+}
+
+func TestBooking_RejectAcceptedDoesNotStrandBookedSeat(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "rej-accepted-host@vitstudent.ac.in", &inst.ID)
+	passenger := SeedUser(t, db, "Passenger", "rej-accepted-pax@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{TotalSeats: 3, BookedSeats: 1})
+	booking := models.Booking{RideID: ride.ID, PassengerID: passenger.ID, RequestStatus: "accepted"}
+	if err := db.Create(&booking).Error; err != nil {
+		t.Fatalf("seed booking: %v", err)
+	}
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodPut, "/bookings/reject/"+booking.ID.String(), nil, AsUser(host.Email))
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", resp.StatusCode)
+	}
+	ReadJSON(t, resp, nil)
+
+	var refreshed models.Booking
+	if err := db.First(&refreshed, booking.ID).Error; err != nil {
+		t.Fatalf("reload booking: %v", err)
+	}
+	if refreshed.RequestStatus != "accepted" {
+		t.Errorf("status: got %q want accepted", refreshed.RequestStatus)
+	}
+	var afterRide models.Ride
+	if err := db.First(&afterRide, ride.ID).Error; err != nil {
+		t.Fatalf("reload ride: %v", err)
+	}
+	if afterRide.BookedSeats != 1 {
+		t.Errorf("booked_seats drifted: got %d want 1", afterRide.BookedSeats)
 	}
 }

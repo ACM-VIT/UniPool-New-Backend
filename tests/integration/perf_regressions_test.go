@@ -309,7 +309,106 @@ func TestPendingRatings_PassengerOnlyHostCounterpart(t *testing.T) {
 	}
 }
 
+func TestPendingRatings_DropsAfterPromptWindow(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "pr-old-host@vitstudent.ac.in", &inst.ID)
+	pax := SeedUser(t, db, "Pax", "pr-old-pax@vitstudent.ac.in", &inst.ID)
+	r := SeedRide(t, db, host, RideOpts{
+		StartTime: time.Now().Add(-8 * 24 * time.Hour).UTC(),
+	})
+	if err := db.Create(&models.Booking{
+		RideID: r.ID, PassengerID: pax.ID, RequestStatus: "accepted",
+	}).Error; err != nil {
+		t.Fatalf("seed booking: %v", err)
+	}
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/user/pending-ratings", nil, AsUser(pax.Email))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Rides []map[string]any `json:"rides"`
+	}
+	ReadJSON(t, resp, &body)
+	if len(body.Rides) != 0 {
+		t.Fatalf("expected no stale rating prompts after 7 days, got %d", len(body.Rides))
+	}
+}
+
+func TestUserRides_PastRideCarriesCanRateAction(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "ur-rate-host@vitstudent.ac.in", &inst.ID)
+	pax := SeedUser(t, db, "Pax", "ur-rate-pax@vitstudent.ac.in", &inst.ID)
+	r := SeedRide(t, db, host, RideOpts{
+		StartTime: time.Now().Add(-30 * time.Hour).UTC(),
+	})
+	if err := db.Create(&models.Booking{
+		RideID: r.ID, PassengerID: pax.ID, RequestStatus: "accepted",
+	}).Error; err != nil {
+		t.Fatalf("seed booking: %v", err)
+	}
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/user/rides?scope=past", nil, AsUser(pax.Email))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body []struct {
+		RideID  string `json:"ride_id"`
+		Actions struct {
+			CanRate bool `json:"can_rate"`
+		} `json:"actions"`
+	}
+	ReadJSON(t, resp, &body)
+	if len(body) != 1 || body[0].RideID != r.ID.String() {
+		t.Fatalf("unexpected /user/rides payload: %+v", body)
+	}
+	if !body[0].Actions.CanRate {
+		t.Fatalf("expected /user/rides actions.can_rate for unrated past trip")
+	}
+}
+
 // --- /ride/details/:id -----------------------------------------------
+
+func TestRideDetails_PastRideCarriesCanRateAction(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "rd-rate-host@vitstudent.ac.in", &inst.ID)
+	pax := SeedUser(t, db, "Pax", "rd-rate-pax@vitstudent.ac.in", &inst.ID)
+	r := SeedRide(t, db, host, RideOpts{
+		StartTime: time.Now().Add(-30 * time.Hour).UTC(),
+	})
+	if err := db.Create(&models.Booking{
+		RideID: r.ID, PassengerID: pax.ID, RequestStatus: "accepted",
+	}).Error; err != nil {
+		t.Fatalf("seed booking: %v", err)
+	}
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/ride/details/"+r.ID.String(), nil, AsUser(pax.Email))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		ViewerState string `json:"viewer_state"`
+		Actions     struct {
+			CanRate bool `json:"can_rate"`
+		} `json:"actions"`
+	}
+	ReadJSON(t, resp, &body)
+	if body.ViewerState != "past" {
+		t.Fatalf("viewer_state: got %q want past", body.ViewerState)
+	}
+	if !body.Actions.CanRate {
+		t.Fatalf("expected actions.can_rate for unrated past trip")
+	}
+}
 
 func TestRideDetails_HostWithInstitute(t *testing.T) {
 	db := ConnectTestDB(t)
@@ -426,5 +525,77 @@ func TestRideDetails_IncludesBookingsAndPassengers(t *testing.T) {
 		if !gotNames[want] {
 			t.Errorf("missing passenger %q from bookings", want)
 		}
+	}
+}
+
+func TestRideDetails_NonHostOnlySeesOwnBooking(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "rd-privacy-host@vitstudent.ac.in", &inst.ID)
+	p1 := SeedUser(t, db, "Pax One", "rd-privacy-p1@vitstudent.ac.in", &inst.ID)
+	p2 := SeedUser(t, db, "Pax Two", "rd-privacy-p2@vitstudent.ac.in", &inst.ID)
+	r := SeedRide(t, db, host, RideOpts{})
+	for _, p := range []models.User{p1, p2} {
+		if err := db.Create(&models.Booking{
+			RideID: r.ID, PassengerID: p.ID, RequestStatus: "accepted",
+		}).Error; err != nil {
+			t.Fatalf("seed booking: %v", err)
+		}
+	}
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/ride/details/"+r.ID.String(), nil, AsUser(p1.Email))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Bookings []struct {
+			PassengerID string `json:"passenger_id"`
+		} `json:"bookings"`
+	}
+	ReadJSON(t, resp, &body)
+	if len(body.Bookings) != 1 {
+		t.Fatalf("expected only viewer's booking, got %d", len(body.Bookings))
+	}
+	if body.Bookings[0].PassengerID != p1.ID.String() {
+		t.Fatalf("expected p1 booking, got %s", body.Bookings[0].PassengerID)
+	}
+}
+
+func TestRideDetails_UsesPassengerCapacityForFullState(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "rd-full-host@vitstudent.ac.in", &inst.ID)
+	taker := SeedUser(t, db, "Taker", "rd-full-taker@vitstudent.ac.in", &inst.ID)
+	viewer := SeedUser(t, db, "Viewer", "rd-full-viewer@vitstudent.ac.in", &inst.ID)
+	// total_seats includes host. total=2 with booked=1 means the only
+	// passenger slot is already taken, so unrelated viewers must see
+	// viewer_state=full.
+	r := SeedRide(t, db, host, RideOpts{TotalSeats: 2, BookedSeats: 0})
+	if err := db.Create(&models.Booking{
+		RideID: r.ID, PassengerID: taker.ID, RequestStatus: "accepted",
+	}).Error; err != nil {
+		t.Fatalf("seed booking: %v", err)
+	}
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/ride/details/"+r.ID.String(), nil, AsUser(viewer.Email))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		ViewerState string `json:"viewer_state"`
+		Actions     struct {
+			CanRequestSeat bool `json:"can_request_seat"`
+		} `json:"actions"`
+	}
+	ReadJSON(t, resp, &body)
+	if body.ViewerState != "full" {
+		t.Fatalf("viewer_state: got %q want full", body.ViewerState)
+	}
+	if body.Actions.CanRequestSeat {
+		t.Fatalf("can_request_seat should be false for a full ride")
 	}
 }

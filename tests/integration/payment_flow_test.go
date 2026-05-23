@@ -79,6 +79,38 @@ func TestPaymentFlow_DismissPaidPostsMarker(t *testing.T) {
 	}
 }
 
+func TestPaymentFlow_DismissPaidPostsMarkerOnlyOnce(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "pay-dedupe-host@vitstudent.ac.in", &inst.ID)
+	passenger := SeedUser(t, db, "Riya", "pay-dedupe-pax@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{TotalPrice: 250})
+	booking := models.Booking{RideID: ride.ID, PassengerID: passenger.ID, RequestStatus: "accepted"}
+	if err := db.Create(&booking).Error; err != nil {
+		t.Fatalf("seed booking: %v", err)
+	}
+
+	app := SetupTestApp(t)
+	for i := 0; i < 2; i++ {
+		resp := Do(t, app, http.MethodPost, "/trip-card/dismiss",
+			map[string]any{"booking_id": booking.ID.String(), "signal": "paid"},
+			AsUser(passenger.Email))
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("dismiss %d: expected 200, got %d", i+1, resp.StatusCode)
+		}
+		ReadJSON(t, resp, nil)
+	}
+
+	var count int64
+	db.Model(&models.Message{}).
+		Where("ride_id = ? AND kind = ?", ride.ID, models.MessageKindPaymentMarker).
+		Count(&count)
+	if count != 1 {
+		t.Fatalf("expected exactly 1 payment_marker after re-dismiss, got %d", count)
+	}
+}
+
 func TestPaymentFlow_DismissNoShowDoesNotPostMarker(t *testing.T) {
 	db := ConnectTestDB(t)
 	ResetDB(t)

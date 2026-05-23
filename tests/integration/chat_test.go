@@ -345,6 +345,12 @@ func TestMarkDMRead_AcceptsParticipant(t *testing.T) {
 	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
 	a := SeedUser(t, db, "A", "dm-a2@vitstudent.ac.in", &inst.ID)
 	b := SeedUser(t, db, "B", "dm-b2@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, a, RideOpts{})
+	if err := db.Create(&models.Booking{
+		RideID: ride.ID, PassengerID: b.ID, RequestStatus: "pending",
+	}).Error; err != nil {
+		t.Fatalf("seed booking: %v", err)
+	}
 	ids := []string{a.ID.String(), b.ID.String()}
 	sort.Strings(ids)
 	dmRoomID := "dm_" + ids[0] + "_" + ids[1]
@@ -357,6 +363,53 @@ func TestMarkDMRead_AcceptsParticipant(t *testing.T) {
 		}
 		ReadJSON(t, resp, nil)
 	}
+}
+
+func TestDMMessages_RequireBookingRelationship(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "dm-host@vitstudent.ac.in", &inst.ID)
+	passenger := SeedUser(t, db, "Passenger", "dm-pax@vitstudent.ac.in", &inst.ID)
+	stranger := SeedUser(t, db, "Stranger", "dm-stranger@vitstudent.ac.in", &inst.ID)
+
+	ids := []string{host.ID.String(), passenger.ID.String()}
+	sort.Strings(ids)
+	dmRoomID := "dm_" + ids[0] + "_" + ids[1]
+	app := SetupTestApp(t)
+
+	resp := Do(t, app, http.MethodPost, "/dm/"+dmRoomID+"/message",
+		map[string]any{"content": "before booking"}, AsUser(host.Email))
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("send before booking: expected 403, got %d", resp.StatusCode)
+	}
+	ReadJSON(t, resp, nil)
+
+	ride := SeedRide(t, db, host, RideOpts{})
+	if err := db.Create(&models.Booking{
+		RideID: ride.ID, PassengerID: passenger.ID, RequestStatus: "pending",
+	}).Error; err != nil {
+		t.Fatalf("seed booking: %v", err)
+	}
+
+	resp = Do(t, app, http.MethodPost, "/dm/"+dmRoomID+"/message",
+		map[string]any{"content": "hello"}, AsUser(host.Email))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("send after booking: expected 201, got %d", resp.StatusCode)
+	}
+	ReadJSON(t, resp, nil)
+
+	resp = Do(t, app, http.MethodGet, "/dm/"+dmRoomID+"/messages", nil, AsUser(passenger.Email))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("passenger read: expected 200, got %d", resp.StatusCode)
+	}
+	ReadJSON(t, resp, nil)
+
+	resp = Do(t, app, http.MethodGet, "/dm/"+dmRoomID+"/messages", nil, AsUser(stranger.Email))
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("stranger read: expected 403, got %d", resp.StatusCode)
+	}
+	ReadJSON(t, resp, nil)
 }
 
 func TestMarkDMRead_RejectsMalformedRoomID(t *testing.T) {

@@ -217,19 +217,49 @@ func DismissTripCard(c *fiber.Ctx) error {
 	}
 
 	now := time.Now()
-	booking.DismissedAt = &now
-	booking.DismissalSignal = signal
+	updates := map[string]any{
+		"dismissed_at":     &now,
+		"dismissal_signal": signal,
+	}
 	// When the passenger marks paid, also flip the payment state to
 	// 'pending' so the host has something to confirm against. The
 	// other signals leave payment_status alone — "no_show" and
 	// "cancelled" don't imply a payment ever happened.
 	if signal == "paid" {
-		booking.PaymentStatus = "pending"
+		updates["payment_status"] = "pending"
 	}
-	if err := database.Database.Db.Save(&booking).Error; err != nil {
+
+	firstDismiss := false
+	claimFirstDismiss := database.Database.Db.
+		Model(&models.Booking{}).
+		Where("id = ? AND passenger_id = ? AND dismissed_at IS NULL", booking.ID, user.ID).
+		Updates(updates)
+	if claimFirstDismiss.Error != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to record dismissal",
 		})
+	}
+	firstDismiss = claimFirstDismiss.RowsAffected > 0
+
+	if !firstDismiss {
+		rewrite := database.Database.Db.
+			Model(&models.Booking{}).
+			Where("id = ? AND passenger_id = ?", booking.ID, user.ID).
+			Updates(updates)
+		if rewrite.Error != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "failed to record dismissal",
+			})
+		}
+		if rewrite.RowsAffected == 0 {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "booking not found"})
+		}
+	}
+
+	booking.DismissedAt = &now
+	booking.DismissalSignal = signal
+	if signal == "paid" {
+		booking.PaymentStatus = "pending"
 	}
 
 	// Post a payment_marker into the ride group chat so the host
@@ -237,9 +267,9 @@ func DismissTripCard(c *fiber.Ctx) error {
 	// receive inline. Best-effort: a chat insert failure shouldn't
 	// fail the whole dismiss flow — the dismissal_signal is already
 	// recorded and we'll just be missing the chat surface. Fire
-	// only on "paid" (no_show and cancelled don't belong in the
-	// host's chat).
-	if signal == "paid" {
+	// only on the first "paid" dismissal (no_show and cancelled
+	// don't belong in the host's chat; re-dismisses are idempotent).
+	if signal == "paid" && firstDismiss {
 		amount := uint(0)
 		var ride models.Ride
 		if err := database.Database.Db.Select("id, total_price").First(&ride, booking.RideID).Error; err == nil {

@@ -17,11 +17,14 @@ import (
 
 // Ratings open up 12h after a ride's scheduled start time. Earlier
 // is too soon to know how the trip went; later means the memory's
-// stale. Window stays open until 30 days post-trip so people who
-// open the app a week later can still leave a rating.
+// stale. Direct rating stays open until 30 days post-trip so people
+// who open a specific old trip can still leave feedback, but the
+// persistent "rate this trip" prompt is capped at 7 days so one
+// missing counterpart does not pin a stale pill for a month.
 const (
 	ratingEligibleAfter = 12 * time.Hour
 	ratingEligibleUntil = 30 * 24 * time.Hour
+	ratingPromptUntil   = 7 * 24 * time.Hour
 )
 
 type pendingRateTarget struct {
@@ -247,8 +250,8 @@ func GetRideRatingEligibility(c *fiber.Ctx) error {
 // waiting for me?" lookup. Powers the in-app prompt that fires on
 // HomeScreen focus and the badge surface on the Trip History page.
 //
-// Returns the user's rides that are inside the rating window (12h
-// past start, < 30 days) AND where they participated AND haven't
+// Returns the user's rides that are inside the prompt window (12h
+// past start, < 7 days) AND where they participated AND haven't
 // rated at least one counterpart yet.
 //
 // Response:
@@ -277,8 +280,8 @@ func BuildPendingRatings(userID uuid.UUID) ([]PendingRatingRide, error) {
 	defer cancel()
 
 	now := time.Now()
-	windowFloor := now.Add(-ratingEligibleUntil) // earliest start_time we still allow rating for
-	windowCeil := now.Add(-ratingEligibleAfter)  // latest start_time that has opened the window
+	windowFloor := now.Add(-ratingPromptUntil)  // earliest start_time we still prompt for
+	windowCeil := now.Add(-ratingEligibleAfter) // latest start_time that has opened the window
 
 	// All rides the user was involved in (host OR accepted
 	// passenger) that fall inside the rating window. Only the five
@@ -397,6 +400,18 @@ func BuildPendingRatings(userID uuid.UUID) ([]PendingRatingRide, error) {
 		})
 	}
 
+	return out, nil
+}
+
+func BuildPendingRatingSet(userID uuid.UUID) (map[uuid.UUID]bool, error) {
+	pending, err := BuildPendingRatings(userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uuid.UUID]bool, len(pending))
+	for _, r := range pending {
+		out[r.RideID] = true
+	}
 	return out, nil
 }
 

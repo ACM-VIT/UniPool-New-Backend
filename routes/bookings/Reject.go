@@ -69,9 +69,32 @@ func RejectRoute(c *fiber.Ctx) error {
 		})
 	}
 
-	// Update the booking status to "rejected"
-	if err := tx.Model(&booking).Update("request_status", "rejected").Error; err != nil {
-		log.Printf("Error updating booking status for ID %v: %v\n", bookingID, err)
+	if booking.RequestStatus == "rejected" {
+		tx.Rollback()
+		return c.Status(200).JSON(fiber.Map{
+			"success":    true,
+			"message":    "Booking already rejected",
+			"booking_id": bookingID,
+			"booking":    booking,
+		})
+	}
+	if booking.RequestStatus != "pending" {
+		tx.Rollback()
+		return c.Status(409).JSON(fiber.Map{
+			"success":    false,
+			"error":      "Only pending bookings can be rejected",
+			"booking_id": bookingID,
+		})
+	}
+
+	// Only pending rows can transition to rejected. In particular,
+	// an accepted booking must be removed/cancelled through the delete
+	// path so booked_seats is decremented in the same transaction.
+	update := tx.Model(&models.Booking{}).
+		Where("id = ? AND request_status = ?", booking.ID, "pending").
+		Update("request_status", "rejected")
+	if update.Error != nil {
+		log.Printf("Error updating booking status for ID %v: %v\n", bookingID, update.Error)
 		tx.Rollback()
 		return c.Status(500).JSON(fiber.Map{
 			"success":    false,
@@ -79,6 +102,15 @@ func RejectRoute(c *fiber.Ctx) error {
 			"booking_id": bookingID,
 		})
 	}
+	if update.RowsAffected == 0 {
+		tx.Rollback()
+		return c.Status(409).JSON(fiber.Map{
+			"success":    false,
+			"error":      "Booking is no longer pending",
+			"booking_id": bookingID,
+		})
+	}
+	booking.RequestStatus = "rejected"
 
 	// Commit the transaction
 	if err := tx.Commit().Error; err != nil {

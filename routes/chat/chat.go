@@ -1,7 +1,9 @@
 package chat
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -220,8 +222,18 @@ func GetRideMessages(c *fiber.Ctx) error {
 // GetDMMessages mirrors GetRideMessages for direct-message rooms.
 func GetDMMessages(c *fiber.Ctx) error {
 	dmRoomID := c.Params("dm_room_id")
-	if !strings.HasPrefix(dmRoomID, "dm_") {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid dm room id format"})
+	user, ok := c.Locals("user").(models.User)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "User not authenticated or found"})
+	}
+	if _, allowed, err := canAccessDMRoom(user.ID, dmRoomID); err != nil {
+		if errors.Is(err, errInvalidDMRoomID) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid dm room id format"})
+		}
+		log.Printf("GetDMMessages: dm access lookup failed: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "dm access lookup failed"})
+	} else if !allowed {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not a participant in this dm"})
 	}
 
 	limit, before, hasBefore := parsePagination(c)
@@ -457,13 +469,18 @@ func fanOutRideNotificationsSystem(rideUUID uuid.UUID, actorID uuid.UUID, title,
 // recipient and FCM them.
 func SendDMMessage(c *fiber.Ctx) error {
 	dmRoomID := c.Params("dm_room_id")
-	if !strings.HasPrefix(dmRoomID, "dm_") {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid dm room id format"})
-	}
-
 	user, ok := c.Locals("user").(models.User)
 	if !ok {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "User not authenticated or found"})
+	}
+	if _, allowed, err := canAccessDMRoom(user.ID, dmRoomID); err != nil {
+		if errors.Is(err, errInvalidDMRoomID) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid dm room id format"})
+		}
+		log.Printf("SendDMMessage: dm access lookup failed: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "dm access lookup failed"})
+	} else if !allowed {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not a participant in this dm"})
 	}
 
 	var body struct {
@@ -1000,6 +1017,64 @@ func dmRoomID(a, b uuid.UUID) string {
 	return "dm_" + bs + "_" + as
 }
 
+var errInvalidDMRoomID = errors.New("invalid dm room id format")
+
+func parseDMRoomID(roomID string) (uuid.UUID, uuid.UUID, error) {
+	if !strings.HasPrefix(roomID, "dm_") {
+		return uuid.Nil, uuid.Nil, errInvalidDMRoomID
+	}
+	parts := strings.SplitN(strings.TrimPrefix(roomID, "dm_"), "_", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return uuid.Nil, uuid.Nil, errInvalidDMRoomID
+	}
+	a, err := uuid.Parse(parts[0])
+	if err != nil {
+		return uuid.Nil, uuid.Nil, errInvalidDMRoomID
+	}
+	b, err := uuid.Parse(parts[1])
+	if err != nil || a == b {
+		return uuid.Nil, uuid.Nil, errInvalidDMRoomID
+	}
+	return a, b, nil
+}
+
+// canAccessDMRoom gates direct messages to real UniPool relationships:
+// the caller must be one of the two encoded users, and one of them
+// must host a ride that the other has requested. That keeps the
+// pending-request DM feature from becoming an arbitrary user-to-user
+// messaging backchannel.
+func canAccessDMRoom(userID uuid.UUID, roomID string) (uuid.UUID, bool, error) {
+	a, b, err := parseDMRoomID(roomID)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	if userID != a && userID != b {
+		return uuid.Nil, false, nil
+	}
+
+	otherID := b
+	if userID == b {
+		otherID = a
+	}
+
+	var count int64
+	err = database.Database.Db.Raw(`
+		SELECT COUNT(*)
+		  FROM bookings b
+		  JOIN rides r ON r.id = b.ride_id
+		 WHERE b.deleted_at IS NULL
+		   AND r.deleted_at IS NULL
+		   AND (
+		        (r.host_user_id = ? AND b.passenger_id = ?)
+		     OR (r.host_user_id = ? AND b.passenger_id = ?)
+		   )
+	`, userID, otherID, otherID, userID).Scan(&count).Error
+	if err != nil {
+		return otherID, false, err
+	}
+	return otherID, count > 0, nil
+}
+
 // ----------------------------------------------------------------------
 // WebSocket handler & debug
 // ----------------------------------------------------------------------
@@ -1007,10 +1082,17 @@ func dmRoomID(a, b uuid.UUID) string {
 func WebSocketHandler(c *websocket.Conn) {
 	userID := c.Query("user_id")
 	roomID := c.Query("room_id")
+	token := c.Query("token")
 
 	if userID == "" || roomID == "" {
 		log.Printf("WebSocket connection rejected: missing user_id or room_id")
 		c.WriteMessage(websocket.CloseMessage, []byte("missing user_id or room_id"))
+		c.Close()
+		return
+	}
+	if token == "" {
+		log.Printf("WebSocket connection rejected: missing token")
+		c.WriteMessage(websocket.CloseMessage, []byte("missing token"))
 		c.Close()
 		return
 	}
@@ -1023,27 +1105,67 @@ func WebSocketHandler(c *websocket.Conn) {
 		return
 	}
 
+	if initializer.FirebaseApp == nil {
+		log.Printf("WebSocket connection rejected: Firebase not initialized")
+		c.WriteMessage(websocket.CloseMessage, []byte("auth unavailable"))
+		c.Close()
+		return
+	}
+	authClient, err := initializer.FirebaseApp.Auth(context.Background())
+	if err != nil {
+		log.Printf("WebSocket connection rejected: Firebase Auth error: %v", err)
+		c.WriteMessage(websocket.CloseMessage, []byte("auth unavailable"))
+		c.Close()
+		return
+	}
+	decodedToken, err := authClient.VerifyIDToken(context.Background(), token)
+	if err != nil || decodedToken == nil || decodedToken.Claims == nil {
+		log.Printf("WebSocket connection rejected: invalid token: %v", err)
+		c.WriteMessage(websocket.CloseMessage, []byte("invalid token"))
+		c.Close()
+		return
+	}
+	email, ok := decodedToken.Claims["email"].(string)
+	if !ok || strings.TrimSpace(email) == "" {
+		log.Printf("WebSocket connection rejected: token missing email")
+		c.WriteMessage(websocket.CloseMessage, []byte("invalid token"))
+		c.Close()
+		return
+	}
+
+	var socketUser models.User
+	if err := database.Database.Db.
+		Select("id", "name", "profile_picture_url").
+		Where("email = ?", email).
+		First(&socketUser).Error; err != nil {
+		log.Printf("WebSocket connection rejected: user lookup failed: %v", err)
+		c.WriteMessage(websocket.CloseMessage, []byte("user lookup failed"))
+		c.Close()
+		return
+	}
+	if socketUser.ID != userUUID {
+		log.Printf("WebSocket connection rejected: token user %s tried to attach as %s", socketUser.ID, userID)
+		c.WriteMessage(websocket.CloseMessage, []byte("user mismatch"))
+		c.Close()
+		return
+	}
+
 	if strings.HasPrefix(roomID, "dm_") {
-		userIds := strings.Split(strings.TrimPrefix(roomID, "dm_"), "_")
-		if len(userIds) != 2 {
-			log.Printf("WebSocket connection rejected: invalid DM room_id format: %s", roomID)
-			c.WriteMessage(websocket.CloseMessage, []byte("invalid DM room_id format"))
+		if _, allowed, err := canAccessDMRoom(socketUser.ID, roomID); err != nil {
+			if errors.Is(err, errInvalidDMRoomID) {
+				log.Printf("WebSocket connection rejected: invalid DM room_id format: %s", roomID)
+				c.WriteMessage(websocket.CloseMessage, []byte("invalid DM room_id format"))
+			} else {
+				log.Printf("WebSocket connection rejected: DM membership lookup failed: %v", err)
+				c.WriteMessage(websocket.CloseMessage, []byte("membership lookup failed"))
+			}
 			c.Close()
 			return
-		}
-		if userID != userIds[0] && userID != userIds[1] {
-			log.Printf("WebSocket connection rejected: user %s not in DM room %s", userID, roomID)
+		} else if !allowed {
+			log.Printf("WebSocket connection rejected: user %s not allowed in DM room %s", userID, roomID)
 			c.WriteMessage(websocket.CloseMessage, []byte("not a participant"))
 			c.Close()
 			return
-		}
-		for _, uid := range userIds {
-			if _, err := uuid.Parse(uid); err != nil {
-				log.Printf("WebSocket connection rejected: invalid user ID in DM room: %s", uid)
-				c.WriteMessage(websocket.CloseMessage, []byte("invalid user ID in DM room"))
-				c.Close()
-				return
-			}
 		}
 	} else {
 		rideUUID, err := uuid.Parse(roomID)
@@ -1055,7 +1177,7 @@ func WebSocketHandler(c *websocket.Conn) {
 		}
 		// Only host + accepted can join the group ride room. Pending
 		// requesters go through DM rooms instead.
-		role, _, lookupErr := getRideViewerRole(userUUID, rideUUID)
+		role, _, lookupErr := getRideViewerRole(socketUser.ID, rideUUID)
 		if lookupErr != nil {
 			log.Printf("WebSocket connection rejected: membership lookup failed: %v", lookupErr)
 			c.WriteMessage(websocket.CloseMessage, []byte("membership lookup failed"))
@@ -1068,16 +1190,6 @@ func WebSocketHandler(c *websocket.Conn) {
 			c.Close()
 			return
 		}
-	}
-
-	var socketUser models.User
-	if err := database.Database.Db.
-		Select("id", "name", "profile_picture_url").
-		First(&socketUser, userUUID).Error; err != nil {
-		log.Printf("WebSocket connection rejected: user lookup failed: %v", err)
-		c.WriteMessage(websocket.CloseMessage, []byte("user lookup failed"))
-		c.Close()
-		return
 	}
 
 	log.Printf("WebSocket connection established for user %s in room %s", userID, roomID)
@@ -1164,20 +1276,13 @@ func MarkDMRead(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "User not authenticated or found"})
 	}
 	dmRoomID := c.Params("dm_room_id")
-	if !strings.HasPrefix(dmRoomID, "dm_") {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid dm room id format"})
-	}
-
-	// Membership check: the dm_room_id encodes the two participants'
-	// UUIDs as `dm_<a>_<b>` (sorted). Reject if the caller's UUID
-	// isn't one of the two. Without this gate any authed user could
-	// mark anyone else's DMs read.
-	parts := strings.SplitN(strings.TrimPrefix(dmRoomID, "dm_"), "_", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid dm room id format"})
-	}
-	callerID := user.ID.String()
-	if parts[0] != callerID && parts[1] != callerID {
+	if _, allowed, err := canAccessDMRoom(user.ID, dmRoomID); err != nil {
+		if errors.Is(err, errInvalidDMRoomID) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid dm room id format"})
+		}
+		log.Printf("MarkDMRead: dm access lookup failed: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "dm access lookup failed"})
+	} else if !allowed {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not a participant in this dm"})
 	}
 

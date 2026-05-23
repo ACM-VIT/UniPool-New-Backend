@@ -3,6 +3,7 @@ package rides
 import (
 	"strings"
 	"unipool-backend/database"
+	"unipool-backend/helpers"
 	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
@@ -91,18 +92,11 @@ func GetRidePreview(c *fiber.Ctx) error {
 
 	firstName := firstNameOf(host.Name)
 
-	// Per-seat price: rides record the *total* fare; the share poster
-	// reads better as "₹X a seat", so we divide here once instead of
-	// having the website (or app) do its own arithmetic.
-	pricePerSeat := uint(0)
-	if ride.TotalSeats > 0 {
-		pricePerSeat = ride.TotalPrice / ride.TotalSeats
-	}
-
-	seatsAvailable := uint(0)
-	if ride.TotalSeats > ride.BookedSeats {
-		seatsAvailable = ride.TotalSeats - ride.BookedSeats
-	}
+	// Ride.TotalPrice is the passenger-facing per-seat amount in the
+	// mobile app. Keep the preview explicit so the launch site doesn't
+	// divide it again and advertise a bogus underpriced ride.
+	pricePerSeat := ride.TotalPrice
+	seatsAvailable := helpers.PassengerSeatsLeft(ride.TotalSeats, ride.BookedSeats)
 
 	resp := PreviewResponse{
 		ID:             ride.ID.String(),

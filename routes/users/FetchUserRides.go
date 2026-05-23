@@ -117,6 +117,16 @@ func BuildUserRides(viewerID uuid.UUID, scope string) ([]UserRidesResponse, erro
 		return nil, err
 	}
 
+	pendingRatingSet := map[uuid.UUID]bool{}
+	if scope != "upcoming" && len(rows) > 0 {
+		var err error
+		pendingRatingSet, err = rides.BuildPendingRatingSet(viewerID)
+		if err != nil {
+			log.Printf("BuildUserRides rating prompt lookup failed for user %s: %v", viewerID, err)
+			pendingRatingSet = map[uuid.UUID]bool{}
+		}
+	}
+
 	out := make([]UserRidesResponse, 0, len(rows))
 	for _, r := range rows {
 		// Reconstruct a partial Ride/Booking pair to feed the
@@ -138,6 +148,9 @@ func BuildUserRides(viewerID uuid.UUID, scope string) ([]UserRidesResponse, erro
 			}
 		}
 		viewerCtx := rides.ResolveViewerState(&ride, viewerID, viewerBooking)
+		if viewerCtx.State == rides.StatePast {
+			viewerCtx.Actions.CanRate = pendingRatingSet[r.RideID]
+		}
 
 		entry := UserRidesResponse{
 			RideID:          r.RideID,

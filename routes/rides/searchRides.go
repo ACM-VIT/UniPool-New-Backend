@@ -50,6 +50,13 @@ type RideCard struct {
 	TotalDistance  *float64  `json:"total_distance,omitempty"`
 	RelevanceScore float64   `json:"relevance_score,omitempty"`
 	MatchReason    string    `json:"match_reason,omitempty"`
+	// MatchSignals is the structured form of MatchReason: each entry
+	// is a self-contained chip the client can render as a typed pill
+	// (icon + label + optional detail) under the card. Ordered by
+	// internal priority so clients can render the first N without
+	// re-sorting. MatchReason stays as a back-compat string clients
+	// without a chip renderer can still display.
+	MatchSignals []MatchSignal `json:"match_signals,omitempty"`
 
 	// Server-computed UI state — see viewerState.go. Lets clients
 	// render the right CTA ("Request seat" vs "Your seat is
@@ -71,6 +78,8 @@ type SearchParams struct {
 	HasEndCoord   bool
 	Date          string
 	PreferredTime string
+	TargetTime    time.Time
+	HasTargetTime bool
 	MaxPrice      *uint
 	MinSeats      *uint
 	SortBy        string
@@ -116,6 +125,31 @@ func parseTimeWindow(dateStr string, timeStr string) (time.Time, time.Time, erro
 	start := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, loc)
 	end := start.Add(24*time.Hour - time.Nanosecond)
 	return start.UTC(), end.UTC(), nil
+}
+
+func parseSearchTargetTime(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t, true
+	}
+	loc := searchLocation()
+	if t, err := time.ParseInLocation("2006-01-02T15:04:05", raw, loc); err == nil {
+		return t, true
+	}
+	if t, err := time.ParseInLocation("2006-01-02 15:04", raw, loc); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
+
+func searchTimeWindowPreference(params SearchParams) string {
+	if params.HasTargetTime {
+		return ""
+	}
+	return params.PreferredTime
 }
 
 func buildLocationQuery(tx *gorm.DB, location string, hasCoord bool, lat, lon float64, radiusMeters float64, isStart bool) *gorm.DB {
@@ -235,97 +269,6 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 	return finalTx, 50.0
 }
 
-func calculateRelevanceScore(ride models.Ride, params SearchParams, startDist, endDist *float64) float64 {
-	score := 100.0
-
-	// Distance penalties (closer = better)
-	if startDist != nil {
-		score -= (*startDist) * 2 // -2 points per km from start
-	}
-	if endDist != nil {
-		score -= (*endDist) * 2 // -2 points per km from end
-	}
-
-	loc, err := time.LoadLocation("Asia/Kolkata")
-	if err != nil {
-		loc = time.UTC
-	}
-
-	now := time.Now().In(loc)
-	rideTime := ride.StartTime.In(loc)
-
-	nowDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
-	rideDateStart := time.Date(rideTime.Year(), rideTime.Month(), rideTime.Day(), 0, 0, 0, 0, loc)
-
-	timeDiff := ride.StartTime.Sub(now)
-	daysDiff := rideDateStart.Sub(nowDate).Hours() / 24
-
-	if timeDiff.Hours() < 0.5 {
-		score -= 30 // Too soon (less than 30 minutes)
-	} else if timeDiff.Hours() < 1 {
-		score -= 10 // A bit soon
-	} else if daysDiff == 0 && timeDiff.Hours() <= 6 {
-		score += 15 // Good timing (same day, 1-6 hours)
-	} else if daysDiff == 0 {
-		score += 10 // Same day but later
-	} else if daysDiff == 1 {
-		score += 5 // Tomorrow
-	} else if daysDiff <= 7 {
-		score += 2 // This week
-	} else if daysDiff > 7 {
-		score -= (daysDiff - 7) * 0.5 // Penalty for far future rides
-	}
-
-	// Preferred time matching
-	if params.PreferredTime != "" {
-		hour := rideTime.Hour()
-		switch params.PreferredTime {
-		case "morning":
-			if hour >= 6 && hour < 12 {
-				score += 10
-			}
-		case "afternoon":
-			if hour >= 12 && hour < 17 {
-				score += 10
-			}
-		case "evening":
-			if hour >= 17 && hour < 21 {
-				score += 10
-			}
-		case "night":
-			if hour >= 21 || hour < 6 {
-				score += 10
-			}
-		}
-	}
-
-	// Availability bonus
-	availableSeats := float64(ride.TotalSeats - ride.BookedSeats)
-	totalSeats := float64(ride.TotalSeats)
-	availabilityRatio := availableSeats / totalSeats
-	score += availabilityRatio * 15 // Up to 15 bonus points for full availability
-
-	// Multiple seats bonus
-	if availableSeats > 1 {
-		score += 5
-	}
-
-	// Price attractiveness (assuming lower prices are better)
-	if params.MaxPrice != nil && ride.TotalPrice <= *params.MaxPrice {
-		score += 10 // Bonus for being within budget
-		if ride.TotalPrice <= *params.MaxPrice/2 {
-			score += 5 // Extra bonus for being very affordable
-		}
-	}
-
-	// Capacity bonus
-	if params.MinSeats != nil && availableSeats >= float64(*params.MinSeats) {
-		score += 8
-	}
-
-	return score
-}
-
 // addMatchContext kept for backwards-compatibility with callers that don't
 // have host frequency. New caller path uses addMatchContextWithHost.
 func addMatchContext(card *RideCard, params SearchParams) {
@@ -334,6 +277,10 @@ func addMatchContext(card *RideCard, params SearchParams) {
 
 func addMatchContextWithHost(card *RideCard, params SearchParams, hostPastRides int64, repeatRoute bool) {
 	reasons := []string{}
+
+	if strings.TrimSpace(card.MatchReason) != "" {
+		reasons = append(reasons, card.MatchReason)
+	}
 
 	// "Repeat route" is the strongest signal we have — the user already
 	// took this exact origin → destination before. Goes to the top.
@@ -424,6 +371,17 @@ func parseSearchParams(c *fiber.Ctx) (SearchParams, error) {
 	params.Date = c.Query("date")
 	params.PreferredTime = c.Query("preferred_time")
 	params.SortBy = c.Query("sort_by", "relevance")
+
+	if t, ok := parseSearchTargetTime(c.Query("target_time")); ok {
+		params.TargetTime = t
+		params.HasTargetTime = true
+	} else if t, ok := parseSearchTargetTime(c.Query("start_time")); ok {
+		params.TargetTime = t
+		params.HasTargetTime = true
+	}
+	if params.HasTargetTime && params.Date == "" {
+		params.Date = params.TargetTime.In(searchLocation()).Format("2006-01-02")
+	}
 
 	limitStr := c.Query("limit", "20")
 	offsetStr := c.Query("offset", "0")
@@ -657,11 +615,11 @@ func SearchRides(c *fiber.Ctx) error {
 
 	tx := database.Database.Db.
 		Model(&models.Ride{}).
-		Where(helpers.PassengerSeatsLeftPredicate + " AND start_time > NOW()").
+		Where(helpers.PassengerSeatsLeftPredicate+" AND start_time > NOW()").
 		Where("host_user_id != ?", params.User.ID)
 
 	if params.Date != "" {
-		startTime, endTime, err := parseTimeWindow(params.Date, params.PreferredTime)
+		startTime, endTime, err := parseTimeWindow(params.Date, searchTimeWindowPreference(params))
 		if err != nil {
 			log.Printf("Error parsing date %q: %v\n", params.Date, err)
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid date format; expected YYYY-MM-DD"})
@@ -685,13 +643,13 @@ func SearchRides(c *fiber.Ctx) error {
 
 		if params.HasStartCoord {
 			coordinateTx = coordinateTx.Where(
-				"ST_DWithin(ST_SetSRID(ST_MakePoint(?::float8, ?::float8), 4326)::geography, ST_SetSRID(ST_MakePoint(start_longitude::float8, start_latitude::float8), 4326)::geography, ?) OR start_longitude IS NULL OR start_latitude IS NULL",
+				"start_longitude IS NOT NULL AND start_latitude IS NOT NULL AND ST_DWithin(ST_SetSRID(ST_MakePoint(?::float8, ?::float8), 4326)::geography, ST_SetSRID(ST_MakePoint(start_longitude::float8, start_latitude::float8), 4326)::geography, ?)",
 				params.StartLon, params.StartLat, usedRadius*1000,
 			)
 		}
-		if params.HasEndCoord {
+		if params.HasEndCoord && !params.HasStartCoord {
 			coordinateTx = coordinateTx.Where(
-				"ST_DWithin(ST_SetSRID(ST_MakePoint(?::float8, ?::float8), 4326)::geography, ST_SetSRID(ST_MakePoint(end_longitude::float8, end_latitude::float8), 4326)::geography, ?) OR end_longitude IS NULL OR end_latitude IS NULL",
+				"end_longitude IS NOT NULL AND end_latitude IS NOT NULL AND ST_DWithin(ST_SetSRID(ST_MakePoint(?::float8, ?::float8), 4326)::geography, ST_SetSRID(ST_MakePoint(end_longitude::float8, end_latitude::float8), 4326)::geography, ?)",
 				params.EndLon, params.EndLat, usedRadius*1000,
 			)
 		}
@@ -703,17 +661,20 @@ func SearchRides(c *fiber.Ctx) error {
 		if testCount > 0 {
 			tx = coordinateTx
 			useCoordinateSearch = true
+		} else if params.StartLocation == "" && params.EndLocation == "" {
+			tx = coordinateTx
+			useCoordinateSearch = true
 		}
 	}
 
-	if (!useCoordinateSearch || true) && (params.StartLocation != "" || params.EndLocation != "") {
+	if !useCoordinateSearch && (params.StartLocation != "" || params.EndLocation != "") {
 		textTx := database.Database.Db.
 			Model(&models.Ride{}).
-			Where(helpers.PassengerSeatsLeftPredicate + " AND start_time > NOW()").
+			Where(helpers.PassengerSeatsLeftPredicate+" AND start_time > NOW()").
 			Where("host_user_id != ?", params.User.ID)
 
 		if params.Date != "" {
-			startTime, endTime, _ := parseTimeWindow(params.Date, params.PreferredTime)
+			startTime, endTime, _ := parseTimeWindow(params.Date, searchTimeWindowPreference(params))
 			textTx = textTx.Where("start_time BETWEEN ? AND ?", startTime, endTime)
 		}
 		if params.MaxPrice != nil {
@@ -741,11 +702,19 @@ func SearchRides(c *fiber.Ctx) error {
 		}
 	}
 
+	candidateLimit := params.Limit * 8
+	if candidateLimit < 80 {
+		candidateLimit = 80
+	}
+	if candidateLimit > 250 {
+		candidateLimit = 250
+	}
+
 	var rides []models.Ride
 	if err := tx.
 		Preload("HostUser").
 		Order("start_time ASC").
-		Limit(params.Limit * 2).
+		Limit(candidateLimit).
 		Offset(params.Offset).
 		Find(&rides).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		log.Printf("Database error: %v", err)
@@ -759,11 +728,11 @@ func SearchRides(c *fiber.Ctx) error {
 
 		fallbackTx := database.Database.Db.
 			Model(&models.Ride{}).
-			Where(helpers.PassengerSeatsLeftPredicate + " AND start_time > NOW()").
+			Where(helpers.PassengerSeatsLeftPredicate+" AND start_time > NOW()").
 			Where("host_user_id != ?", params.User.ID)
 
 		if params.Date != "" {
-			startTime, endTime, _ := parseTimeWindow(params.Date, params.PreferredTime)
+			startTime, endTime, _ := parseTimeWindow(params.Date, searchTimeWindowPreference(params))
 			fallbackTx = fallbackTx.Where("start_time BETWEEN ? AND ?", startTime, endTime)
 		}
 
@@ -790,7 +759,7 @@ func SearchRides(c *fiber.Ctx) error {
 		if err := fallbackTx.
 			Preload("HostUser").
 			Order("start_time ASC").
-			Limit(params.Limit * 2).
+			Limit(candidateLimit).
 			Offset(params.Offset).
 			Find(&rides).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Printf("Fallback search error: %v", err)
@@ -954,7 +923,9 @@ func SearchRides(c *fiber.Ctx) error {
 			card.TotalDistance = card.EndDistance
 		}
 
-		card.RelevanceScore = calculateRelevanceScore(ride, params, startDist, endDist)
+		scored := scoreRideForSearch(ride, params, startDist, endDist)
+		card.RelevanceScore = scored.Score
+		card.MatchReason = scored.MatchReason
 
 		// Mild relevance boost for proven hosts so users see them first
 		// when sorting by relevance. Capped so it never dominates
@@ -979,6 +950,20 @@ func SearchRides(c *fiber.Ctx) error {
 		}
 
 		addMatchContextWithHost(&card, params, hostFreq[ride.HostUserID], repeatRoute)
+
+		// Structured signal list — chip rows the client renders under the
+		// card. Built from the same scoring/context inputs but as
+		// machine-parseable objects rather than a comma-joined string.
+		card.MatchSignals = buildMatchSignals(
+			scored,
+			ride,
+			params,
+			startDist,
+			endDist,
+			hostFreq[ride.HostUserID],
+			repeatRoute,
+			time.Now(),
+		)
 
 		response = append(response, card)
 	}
@@ -1036,9 +1021,11 @@ func SearchRides(c *fiber.Ctx) error {
 			excludeID = params.User.ID
 		}
 		startTime := time.Now().Add(time.Hour)
-		if params.Date != "" {
-			if t, err := time.Parse("2006-01-02", params.Date); err == nil {
-				startTime = t
+		if params.HasTargetTime {
+			startTime = params.TargetTime
+		} else if params.Date != "" {
+			if t, err := time.ParseInLocation("2006-01-02", params.Date, searchLocation()); err == nil {
+				startTime = t.Add(12 * time.Hour)
 			}
 		}
 		matches, mErr := FindStrictRouteMatches(strictCtx, StrictMatchParams{
@@ -1073,6 +1060,8 @@ func SearchRides(c *fiber.Ctx) error {
 			"has_end_coord":   params.HasEndCoord,
 			"start_location":  params.StartLocation,
 			"end_location":    params.EndLocation,
+			"target_time":     params.TargetTime,
+			"has_target_time": params.HasTargetTime,
 		},
 	})
 }

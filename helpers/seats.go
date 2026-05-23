@@ -86,9 +86,12 @@ const MinSeatsLeftPredicate = "(total_seats - 1 - booked_seats) >= ?"
 // the ride pointless. Enforced at /ride/create.
 const MinTotalSeats uint = 2
 
-// MaxTotalSeats is a sanity cap — even a Tata Winger / 7-seat SUV
-// driving + 7 passengers is 8. The number isn't strictly enforced
-// today (the create form's stepper handles UX bounds) but the
-// constant lives here so a future server-side validator can
-// reference it without picking a different number.
-const MaxTotalSeats uint = 9
+// MaxTotalSeats is a sanity cap — set at 20 to cover everything
+// from a hatchback up to a full-size Tempo Traveller / minibus
+// (driver + ~19 passengers). 20 is also the threshold at which
+// the CreateRide stepper lands on the UFO Easter-egg art, so it's
+// the largest count the host can post from the app. The number
+// isn't strictly enforced today (the create form's stepper handles
+// UX bounds) but the constant lives here so a future server-side
+// validator can reference it without picking a different number.
+const MaxTotalSeats uint = 20

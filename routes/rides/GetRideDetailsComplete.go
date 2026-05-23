@@ -32,9 +32,9 @@ type BookingDetail struct {
 	// host's Ride Management screen. UPI VPA powers the "Pay" pill,
 	// is_email_verified drives the verified checkmark, institute lets
 	// the host see "VIT" / "Stanford" at a glance.
-	PassengerUPIVPA            string `json:"passenger_upi_vpa,omitempty"`
-	PassengerIsVerified        bool   `json:"passenger_is_verified"`
-	PassengerInstituteName     string `json:"passenger_institute_name,omitempty"`
+	PassengerUPIVPA        string `json:"passenger_upi_vpa,omitempty"`
+	PassengerIsVerified    bool   `json:"passenger_is_verified"`
+	PassengerInstituteName string `json:"passenger_institute_name,omitempty"`
 }
 
 type RideDetailsComplete struct {
@@ -47,7 +47,7 @@ type RideDetailsComplete struct {
 	// Vehicle ID surfaced *only* to host + confirmed passengers
 	// (the pickup audience). Other viewers get an empty string so
 	// random rides on the map don't leak the plate.
-	VehicleInfo string `json:"vehicle_info,omitempty"`
+	VehicleInfo    string   `json:"vehicle_info,omitempty"`
 	StartLocation  string   `json:"start_location"`
 	EndLocation    string   `json:"end_location"`
 	StartLatitude  *float64 `json:"start_latitude,omitempty"`
@@ -116,11 +116,11 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 	// signed in to a verified institute" case and ~75ms when the
 	// host institute lookup is needed.
 	var (
-		ride            models.Ride
-		bookings        []models.Booking
-		rideErr         error
-		bookingsErr     error
-		wg              sync.WaitGroup
+		ride        models.Ride
+		bookings    []models.Booking
+		rideErr     error
+		bookingsErr error
+		wg          sync.WaitGroup
 	)
 	wg.Add(2)
 	go func() {
@@ -223,16 +223,11 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 	bookingDetails := make([]BookingDetail, 0, len(bookings))
 	bookedSeats := 0
 	var viewerBooking *models.Booking
+	isViewerHost := user.ID == ride.HostUserID
 	for i := range bookings {
 		b := bookings[i]
 		if b.PassengerID == ride.HostUserID {
 			continue // host doesn't appear in the bookings list
-		}
-		passenger, ok := passengerByID[b.PassengerID]
-		if !ok {
-			// Couldn't load this passenger — skip the row rather
-			// than emit half-empty data.
-			continue
 		}
 		if b.PassengerID == user.ID {
 			bk := b
@@ -240,6 +235,19 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 		}
 		if b.RequestStatus == "accepted" {
 			bookedSeats++
+		}
+		// Booking passenger details include email/contact/UPI. Only
+		// the host gets the full management list; non-host viewers get
+		// their own booking row only so viewer_state hydration still
+		// works without leaking other passengers' PII.
+		if !isViewerHost && b.PassengerID != user.ID {
+			continue
+		}
+		passenger, ok := passengerByID[b.PassengerID]
+		if !ok {
+			// Couldn't load this passenger — skip the row rather
+			// than emit half-empty data.
+			continue
 		}
 		passengerInstituteName := ""
 		if passenger.Institute != nil {
@@ -260,7 +268,20 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 		})
 	}
 
-	viewerCtx := ResolveViewerState(&ride, user.ID, viewerBooking)
+	// Use the live accepted-booking count we just computed instead of
+	// trusting rides.booked_seats blindly; legacy rows can drift, but
+	// the detail page already has the authoritative bookings slice.
+	rideForViewer := ride
+	rideForViewer.BookedSeats = uint(bookedSeats)
+	viewerCtx := ResolveViewerState(&rideForViewer, user.ID, viewerBooking)
+	if viewerCtx.State == StatePast {
+		pendingRatingSet, err := BuildPendingRatingSet(user.ID)
+		if err != nil {
+			log.Printf("rating prompt lookup failed for user %s ride %s: %v", user.ID, ride.ID, err)
+		} else {
+			viewerCtx.Actions.CanRate = pendingRatingSet[ride.ID]
+		}
+	}
 
 	// Vehicle info only shown to host + confirmed passengers — the
 	// audience that's actually meeting at the pickup point. Random
@@ -278,22 +299,22 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 		HostInstituteName:         hostInstituteName,
 		HostSameInstituteAsViewer: hostSameInstituteAsViewer,
 		VehicleInfo:               vehicleInfoForViewer,
-		StartLocation:   ride.StartLocation,
-		EndLocation:     ride.EndLocation,
-		StartLatitude:   ride.StartLatitude,
-		StartLongitude:  ride.StartLongitude,
-		EndLatitude:     ride.EndLatitude,
-		EndLongitude:    ride.EndLongitude,
-		StartTime:       ride.StartTime.Format("2006-01-02T15:04:05Z07:00"),
-		TotalPrice:      int(ride.TotalPrice),
-		TotalSeats:      int(ride.TotalSeats),
-		BookedSeats:     bookedSeats,
-		IsOngoing:       ride.IsOngoing > 0,
-		CreatedAt:       ride.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-		IsUserHost:      user.ID == ride.HostUserID,
-		ViewerState:     viewerCtx.State,
-		Actions:         viewerCtx.Actions,
-		ViewerBookingID: viewerCtx.BookingID,
+		StartLocation:             ride.StartLocation,
+		EndLocation:               ride.EndLocation,
+		StartLatitude:             ride.StartLatitude,
+		StartLongitude:            ride.StartLongitude,
+		EndLatitude:               ride.EndLatitude,
+		EndLongitude:              ride.EndLongitude,
+		StartTime:                 ride.StartTime.Format("2006-01-02T15:04:05Z07:00"),
+		TotalPrice:                int(ride.TotalPrice),
+		TotalSeats:                int(ride.TotalSeats),
+		BookedSeats:               bookedSeats,
+		IsOngoing:                 ride.IsOngoing > 0,
+		CreatedAt:                 ride.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+		IsUserHost:                user.ID == ride.HostUserID,
+		ViewerState:               viewerCtx.State,
+		Actions:                   viewerCtx.Actions,
+		ViewerBookingID:           viewerCtx.BookingID,
 		Host: PassengerDetail{
 			ID:                host.ID.String(),
 			Name:              host.Name,
