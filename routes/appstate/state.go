@@ -150,20 +150,38 @@ func parseLocation(c *fiber.Ctx) (float64, float64, bool, error) {
 }
 
 func buildUserSummary(ctx context.Context, user models.User) (fiber.Map, error) {
-	var totalHostedRides int64
-	if err := database.Database.Db.WithContext(ctx).
-		Model(&models.Ride{}).
-		Where("host_user_id = ?", user.ID).
-		Count(&totalHostedRides).Error; err != nil {
-		return nil, err
+	// The hosted-rides count and the user-with-institute load are
+	// completely independent — run them concurrently so total wall
+	// time is max(t1, t2) instead of t1 + t2. With a ~25ms DB
+	// round-trip this halves the slowest path inside /app/state.
+	var (
+		totalHostedRides int64
+		full             models.User
+		countErr         error
+		loadErr          error
+		wg               sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		countErr = database.Database.Db.WithContext(ctx).
+			Model(&models.Ride{}).
+			Where("host_user_id = ?", user.ID).
+			Count(&totalHostedRides).Error
+	}()
+	go func() {
+		defer wg.Done()
+		loadErr = database.Database.Db.WithContext(ctx).
+			Preload("Institute").
+			Where("id = ?", user.ID).
+			First(&full).Error
+	}()
+	wg.Wait()
+	if countErr != nil {
+		return nil, countErr
 	}
-
-	var full models.User
-	if err := database.Database.Db.WithContext(ctx).
-		Preload("Institute").
-		Where("id = ?", user.ID).
-		First(&full).Error; err != nil {
-		return nil, err
+	if loadErr != nil {
+		return nil, loadErr
 	}
 
 	return fiber.Map{

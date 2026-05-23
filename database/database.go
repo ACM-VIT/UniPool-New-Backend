@@ -44,13 +44,26 @@ func ConnectToDB() {
 
 	log.Println("Connecting to database...")
 
-	// Configure GORM with better settings
+	// Configure GORM. PrepareStmt caches plan-resolved statements
+	// across calls, which is the single biggest CockroachDB Cloud win
+	// because the wire-protocol parse step is what dominates a fast
+	// query's latency.
+	//
+	// SlowThreshold sits at 300ms intentionally. The app server runs
+	// in the same AWS region as the CockroachDB Cloud cluster but
+	// over a separate VPC, so a freshly-opened connection
+	// (TLS+handshake+pool resolution) routinely lands in the
+	// 200-280ms band on the first query of its lifetime. Logging at
+	// 100ms was drowning out genuine slow paths under that handshake
+	// noise. 300ms keeps signal-to-noise honest while still flagging
+	// any real query regression like the PostGIS bug we caught
+	// recently.
 	config := &gorm.Config{
-		PrepareStmt: true, // Enable prepared statements for better performance
+		PrepareStmt: true,
 		Logger: logger.New(
 			log.New(os.Stdout, "\r\n", log.LstdFlags),
 			logger.Config{
-				SlowThreshold: 100 * time.Millisecond, // Reduced from default 200ms
+				SlowThreshold: 300 * time.Millisecond,
 				LogLevel:      logger.Warn,
 				Colorful:      true,
 			},
@@ -72,8 +85,13 @@ func ConnectToDB() {
 	if maxIdleConns > maxOpenConns {
 		maxIdleConns = maxOpenConns
 	}
-	connMaxLifetimeMinutes := envInt("DB_CONN_MAX_LIFETIME_MINUTES", 10)
-	connMaxIdleMinutes := envInt("DB_CONN_MAX_IDLE_MINUTES", 2)
+	connMaxLifetimeMinutes := envInt("DB_CONN_MAX_LIFETIME_MINUTES", 30)
+	// 15 minutes is intentional: the notification scheduler ticks every
+	// 10 minutes and was always coming back to a closed connection,
+	// paying TLS+handshake of ~500-700ms on every tick (visible in the
+	// slow-query log). With a 15m idle window the scheduler's
+	// connection survives across ticks.
+	connMaxIdleMinutes := envInt("DB_CONN_MAX_IDLE_MINUTES", 15)
 
 	sqlDB.SetMaxOpenConns(maxOpenConns)
 	sqlDB.SetMaxIdleConns(maxIdleConns)
