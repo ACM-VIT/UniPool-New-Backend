@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 	"unipool-backend/database"
+	"unipool-backend/helpers"
 	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
@@ -84,13 +85,25 @@ func CreateRide(c *fiber.Ctx) error {
 			   })
 	   }
 
-	// Check if the host user has enough seats
-	   if ride.TotalSeats <= ride.BookedSeats {
-			   log.Printf("Total seats available should be more than booked seats")
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Total seats available should be more than booked seats",
-			   })
-	   }
+	// Minimum total_seats is 2 (host + 1 passenger). Anything less
+	// means there's no passenger slot to offer — the ride wouldn't
+	// be useful to anyone. See helpers/seats.go for the canonical
+	// contract on what total_seats includes.
+	if ride.TotalSeats < helpers.MinTotalSeats {
+		log.Printf("Total seats must be at least %d (host + 1 passenger)", helpers.MinTotalSeats)
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Total seats must include you plus at least one passenger",
+		})
+	}
+	// Booked seats can never exceed the passenger capacity at
+	// create time. New rides always have booked_seats=0, so this
+	// is really only defensive — but cheap belt-and-braces.
+	if ride.BookedSeats > helpers.PassengerCapacity(ride.TotalSeats) {
+		log.Printf("Booked seats exceed passenger capacity")
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Booked seats cannot exceed passenger capacity",
+		})
+	}
 
 	// Women-only rides: server-side gate. Only female hosts can flag a
 	// ride as same-gender. Without this check, anyone (incl. male

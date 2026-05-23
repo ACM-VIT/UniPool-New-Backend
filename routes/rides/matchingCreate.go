@@ -161,8 +161,13 @@ func FindStrictRouteMatches(ctx context.Context, p StrictMatchParams) ([]Matchin
 		`, p.StartLon, p.StartLat, p.EndLon, p.EndLat).
 		Joins("LEFT JOIN users u ON u.id = r.host_user_id").
 		Where("r.start_time BETWEEN ? AND ?", windowStart, windowEnd).
+		// Equivalent of helpers.PassengerSeatsLeftPredicate but
+		// counted live from the bookings table (booked_seats can
+		// briefly disagree mid-transaction during accept/reject).
+		// `r.total_seats - 1` discounts the host's seat — see
+		// helpers/seats.go for the canonical contract.
 		Where(`
-			r.total_seats > (
+			r.total_seats - 1 > (
 				SELECT COUNT(*) FROM bookings b
 				WHERE b.ride_id = r.id
 				  AND b.request_status = 'accepted'

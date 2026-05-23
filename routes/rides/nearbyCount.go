@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 	"unipool-backend/database"
+	"unipool-backend/helpers"
 	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
@@ -95,8 +96,20 @@ func LoadNearbyRides(ctx context.Context, lat, lng, radius float64, limit int) (
 			booked_seats,
 			total_price
 		`).
-		Where("start_time >= ?", time.Now()).
-		Where("booked_seats < total_seats").
+		// Strict inequality (`>`, not `>=`) so a ride whose scheduled
+		// start_time has been reached drops out of the home-map pin
+		// set immediately. A ride pin only makes sense to surface
+		// while the trip is still in the future — once the host has
+		// (or should have) left, the pickup point is a stale waypoint
+		// the user can't act on. is_ongoing handles the
+		// host-explicitly-started case; this clause covers the much
+		// more common "host scheduled it and the clock just ticked
+		// past" case where nobody flipped a flag.
+		Where("start_time > ?", time.Now()).
+		// Predicate from helpers/seats.go — discounts the host's
+		// seat from total_seats so a ride with `booked_seats ==
+		// total_seats - 1` is treated as full.
+		Where(helpers.PassengerSeatsLeftPredicate).
 		Where("is_ongoing = 0").
 		Where("start_longitude IS NOT NULL AND start_latitude IS NOT NULL").
 		Where("start_latitude BETWEEN ? AND ?", bounds.minLat, bounds.maxLat).
@@ -157,8 +170,16 @@ func NearbyRidesCount(c *fiber.Ctx) error {
 
 	var count int64
 	err := database.Database.Db.WithContext(ctx).Model(&models.Ride{}).
-		Where("start_time >= ?", time.Now()).
-		Where("booked_seats < total_seats").
+		// Matches the strict `>` filter used by NearbyRides above for
+		// the same reason — a ride that has reached its scheduled
+		// start_time should drop out of the count too, otherwise the
+		// "carpools within 5km" pill on Home would over-count by
+		// every just-departed ride.
+		Where("start_time > ?", time.Now()).
+		// Predicate from helpers/seats.go — discounts the host's
+		// seat from total_seats so a ride with `booked_seats ==
+		// total_seats - 1` is treated as full.
+		Where(helpers.PassengerSeatsLeftPredicate).
 		Where("is_ongoing = 0").
 		Where("start_longitude IS NOT NULL AND start_latitude IS NOT NULL").
 		Where("start_latitude BETWEEN ? AND ?", bounds.minLat, bounds.maxLat).

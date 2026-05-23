@@ -3,6 +3,7 @@ package bookings
 import (
 	"log"
 	"unipool-backend/database"
+	"unipool-backend/helpers"
 	"unipool-backend/models"
 	"unipool-backend/services"
 
@@ -92,7 +93,11 @@ func AcceptRoute(c *fiber.Ctx) error {
 	// Atomically reserve a seat. The WHERE clause is rechecked under
 	// the row lock, so concurrent accepts cannot overbook the ride.
 	seatUpdate := tx.Model(&models.Ride{}).
-		Where("id = ? AND booked_seats < total_seats", ride.ID).
+		// Source of truth for the seat-availability gate lives in
+		// helpers/seats.go. The predicate compiles to
+		// "booked_seats < total_seats - 1" — the `- 1` discounts
+		// the host's seat from total_seats.
+		Where("id = ? AND "+helpers.PassengerSeatsLeftPredicate, ride.ID).
 		Update("booked_seats", gorm.Expr("booked_seats + 1"))
 	if seatUpdate.Error != nil {
 		log.Printf("Error updating booked seats for ride with ID %v: %v\n", ride.ID, seatUpdate.Error)

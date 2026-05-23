@@ -184,7 +184,7 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 	for _, radius := range radiusOptions {
 		var count int64
 		testTx := database.Database.Db.Model(&models.Ride{}).
-			Where("booked_seats < total_seats AND start_time > NOW()")
+			Where(helpers.PassengerSeatsLeftPredicate + " AND start_time > NOW()")
 
 		if hasStartCoord {
 			testTx = testTx.Where(
@@ -556,10 +556,13 @@ func SearchRides(c *fiber.Ctx) error {
 			query += `, NULL as end_distance`
 		}
 
+		// Raw SQL fragment — can't use a Go const inside a string literal
+		// without `+`, so inline the predicate here. Mirrors
+		// helpers.PassengerSeatsLeftPredicate exactly.
 		query += `
-			FROM rides 
-			WHERE booked_seats < total_seats 
-				AND start_time > NOW() 
+			FROM rides
+			WHERE booked_seats < total_seats - 1
+				AND start_time > NOW()
 				AND (start_latitude IS NOT NULL OR end_latitude IS NOT NULL)
 			ORDER BY `
 
@@ -654,7 +657,7 @@ func SearchRides(c *fiber.Ctx) error {
 
 	tx := database.Database.Db.
 		Model(&models.Ride{}).
-		Where("booked_seats < total_seats AND start_time > NOW()").
+		Where(helpers.PassengerSeatsLeftPredicate + " AND start_time > NOW()").
 		Where("host_user_id != ?", params.User.ID)
 
 	if params.Date != "" {
@@ -671,7 +674,7 @@ func SearchRides(c *fiber.Ctx) error {
 	}
 
 	if params.MinSeats != nil {
-		tx = tx.Where("(total_seats - booked_seats) >= ?", *params.MinSeats)
+		tx = tx.Where(helpers.MinSeatsLeftPredicate, *params.MinSeats)
 	}
 
 	usedRadius := params.RadiusKm
@@ -706,7 +709,7 @@ func SearchRides(c *fiber.Ctx) error {
 	if (!useCoordinateSearch || true) && (params.StartLocation != "" || params.EndLocation != "") {
 		textTx := database.Database.Db.
 			Model(&models.Ride{}).
-			Where("booked_seats < total_seats AND start_time > NOW()").
+			Where(helpers.PassengerSeatsLeftPredicate + " AND start_time > NOW()").
 			Where("host_user_id != ?", params.User.ID)
 
 		if params.Date != "" {
@@ -717,7 +720,7 @@ func SearchRides(c *fiber.Ctx) error {
 			textTx = textTx.Where("total_price <= ?", *params.MaxPrice)
 		}
 		if params.MinSeats != nil {
-			textTx = textTx.Where("(total_seats - booked_seats) >= ?", *params.MinSeats)
+			textTx = textTx.Where(helpers.MinSeatsLeftPredicate, *params.MinSeats)
 		}
 
 		if params.StartLocation != "" {
@@ -756,7 +759,7 @@ func SearchRides(c *fiber.Ctx) error {
 
 		fallbackTx := database.Database.Db.
 			Model(&models.Ride{}).
-			Where("booked_seats < total_seats AND start_time > NOW()").
+			Where(helpers.PassengerSeatsLeftPredicate + " AND start_time > NOW()").
 			Where("host_user_id != ?", params.User.ID)
 
 		if params.Date != "" {
