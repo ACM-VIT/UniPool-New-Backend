@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"unipool-backend/models"
 )
 
 func TestMatchingCreate_StrictBothEndsWithinRadius(t *testing.T) {
@@ -89,18 +91,18 @@ func TestMatchingCreate_RespectsTimeWindow(t *testing.T) {
 	host := SeedUser(t, db, "Host", "win-host@vitstudent.ac.in", &inst.ID)
 
 	now := time.Now().UTC()
-	// Inside-window ride at +3h from "now" requested time, well
-	// under the 4h default window.
+	// Inside-window ride at +2h from "now" — comfortably under
+	// the 3h default window (avoids float-rounded boundary cases).
 	inWindow := SeedRide(t, db, host, RideOpts{
 		StartLat: FloatPtr(12.9692), StartLon: FloatPtr(79.1559),
 		EndLat: FloatPtr(12.9698), EndLon: FloatPtr(79.1370),
-		StartTime: now.Add(3 * time.Hour),
+		StartTime: now.Add(2 * time.Hour),
 	})
-	// Outside-window ride at +10h. Must NOT match the default 4h.
+	// Outside-window ride at +8h. Must NOT match the default 3h.
 	_ = SeedRide(t, db, host, RideOpts{
 		StartLat: FloatPtr(12.9692), StartLon: FloatPtr(79.1559),
 		EndLat: FloatPtr(12.9698), EndLon: FloatPtr(79.1370),
-		StartTime: now.Add(10 * time.Hour),
+		StartTime: now.Add(8 * time.Hour),
 	})
 
 	app := SetupTestApp(t)
@@ -174,17 +176,28 @@ func TestMatchingCreate_SkipsFullRides(t *testing.T) {
 	ResetDB(t)
 	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
 	host := SeedUser(t, db, "Host", "full-host@vitstudent.ac.in", &inst.ID)
+	p1 := SeedUser(t, db, "P1", "full-p1@vitstudent.ac.in", &inst.ID)
+	p2 := SeedUser(t, db, "P2", "full-p2@vitstudent.ac.in", &inst.ID)
+	p3 := SeedUser(t, db, "P3", "full-p3@vitstudent.ac.in", &inst.ID)
 
 	startT := time.Now().Add(2 * time.Hour).UTC()
-	// Ride with no open seats. Should NOT match — a full ride is
-	// no use as a "join instead" suggestion.
-	_ = SeedRide(t, db, host, RideOpts{
+	// 3-seat ride. We don't set BookedSeats — the matching query
+	// no longer trusts that cached counter; it counts real
+	// accepted bookings. Create three actual accepted bookings
+	// so the live count fills the ride.
+	full := SeedRide(t, db, host, RideOpts{
 		StartLat: FloatPtr(12.9692), StartLon: FloatPtr(79.1559),
 		EndLat: FloatPtr(12.9698), EndLon: FloatPtr(79.1370),
-		StartTime:   startT,
-		TotalSeats:  3,
-		BookedSeats: 3,
+		StartTime:  startT,
+		TotalSeats: 3,
 	})
+	for _, p := range []models.User{p1, p2, p3} {
+		if err := db.Create(&models.Booking{
+			RideID: full.ID, PassengerID: p.ID, RequestStatus: "accepted",
+		}).Error; err != nil {
+			t.Fatalf("seed booking: %v", err)
+		}
+	}
 
 	app := SetupTestApp(t)
 	resp := Do(t, app, http.MethodGet,
@@ -198,7 +211,86 @@ func TestMatchingCreate_SkipsFullRides(t *testing.T) {
 	}
 	ReadJSON(t, resp, &body)
 	if body.Count != 0 {
-		t.Errorf("expected 0 (full ride filtered), got %d", body.Count)
+		t.Errorf("expected 0 (full ride filtered by live accepted-count), got %d", body.Count)
+	}
+}
+
+// TestMatchingCreate_IgnoresStaleBookedSeatsCounter explicitly
+// guards the booked_seats-counter-drift bug we just fixed. A ride
+// whose cached counter says "full" but has zero actual accepted
+// bookings should STILL match — because the real-seats subquery
+// is the source of truth.
+func TestMatchingCreate_IgnoresStaleBookedSeatsCounter(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "drift-host@vitstudent.ac.in", &inst.ID)
+
+	startT := time.Now().Add(2 * time.Hour).UTC()
+	// Cached counter says the ride is full (3 / 3) but there are
+	// no actual accepted bookings. Pre-fix this was a false
+	// negative; post-fix it matches because the live count is 0.
+	target := SeedRide(t, db, host, RideOpts{
+		StartLat: FloatPtr(12.9692), StartLon: FloatPtr(79.1559),
+		EndLat: FloatPtr(12.9698), EndLon: FloatPtr(79.1370),
+		StartTime:   startT,
+		TotalSeats:  3,
+		BookedSeats: 3, // intentionally drifted
+	})
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet,
+		"/ride/matching-create?start_lat=12.9692&start_lon=79.1559&end_lat=12.9698&end_lon=79.1370&start_time="+startT.Format(time.RFC3339),
+		nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Matches []struct{ ID string `json:"id"` } `json:"matches"`
+	}
+	ReadJSON(t, resp, &body)
+	if len(body.Matches) != 1 || body.Matches[0].ID != target.ID.String() {
+		t.Errorf("expected the drift-counter ride to match (live count = 0), got %v", body.Matches)
+	}
+}
+
+// TestMatchingCreate_ExcludesRidesUserAlreadyBooked locks in the
+// "don't nag the user with a ride they've already touched"
+// safeguard. Whether they were accepted, are pending, or got
+// rejected — they've seen this ride and shouldn't see it again
+// from the create-ride suggestion surface.
+func TestMatchingCreate_ExcludesRidesUserAlreadyBooked(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "dup-host@vitstudent.ac.in", &inst.ID)
+	me := SeedUser(t, db, "Me", "dup-me@vitstudent.ac.in", &inst.ID)
+
+	startT := time.Now().Add(2 * time.Hour).UTC()
+	for _, status := range []string{"accepted", "pending", "rejected"} {
+		r := SeedRide(t, db, host, RideOpts{
+			StartLat: FloatPtr(12.9692), StartLon: FloatPtr(79.1559),
+			EndLat: FloatPtr(12.9698), EndLon: FloatPtr(79.1370),
+			StartTime: startT,
+		})
+		if err := db.Create(&models.Booking{
+			RideID: r.ID, PassengerID: me.ID, RequestStatus: status,
+		}).Error; err != nil {
+			t.Fatalf("seed %s booking: %v", status, err)
+		}
+	}
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet,
+		"/ride/matching-create?start_lat=12.9692&start_lon=79.1559&end_lat=12.9698&end_lon=79.1370&start_time="+startT.Format(time.RFC3339),
+		nil, AsUser(me.Email))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct{ Count int `json:"count"` }
+	ReadJSON(t, resp, &body)
+	if body.Count != 0 {
+		t.Errorf("expected 0 (rides with my existing bookings filtered out), got %d", body.Count)
 	}
 }
 
@@ -215,10 +307,12 @@ func TestMatchingCreate_OrdersByCombinedDistance(t *testing.T) {
 		EndLat: FloatPtr(12.9700), EndLon: FloatPtr(79.1373),
 		StartTime: startT,
 	})
-	// Farther match (~700m on each end, still inside 1km radius)
+	// Farther match (~300m on each end, still inside default 500m).
+	// Pre-tightening this was at ~870m for the 1km default; the
+	// new 500m default makes that drift out of the radius.
 	_ = SeedRide(t, db, host, RideOpts{
-		StartLat: FloatPtr(12.9755), StartLon: FloatPtr(79.1625),
-		EndLat: FloatPtr(12.9760), EndLon: FloatPtr(79.1305),
+		StartLat: FloatPtr(12.9720), StartLon: FloatPtr(79.1585),
+		EndLat: FloatPtr(12.9722), EndLon: FloatPtr(79.1347),
 		StartTime: startT,
 	})
 

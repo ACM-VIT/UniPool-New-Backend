@@ -254,3 +254,87 @@ func assertIDPresent(t *testing.T, rides []map[string]any, want string) {
 	}
 	t.Errorf("expected ride %s in response; got %v", want, idsOf(rides))
 }
+
+// TestRideSearch_SurfacesStrictMatches locks in the contract that
+// /ride/search now returns a `strict_matches` array alongside the
+// regular fuzzy `rides` list. CreateRide reads only this field for
+// the "you could just join one of these" suggestion; the search
+// UI uses it to flag "Best match" badges on overlapping rows.
+//
+// Field is present even when empty (clients shouldn't have to
+// null-guard); populated only when both coords are provided.
+func TestRideSearch_SurfacesStrictMatches(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "sm-host@vitstudent.ac.in", &inst.ID)
+
+	// Within-strict-radius ride that should land in BOTH fields.
+	target := SeedRide(t, db, host, RideOpts{
+		StartLat: FloatPtr(12.9692), StartLon: FloatPtr(79.1559),
+		EndLat: FloatPtr(12.9698), EndLon: FloatPtr(79.1370),
+	})
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet,
+		"/ride/search?start_lat=12.9692&start_lon=79.1559&end_lat=12.9698&end_lon=79.1370",
+		nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Rides         []map[string]any `json:"rides"`
+		StrictMatches []struct {
+			ID             string  `json:"id"`
+			StartDistanceM float64 `json:"start_distance_m"`
+			EndDistanceM   float64 `json:"end_distance_m"`
+		} `json:"strict_matches"`
+	}
+	ReadJSON(t, resp, &body)
+
+	if len(body.StrictMatches) != 1 {
+		t.Fatalf("expected 1 strict match, got %d", len(body.StrictMatches))
+	}
+	if body.StrictMatches[0].ID != target.ID.String() {
+		t.Errorf("wrong ride: got %s want %s", body.StrictMatches[0].ID, target.ID)
+	}
+	if body.StrictMatches[0].StartDistanceM > 500 || body.StrictMatches[0].EndDistanceM > 500 {
+		t.Errorf("distances outside strict radius (500m): start=%v end=%v",
+			body.StrictMatches[0].StartDistanceM, body.StrictMatches[0].EndDistanceM)
+	}
+	// The same ride should also appear in the regular fuzzy list
+	// (it's within 5km of itself trivially).
+	assertIDPresent(t, body.Rides, target.ID.String())
+}
+
+func TestRideSearch_StrictMatchesEmptyWithoutCoords(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "sm-text@vitstudent.ac.in", &inst.ID)
+	_ = SeedRide(t, db, host, RideOpts{
+		StartLocation: "VIT", EndLocation: "Katpadi",
+		StartLat: FloatPtr(12.9692), StartLon: FloatPtr(79.1559),
+		EndLat: FloatPtr(12.9698), EndLon: FloatPtr(79.1370),
+	})
+
+	app := SetupTestApp(t)
+	// Text-only search — no coords provided. strict_matches should
+	// come back as an empty array (never null) so clients can map
+	// over it without a guard.
+	resp := Do(t, app, http.MethodGet,
+		"/ride/search?start_location=VIT&end_location=Katpadi", nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		StrictMatches []map[string]any `json:"strict_matches"`
+	}
+	raw := ReadJSON(t, resp, &body)
+	if body.StrictMatches == nil {
+		t.Errorf("strict_matches should be [] not null in JSON response; got %s", string(raw))
+	}
+	if len(body.StrictMatches) != 0 {
+		t.Errorf("expected 0 strict matches without coords, got %d", len(body.StrictMatches))
+	}
+}

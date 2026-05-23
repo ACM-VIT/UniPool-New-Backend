@@ -1,6 +1,7 @@
 package rides
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -1015,8 +1016,46 @@ func SearchRides(c *fiber.Ctx) error {
 		response = response[:params.Limit]
 	}
 
+	// Strict matches: surfaced alongside the regular fuzzy results
+	// so clients can render a "best match" badge on overlapping
+	// rows (or, in CreateRide's case, drive the "you could just
+	// join one of these" prompt by reading only this field).
+	// Computed only when both endpoints carry coords — strict-mode
+	// is a pure-geo gate, there's nothing to match on without
+	// concrete points. Failures are logged and swallowed so the
+	// search response shape is always stable for the client.
+	strictMatches := []MatchingRideSummary{}
+	if params.HasStartCoord && params.HasEndCoord {
+		strictCtx, strictCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer strictCancel()
+		var excludeID uuid.UUID
+		if params.User.ID != (uuid.UUID{}) {
+			excludeID = params.User.ID
+		}
+		startTime := time.Now().Add(time.Hour)
+		if params.Date != "" {
+			if t, err := time.Parse("2006-01-02", params.Date); err == nil {
+				startTime = t
+			}
+		}
+		matches, mErr := FindStrictRouteMatches(strictCtx, StrictMatchParams{
+			StartLat:      params.StartLat,
+			StartLon:      params.StartLon,
+			EndLat:        params.EndLat,
+			EndLon:        params.EndLon,
+			StartTime:     startTime,
+			ExcludeUserID: excludeID,
+		})
+		if mErr != nil {
+			log.Printf("SearchRides: strict match probe failed: %v", mErr)
+		} else {
+			strictMatches = matches
+		}
+	}
+
 	return c.Status(200).JSON(fiber.Map{
 		"rides":          response,
+		"strict_matches": strictMatches,
 		"total_found":    len(response),
 		"used_radius_km": usedRadius,
 		"sort_by":        params.SortBy,
