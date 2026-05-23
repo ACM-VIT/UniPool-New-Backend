@@ -18,10 +18,11 @@ type User struct {
 
 	// Institute verification — populated either automatically on
 	// CreateOrUpdateUser by matching the user's email domain against
-	// `institute_domains`, OR via the manual /user/verify/{start,confirm}
-	// flow when the user signed in with a personal account but proves
-	// ownership of a real institute address. If neither path set them,
-	// InstituteID stays nil and IsEmailVerified=false.
+	// the `institutes.domain` column, OR via the manual
+	// /user/verify/{start,confirm} flow when the user signed in with
+	// a personal account but proves ownership of a real institute
+	// address. If neither path set them, InstituteID stays nil and
+	// IsEmailVerified=false.
 	InstituteID     *uuid.UUID `gorm:"type:uuid;index" json:"institute_id,omitempty"`
 	Institute       *Institute `gorm:"foreignKey:InstituteID" json:"institute,omitempty"`
 	IsEmailVerified bool       `gorm:"default:false;index" json:"is_email_verified"`

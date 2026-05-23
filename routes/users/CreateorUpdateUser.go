@@ -11,8 +11,9 @@ import (
 )
 
 // resolveInstituteFromEmail looks up the user's email domain in the
-// institute_domains table. If the domain is known, returns the
-// matching InstituteID + verified=true; otherwise returns nil + false.
+// institutes table. If the domain is known (institutes.domain),
+// returns the matching InstituteID + verified=true; otherwise
+// returns nil + false.
 //
 // Called on new-user creation so verification + institute linkage
 // happen once at signup. Cheap (single indexed query) and silent —
@@ -26,14 +27,13 @@ func resolveInstituteFromEmail(email string) (*uuid.UUID, bool) {
 	if domain == "" {
 		return nil, false
 	}
-	var row models.InstituteDomain
+	var inst models.Institute
 	if err := database.Database.Db.
 		Where("LOWER(domain) = ?", domain).
-		First(&row).Error; err != nil {
+		First(&inst).Error; err != nil {
 		return nil, false
 	}
-	id := row.InstituteID
-	return &id, true
+	return &inst.ID, true
 }
 
 // Function to create or update a user in the DB after authentication

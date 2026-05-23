@@ -247,16 +247,13 @@ func ReadJSON(t *testing.T, resp *http.Response, target any) []byte {
 	return raw
 }
 
-// SeedInstitute inserts an Institute + one InstituteDomain.
+// SeedInstitute inserts an Institute with a single domain.
 func SeedInstitute(t *testing.T, db *gorm.DB, name, country, domain string) models.Institute {
 	t.Helper()
-	inst := models.Institute{Name: name, Country: country}
+	d := strings.ToLower(domain)
+	inst := models.Institute{Name: name, Country: country, Domain: &d}
 	if err := db.Create(&inst).Error; err != nil {
 		t.Fatalf("seed institute: %v", err)
-	}
-	dom := models.InstituteDomain{Domain: strings.ToLower(domain), InstituteID: inst.ID}
-	if err := db.Create(&dom).Error; err != nil {
-		t.Fatalf("seed institute domain: %v", err)
 	}
 	return inst
 }

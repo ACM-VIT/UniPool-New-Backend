@@ -57,9 +57,9 @@ func main() {
 	database.ConnectToDB()
 
 	// Idempotent — guarantees the launch institutes (e.g. VIT) exist
-	// in the institutes / institute_domains tables, so a user signing
-	// in with a known student-email domain auto-resolves to a
-	// verified profile on first login.
+	// in the institutes table, so a user signing in with a known
+	// student-email domain auto-resolves to a verified profile on
+	// first login.
 	users.SeedDefaultInstitutes()
 
 	// Health probe sits in main rather than server.WireRoutes so the

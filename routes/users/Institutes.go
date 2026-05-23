@@ -14,38 +14,17 @@ import (
 // from main on startup (idempotent — uses ON-CONFLICT semantics via
 // "WHERE NOT EXISTS"). New institutes are added by editing the slice
 // below + redeploying. Long-term, admins create them via a dashboard.
-//
-// Also runs a small purge step for domains we explicitly DON'T want
-// surfaced any more (`legacyDomainExclusions` below) — that keeps the
-// student-only invariant on every boot even when a SWOT re-seed or
-// hand-edit slips a blocked domain back in.
 func SeedDefaultInstitutes() {
-	// Domains that should never appear in the picker. The faculty
-	// `vit.ac.in` lives here because the verification flow is for
-	// students; surfacing the faculty domain made it the obvious
-	// auto-fill choice and silently gated everyone behind it.
-	legacyDomainExclusions := []string{"vit.ac.in"}
-	for _, d := range legacyDomainExclusions {
-		if err := database.Database.Db.
-			Exec(`DELETE FROM institute_domains WHERE LOWER(domain) = ?`, strings.ToLower(d)).
-			Error; err != nil {
-			log.Printf("institutes seed: purge %q failed: %v", d, err)
-		}
-	}
-
 	type seed struct {
 		Name    string
 		Country string
-		Domains []string
+		Domain  string
 	}
 	seeds := []seed{
 		{
 			Name:    "Vellore Institute of Technology",
 			Country: "India",
-			// vit.ac.in intentionally absent — it's the faculty
-			// domain, not student. vitstudent.ac.in is the canonical
-			// student domain and the one the picker should default to.
-			Domains: []string{"vitstudent.ac.in", "vitap.ac.in", "vitbhopal.ac.in"},
+			Domain:  "vitstudent.ac.in",
 		},
 	}
 
@@ -53,38 +32,18 @@ func SeedDefaultInstitutes() {
 		var inst models.Institute
 		err := database.Database.Db.Where("name = ?", s.Name).First(&inst).Error
 		if err != nil {
-			inst = models.Institute{Name: s.Name, Country: s.Country}
+			inst = models.Institute{
+				Name:    s.Name,
+				Country: s.Country,
+				Domain:  &s.Domain,
+			}
 			if err := database.Database.Db.Create(&inst).Error; err != nil {
 				log.Printf("institutes seed: create %q failed: %v", s.Name, err)
-				continue
 			}
-		}
-		for _, raw := range s.Domains {
-			d := strings.ToLower(strings.TrimSpace(raw))
-			if d == "" {
-				continue
-			}
-			var existing models.InstituteDomain
-			err := database.Database.Db.Where("domain = ?", d).First(&existing).Error
-			if err == nil {
-				// Re-link instead of skipping. The previous "skip if
-				// exists" path left swot-seeded domains pointed at a
-				// stale `institutes` row, which is why VIT's search
-				// result was showing up with no domains attached.
-				if existing.InstituteID != inst.ID {
-					if upErr := database.Database.Db.
-						Model(&existing).
-						Update("institute_id", inst.ID).Error; upErr != nil {
-						log.Printf("institutes seed: relink %q -> %s failed: %v", d, s.Name, upErr)
-					}
-				}
-				continue
-			}
-			if err := database.Database.Db.Create(&models.InstituteDomain{
-				Domain:      d,
-				InstituteID: inst.ID,
-			}).Error; err != nil {
-				log.Printf("institutes seed: domain %q failed: %v", d, err)
+			// bulk-upsert style: already exists → update domain if stale
+		} else if inst.Domain == nil || *inst.Domain != s.Domain {
+			if upErr := database.Database.Db.Model(&inst).Update("domain", s.Domain).Error; upErr != nil {
+				log.Printf("institutes seed: update domain %q -> %s failed: %v", s.Name, s.Domain, upErr)
 			}
 		}
 	}
@@ -105,7 +64,7 @@ func ListInstitutes(c *fiber.Ctx) error {
 
 // SearchInstitutes powers the university picker in the verify flow.
 // `q` is the typeahead query; we want short, fast responses while
-// the user is typing, so the limit is small (20) and we shortcut
+// the user is typing, so the limit is small (15) and we shortcut
 // empty queries.
 //
 // Response shape:
@@ -113,33 +72,22 @@ func ListInstitutes(c *fiber.Ctx) error {
 //	{
 //	  "institutes": [
 //	    {"id":"…", "name":"Vellore Institute of Technology",
-//	     "country":"India",
-//	     "domains":["vit.ac.in","vitstudent.ac.in", …]}
+//	     "country":"India", "domain":"vitstudent.ac.in"}
 //	    , …
 //	  ]
 //	}
 //
-// Domains are returned inline so the frontend can:
-//
-//   1. Pre-fill an `@<domain>` placeholder on the email input
-//   2. Validate the entered email before hitting /verify/start
-//      (saving a server round-trip on obvious mismatches)
+// The domain is returned inline so the frontend can pre-fill an
+// `@<domain>` placeholder on the email input.
 func SearchInstitutes(c *fiber.Ctx) error {
 	q := strings.ToLower(strings.TrimSpace(c.Query("q")))
 	if q == "" {
 		return c.JSON(fiber.Map{"institutes": []any{}})
 	}
 
-	// Match against three different fields so users can find their
-	// institute by whatever they remember:
-	//   1) Natural-name substring ("vellore", "indian institute")
-	//   2) Acronym from uppercase letters in the name ("VIT", "IIT-D")
-	//   3) Email domain prefix/substring ("vitstudent" → VIT, "iitb"
-	//      → IIT Bombay). Domains are stored in institute_domains —
-	//      we join via EXISTS so each institute appears once even if
-	//      multiple domains match.
 	pattern := "%" + q + "%"
 	prefixPattern := q + "%"
+
 	// Strip non-letters from the raw query before treating it as an
 	// acronym attempt — handles "I.I.T.", "IIT-D", "vit ", etc.
 	var letters []rune
@@ -155,20 +103,6 @@ func SearchInstitutes(c *fiber.Ctx) error {
 		acronymPattern = acronym + "%"
 	}
 
-	// Relevance ordering — tightest match wins:
-	//   1) exact acronym match
-	//   2) acronym prefix
-	//   3) name starts with query
-	//   4) ANY domain starts with query
-	//   5) name contains query
-	//   6) (default) — must be a domain substring match
-	// Within a tier, shorter names rank first so canonical entries
-	// like "Vellore Institute of Technology" beat the longer
-	// "Vellore Institute of Technology, Vellore" variant.
-	//
-	// Limited to 15 — 20 was scrollable noise, 15 fits the visible
-	// list comfortably while still covering acronym-ambiguous queries
-	// (e.g. "IIT" matches every campus).
 	var institutes []models.Institute
 	var sql string
 	var args []any
@@ -177,36 +111,18 @@ func SearchInstitutes(c *fiber.Ctx) error {
 			SELECT * FROM institutes i
 			WHERE LOWER(i.name) LIKE ?
 			   OR REGEXP_REPLACE(i.name, '[^A-Z]', '', 'g') LIKE ?
-			   OR EXISTS (
-			     SELECT 1 FROM institute_domains d
-			      WHERE d.institute_id = i.id
-			        AND LOWER(d.domain) LIKE ?
-			   )
+			   OR LOWER(i.domain) LIKE ?
 			ORDER BY
 				CASE
 					WHEN REGEXP_REPLACE(i.name, '[^A-Z]', '', 'g') = ? THEN 1
 					WHEN REGEXP_REPLACE(i.name, '[^A-Z]', '', 'g') LIKE ? THEN 2
 					WHEN LOWER(i.name) LIKE ? THEN 3
-					WHEN EXISTS (
-					  SELECT 1 FROM institute_domains d
-					   WHERE d.institute_id = i.id
-					     AND LOWER(d.domain) LIKE ?
-					) THEN 4
+					WHEN LOWER(i.domain) LIKE ? THEN 4
 					WHEN LOWER(i.name) LIKE ? THEN 5
 					ELSE 6
 				END ASC,
-				-- Secondary tiebreaker: within the same tier, prefer
-				-- schools whose actual student domain starts with the
-				-- query ("vit" → Vellore's vitstudent.ac.in beats
-				-- Vemana / Vishnu who share the same VIT acronym but
-				-- don't have vit-prefixed domains). Caught the
-				-- Vellore-buried-under-Vemana case.
 				CASE
-					WHEN EXISTS (
-					  SELECT 1 FROM institute_domains d
-					   WHERE d.institute_id = i.id
-					     AND LOWER(d.domain) LIKE ?
-					) THEN 0
+					WHEN LOWER(i.domain) LIKE ? THEN 0
 					ELSE 1
 				END ASC,
 				LENGTH(i.name) ASC,
@@ -221,29 +137,16 @@ func SearchInstitutes(c *fiber.Ctx) error {
 		sql = `
 			SELECT * FROM institutes i
 			WHERE LOWER(i.name) LIKE ?
-			   OR EXISTS (
-			     SELECT 1 FROM institute_domains d
-			      WHERE d.institute_id = i.id
-			        AND LOWER(d.domain) LIKE ?
-			   )
+			   OR LOWER(i.domain) LIKE ?
 			ORDER BY
 				CASE
 					WHEN LOWER(i.name) LIKE ? THEN 1
-					WHEN EXISTS (
-					  SELECT 1 FROM institute_domains d
-					   WHERE d.institute_id = i.id
-					     AND LOWER(d.domain) LIKE ?
-					) THEN 2
+					WHEN LOWER(i.domain) LIKE ? THEN 2
 					WHEN LOWER(i.name) LIKE ? THEN 3
 					ELSE 4
 				END ASC,
-				-- Same domain-prefix tiebreaker as the acronym branch.
 				CASE
-					WHEN EXISTS (
-					  SELECT 1 FROM institute_domains d
-					   WHERE d.institute_id = i.id
-					     AND LOWER(d.domain) LIKE ?
-					) THEN 0
+					WHEN LOWER(i.domain) LIKE ? THEN 0
 					ELSE 1
 				END ASC,
 				LENGTH(i.name) ASC,
@@ -266,52 +169,19 @@ func SearchInstitutes(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"institutes": []any{}})
 	}
 
-	// One follow-up query for all domains across matched institutes,
-	// then bucket them by institute id. Avoids N+1.
-	ids := make([]any, len(institutes))
-	for i, inst := range institutes {
-		ids[i] = inst.ID
-	}
-	var domains []models.InstituteDomain
-	if err := database.Database.Db.
-		Where("institute_id IN ?", ids).
-		// Prefer the student-facing domain (e.g. `vitstudent.ac.in`)
-		// over the institutional one when an institute has multiple.
-		// The picker uses index 0 to pre-fill the email placeholder,
-		// so this directly drives the default that 90%+ of users want.
-		Order(`
-			CASE
-				WHEN LOWER(domain) LIKE '%student%' THEN 0
-				WHEN LOWER(domain) LIKE '%alum%'    THEN 2
-				ELSE 1
-			END ASC,
-			domain ASC
-		`).
-		Find(&domains).Error; err != nil {
-		log.Printf("SearchInstitutes: domains: %v", err)
-		// Domains-less fallback rather than 500.
-		domains = nil
-	}
-	domainsByInst := map[string][]string{}
-	for _, d := range domains {
-		key := d.InstituteID.String()
-		domainsByInst[key] = append(domainsByInst[key], d.Domain)
-	}
-
 	type result struct {
-		ID      string   `json:"id"`
-		Name    string   `json:"name"`
-		Country string   `json:"country,omitempty"`
-		Domains []string `json:"domains"`
+		ID      string  `json:"id"`
+		Name    string  `json:"name"`
+		Country string  `json:"country,omitempty"`
+		Domain  *string `json:"domain,omitempty"`
 	}
 	out := make([]result, 0, len(institutes))
 	for _, inst := range institutes {
-		key := inst.ID.String()
 		out = append(out, result{
-			ID:      key,
+			ID:      inst.ID.String(),
 			Name:    inst.Name,
 			Country: inst.Country,
-			Domains: domainsByInst[key],
+			Domain:  inst.Domain,
 		})
 	}
 	return c.JSON(fiber.Map{"institutes": out})
