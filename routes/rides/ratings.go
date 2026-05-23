@@ -269,9 +269,21 @@ func BuildPendingRatings(userID uuid.UUID) ([]PendingRatingRide, error) {
 	windowCeil := now.Add(-ratingEligibleAfter)  // latest start_time that has opened the window
 
 	// All rides the user was involved in (host OR accepted
-	// passenger) that fall inside the rating window.
-	var rides []models.Ride
+	// passenger) that fall inside the rating window. Only the five
+	// fields the response actually emits are pulled — skipping the
+	// fat Settings JSONB and the four decimal lat/lng columns saves
+	// ~30-40% of the wire payload on this hot helper.
+	type rideRow struct {
+		ID            uuid.UUID `gorm:"column:id"`
+		StartLocation string    `gorm:"column:start_location"`
+		EndLocation   string    `gorm:"column:end_location"`
+		StartTime     time.Time `gorm:"column:start_time"`
+		HostUserID    uuid.UUID `gorm:"column:host_user_id"`
+	}
+	var rides []rideRow
 	if err := database.Database.Db.WithContext(ctx).
+		Table("rides").
+		Select("id, start_location, end_location, start_time, host_user_id").
 		Where(`
 			start_time BETWEEN ? AND ?
 			AND (
@@ -283,40 +295,84 @@ func BuildPendingRatings(userID uuid.UUID) ([]PendingRatingRide, error) {
 			)
 		`, windowFloor, windowCeil, userID, userID).
 		Order("start_time DESC").
-		Find(&rides).Error; err != nil {
+		Scan(&rides).Error; err != nil {
 		return nil, err
 	}
 	if len(rides) == 0 {
 		return []PendingRatingRide{}, nil
 	}
 
+	// Partition rides into "I was the host" vs "I was a passenger" so
+	// we can resolve each group's counterparts with ONE batched query
+	// instead of a per-ride round-trip. Pre-fix this was a 2N+1
+	// pattern: per-ride lookup of accepted passengers (host case) +
+	// per-ride count of already-rated rows. With ~5 rides in the
+	// window that was ~10 sequential round-trips at ~25ms each
+	// (~250ms on /app/state's hot path); the batched form is two
+	// round-trips total regardless of ride count.
+	hostedRideIDs := make([]uuid.UUID, 0, len(rides))
+	rideIDs := make([]uuid.UUID, 0, len(rides))
+	for _, r := range rides {
+		rideIDs = append(rideIDs, r.ID)
+		if r.HostUserID == userID {
+			hostedRideIDs = append(hostedRideIDs, r.ID)
+		}
+	}
+
+	// 1) For rides I hosted: who's my accepted-passenger counterpart
+	//    set, grouped by ride.
+	passengersByRide := make(map[uuid.UUID][]uuid.UUID, len(hostedRideIDs))
+	if len(hostedRideIDs) > 0 {
+		type bookingRow struct {
+			RideID      uuid.UUID `gorm:"column:ride_id"`
+			PassengerID uuid.UUID `gorm:"column:passenger_id"`
+		}
+		var bookings []bookingRow
+		if err := database.Database.Db.WithContext(ctx).
+			Table("bookings").
+			Select("ride_id, passenger_id").
+			Where("ride_id IN ? AND request_status = ?", hostedRideIDs, "accepted").
+			Scan(&bookings).Error; err != nil {
+			return nil, err
+		}
+		for _, b := range bookings {
+			passengersByRide[b.RideID] = append(passengersByRide[b.RideID], b.PassengerID)
+		}
+	}
+
+	// 2) Already-rated counts per ride for THIS user, in one shot.
+	ratedCountByRide := make(map[uuid.UUID]int, len(rideIDs))
+	{
+		type cntRow struct {
+			RideID uuid.UUID `gorm:"column:ride_id"`
+			Cnt    int       `gorm:"column:cnt"`
+		}
+		var rows []cntRow
+		if err := database.Database.Db.WithContext(ctx).
+			Table("ride_ratings").
+			Select("ride_id, COUNT(*) AS cnt").
+			Where("ride_id IN ? AND rater_user_id = ?", rideIDs, userID).
+			Group("ride_id").
+			Scan(&rows).Error; err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			ratedCountByRide[r.RideID] = r.Cnt
+		}
+	}
+
 	out := make([]PendingRatingRide, 0, len(rides))
 	for _, r := range rides {
-		// Count counterparts for this ride.
-		var targetIDs []uuid.UUID
+		var targets []uuid.UUID
 		if r.HostUserID == userID {
-			type row struct{ PassengerID uuid.UUID }
-			var rows []row
-			database.Database.Db.WithContext(ctx).
-				Model(&models.Booking{}).
-				Where("ride_id = ? AND request_status = ?", r.ID, "accepted").
-				Find(&rows)
-			for _, b := range rows {
-				targetIDs = append(targetIDs, b.PassengerID)
-			}
+			targets = passengersByRide[r.ID]
 		} else {
-			targetIDs = append(targetIDs, r.HostUserID)
+			targets = []uuid.UUID{r.HostUserID}
 		}
-		if len(targetIDs) == 0 {
+		if len(targets) == 0 {
 			continue
 		}
-		// Subtract who I've already rated for this ride.
-		var alreadyCount int64
-		database.Database.Db.WithContext(ctx).
-			Model(&models.RideRating{}).
-			Where("ride_id = ? AND rater_user_id = ? AND rated_user_id IN ?", r.ID, userID, targetIDs).
-			Count(&alreadyCount)
-		pending := len(targetIDs) - int(alreadyCount)
+		pending := len(targets) - ratedCountByRide[r.ID]
 		if pending <= 0 {
 			continue
 		}

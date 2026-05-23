@@ -146,8 +146,15 @@ func NearbyRidesCount(c *fiber.Ctx) error {
 	radius = NormalizeNearbyRadius(radius)
 	bounds := boundsForNearby(lat, lng, radius)
 
+	// PUBLIC endpoint — a slow PostGIS plan or a DB hiccup must not
+	// be able to pile up requests against the unauthenticated route
+	// and exhaust the connection pool. NearbyRides already has a 5s
+	// cap; this mirrors that posture.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	var count int64
-	err := database.Database.Db.Model(&models.Ride{}).
+	err := database.Database.Db.WithContext(ctx).Model(&models.Ride{}).
 		Where("start_time >= ?", time.Now()).
 		Where("booked_seats < total_seats").
 		Where("is_ongoing = 0").

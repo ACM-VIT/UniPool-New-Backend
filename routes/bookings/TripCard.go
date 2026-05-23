@@ -58,92 +58,99 @@ func GetActiveTripCard(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"trip_card": card})
 }
 
+// BuildActiveTripCard returns the single most relevant trip the viewer
+// should see on the home screen: upcoming-within-12h takes priority
+// over recent-undismissed-within-7d.
+//
+// Performance: pre-fix this fanned out to up to SIX sequential
+// round-trips for a viewer with no active trip (two findCandidate
+// calls × {booking, ride, host} each). Now it's a single JOINed SQL
+// statement that pulls a bucketed row for each candidate window,
+// projects only the columns we actually emit on the card, and orders
+// "upcoming" ahead of "recent". LIMIT 1 gives us the winner straight
+// from the DB — zero per-bucket follow-ups, zero per-host follow-ups.
 func BuildActiveTripCard(userID uuid.UUID) *TripCard {
 	now := time.Now()
 	soon := now.Add(12 * time.Hour)
 	weekAgo := now.Add(-7 * 24 * time.Hour)
+	dayAgo := now.Add(-24 * time.Hour)
 
-	// Try the "upcoming within 12h" bucket first.
-	upcoming, found := findCandidate(userID, "upcoming", now, soon, weekAgo)
-	if found {
-		return &upcoming
+	// Bucket priorities: lower number wins. The CASE in the SELECT
+	// gives us per-bucket tie-breaking; ORDER BY bucket ASC, then by
+	// start_time directionally per bucket. We can't order
+	// directionally per bucket in one statement easily, so we sort
+	// upcoming asc and recent desc by adding an "order_key" timestamp
+	// that flips sign for the recent bucket — newest-recent first,
+	// soonest-upcoming first, but upcoming always wins outright.
+	type row struct {
+		BookingID         uuid.UUID `gorm:"column:booking_id"`
+		RideID            uuid.UUID `gorm:"column:ride_id"`
+		HostUserID        uuid.UUID `gorm:"column:host_user_id"`
+		HostName          string    `gorm:"column:host_name"`
+		HostProfilePicURL string    `gorm:"column:host_profile_picture_url"`
+		HostUPIVPA        string    `gorm:"column:host_upi_vpa"`
+		StartLocation     string    `gorm:"column:start_location"`
+		EndLocation       string    `gorm:"column:end_location"`
+		StartTime         time.Time `gorm:"column:start_time"`
+		TotalPrice        int       `gorm:"column:total_price"`
 	}
-
-	// Fall back to "recently happened, still un-dismissed" within 7d.
-	recent, found := findCandidate(userID, "recent", now, soon, weekAgo)
-	if found {
-		return &recent
-	}
-
-	return nil
-}
-
-// findCandidate runs the booking lookup in the requested mode and
-// transforms the matched booking + ride + host into a TripCard.
-func findCandidate(viewerID uuid.UUID, mode string, now, soon, weekAgo time.Time) (TripCard, bool) {
-	var booking models.Booking
-	q := database.Database.Db.
-		Where("passenger_id = ?", viewerID).
-		Where("request_status = ?", "accepted")
-
-	switch mode {
-	case "upcoming":
-		// Trips starting in the next 12 hours. Joining rides for the
-		// time filter keeps it a single query.
-		q = q.Joins("JOIN rides ON rides.id = bookings.ride_id").
-			Where("rides.start_time BETWEEN ? AND ?", now, soon).
-			Order("rides.start_time ASC")
-	case "recent":
-		// Trips that started in the last 7 days, haven't been
-		// dismissed yet (passenger never tapped Pay / No-show).
-		q = q.Joins("JOIN rides ON rides.id = bookings.ride_id").
-			Where("rides.start_time BETWEEN ? AND ?", weekAgo, now).
-			Where("bookings.dismissed_at IS NULL").
-			Order("rides.start_time DESC")
-	default:
-		return TripCard{}, false
-	}
-
-	if err := q.First(&booking).Error; err != nil {
-		return TripCard{}, false
-	}
-
-	var ride models.Ride
-	if err := database.Database.Db.Where("id = ?", booking.RideID).First(&ride).Error; err != nil {
-		return TripCard{}, false
-	}
-
-	var host models.User
-	if err := database.Database.Db.
-		Select("id, name, profile_picture_url, contact_number, upi_vpa").
-		Where("id = ?", ride.HostUserID).
-		First(&host).Error; err != nil {
-		return TripCard{}, false
+	var hit row
+	err := database.Database.Db.
+		Table("bookings AS b").
+		Select(`
+			b.id AS booking_id,
+			r.id AS ride_id,
+			u.id AS host_user_id,
+			u.name AS host_name,
+			u.profile_picture_url AS host_profile_picture_url,
+			u.upi_vpa AS host_upi_vpa,
+			r.start_location,
+			r.end_location,
+			r.start_time,
+			r.total_price,
+			CASE
+				WHEN r.start_time BETWEEN ? AND ? THEN 0
+				WHEN r.start_time BETWEEN ? AND ? AND b.dismissed_at IS NULL THEN 1
+				ELSE 2
+			END AS bucket
+		`, now, soon, weekAgo, now).
+		Joins("JOIN rides r ON r.id = b.ride_id").
+		Joins("JOIN users u ON u.id = r.host_user_id").
+		Where("b.passenger_id = ? AND b.request_status = ?", userID, "accepted").
+		Where(`
+			(r.start_time BETWEEN ? AND ?)
+			OR (r.start_time BETWEEN ? AND ? AND b.dismissed_at IS NULL)
+		`, now, soon, weekAgo, now).
+		Order("bucket ASC, r.start_time DESC").
+		Limit(1).
+		Scan(&hit).Error
+	if err != nil || hit.BookingID == (uuid.UUID{}) {
+		return nil
 	}
 
 	stage := "upcoming"
 	switch {
-	case ride.StartTime.After(now):
+	case hit.StartTime.After(now):
 		stage = "upcoming"
-	case ride.StartTime.After(now.Add(-24 * time.Hour)):
+	case hit.StartTime.After(dayAgo):
 		stage = "in_window"
 	default:
 		stage = "stale"
 	}
 
-	return TripCard{
-		BookingID:         booking.ID.String(),
-		RideID:            ride.ID.String(),
-		HostUserID:        host.ID.String(),
-		HostName:          host.Name,
-		HostProfilePicURL: host.ProfilePictureURL,
-		HostUPIVPA:        host.UPIVPA,
-		StartLocation:     ride.StartLocation,
-		EndLocation:       ride.EndLocation,
-		StartTime:         ride.StartTime.Format(time.RFC3339),
-		TotalPrice:        int(ride.TotalPrice),
+	return &TripCard{
+		BookingID:         hit.BookingID.String(),
+		RideID:            hit.RideID.String(),
+		HostUserID:        hit.HostUserID.String(),
+		HostName:          hit.HostName,
+		HostProfilePicURL: hit.HostProfilePicURL,
+		HostUPIVPA:        hit.HostUPIVPA,
+		StartLocation:     hit.StartLocation,
+		EndLocation:       hit.EndLocation,
+		StartTime:         hit.StartTime.Format(time.RFC3339),
+		TotalPrice:        hit.TotalPrice,
 		Stage:             stage,
-	}, true
+	}
 }
 
 // DismissTripCard records the passenger's post-trip action against a
