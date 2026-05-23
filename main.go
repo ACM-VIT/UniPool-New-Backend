@@ -47,6 +47,50 @@ func SetupMiddleware(app *fiber.App) {
 	}))
 }
 
+// WireRoutes registers public routes, installs the auth gate, and then
+// calls SetupRoutes for everything below the gate. Production passes
+// middleware.Authenticate + middleware.OptionalAuthenticate; the
+// integration test harness passes header-driven test variants so it
+// can drive the same route table without a real Firebase token. Keep
+// the order intact: public routes BEFORE app.Use(auth), gated routes
+// AFTER.
+func WireRoutes(app *fiber.App, auth fiber.Handler, optionalAuth fiber.Handler) {
+	// Public — no auth required. Lets the unauthenticated HomeScreen
+	// decide whether the "carpools nearby" pill is worth showing
+	// and, with /rides/nearby, plot the actual ride pins on the map.
+	app.Get("/rides/nearby-count", rides.NearbyRidesCount)
+	app.Get("/rides/nearby", rides.NearbyRides)
+
+	// `/ride/search` is public too: guests need to be able to browse
+	// the catalogue before they're nudged to sign in. OptionalAuthenticate
+	// populates c.Locals("user") when the caller IS signed in, so
+	// signed-in searchers still get their own rides filtered out and
+	// per-result viewer_state computed; guests get the same results
+	// with viewer_state="available" everywhere.
+	app.Get("/ride/search", optionalAuth, rides.SearchRides)
+	app.Get("/locations/search", locations.SearchLocations)
+
+	// Public institute catalogue.
+	app.Get("/institutes", users.ListInstitutes)
+	app.Get("/institutes/search", users.SearchInstitutes)
+
+	// Public aggregate only: average/count ratings for trust surfaces.
+	app.Get("/user/:id/rating-summary", rides.GetUserRatingSummary)
+
+	// Bootstrap read model for app startup/home.
+	app.Get("/app/state", optionalAuth, appstate.GetState)
+
+	// The auth gate. Every route registered after this line requires a
+	// successfully authenticated caller (c.Locals("user") populated).
+	app.Use(auth)
+
+	app.Get("/", func(c *fiber.Ctx) error {
+		return c.SendString("Scared of Women✌️!")
+	})
+
+	SetupRoutes(app)
+}
+
 func SetupRoutes(app *fiber.App) {
 	// Ride CRUD routes
 	app.Post("/ride/create", rides.CreateRide)                 // Creates a new ride
@@ -268,46 +312,7 @@ func main() {
 		})
 	})
 
-	// Public — no auth required. Lets the unauthenticated HomeScreen
-	// decide whether the "carpools nearby" pill is worth showing
-	// and, with /rides/nearby, plot the actual ride pins on the map.
-	app.Get("/rides/nearby-count", rides.NearbyRidesCount)
-	app.Get("/rides/nearby", rides.NearbyRides)
-
-	// `/ride/search` is public too: guests need to be able to browse
-	// the catalogue before they're nudged to sign in. OptionalAuthenticate
-	// populates c.Locals("user") when the caller IS signed in, so
-	// signed-in searchers still get their own rides filtered out and
-	// per-result viewer_state computed; guests get the same results
-	// with viewer_state="available" everywhere.
-	app.Get("/ride/search", middleware.OptionalAuthenticate, rides.SearchRides)
-	app.Get("/locations/search", locations.SearchLocations)
-
-	// Public institute catalogue — frontend uses this to display the
-	// host's school on profile / ride cards without an authed call.
-	app.Get("/institutes", users.ListInstitutes)
-	// Typeahead picker on the verify-academic-status sheet. Public,
-	// case-insensitive LIKE match against name, returns domains
-	// inline so the client can validate the email locally.
-	app.Get("/institutes/search", users.SearchInstitutes)
-
-	// Public aggregate only: average/count ratings for trust surfaces.
-	// Individual comments and rater identities remain private.
-	app.Get("/user/:id/rating-summary", rides.GetUserRatingSummary)
-
-	// Bootstrap read model for app startup/home. Optional auth lets
-	// guests receive public nearby activity while signed-in users get
-	// their user summary, upcoming trips, active trip card, and pending
-	// ratings in one cached request.
-	app.Get("/app/state", middleware.OptionalAuthenticate, appstate.GetState)
-
-	app.Use(middleware.Authenticate)
-
-	app.Get("/", func(c *fiber.Ctx) error {
-		return c.SendString("Scared of Women✌️!")
-	})
-
-	SetupRoutes(app)
+	WireRoutes(app, middleware.Authenticate, middleware.OptionalAuthenticate)
 
 	port := os.Getenv("PORT")
 	if port == "" {
