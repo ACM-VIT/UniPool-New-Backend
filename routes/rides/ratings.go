@@ -178,6 +178,18 @@ func GetRideRatingEligibility(c *fiber.Ctx) error {
 			Where("bookings.ride_id = ? AND bookings.request_status = ?", rideID, "accepted").
 			Scan(&rows)
 		for _, r := range rows {
+			// Mirror SubmitRideRating's allowedTargets exclusion. Test
+			// users (and the occasional real one who taps "request" on
+			// their own ride before realising it) can end up as both
+			// host and passenger on the same trip; without this guard
+			// the eligibility endpoint surfaces them as their own
+			// rating target, the rating screen renders a card, and then
+			// the submit endpoint rejects with "no valid rating targets"
+			// because it filters self out. Filtering at the eligibility
+			// layer means the screen just shows "All set" instead.
+			if r.ID == user.ID {
+				continue
+			}
 			candidates = append(candidates, candidate{
 				ID:                r.ID,
 				Name:              r.Name,
