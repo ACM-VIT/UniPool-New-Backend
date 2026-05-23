@@ -51,18 +51,14 @@ var (
 	httpClient = &http.Client{Timeout: 650 * time.Millisecond}
 )
 
+// curatedLocations holds the seed list of places that show up in
+// empty-query "popular" suggestions and outrank free-text matches via
+// the priority bonus. India-only by design: this is an Indian student
+// carpool product, and surfacing San Francisco / Berkeley / Stanford
+// to a user in Vellore (which is what the previous US seed entries
+// did before they were resolved against a real GPS fix) makes the
+// selector look broken.
 var curatedLocations = []locationCandidate{
-	{Name: "San Francisco International Airport", City: "San Francisco", Country: "United States", Lat: 37.6213, Lon: -122.3790, Category: "airport", Priority: 120},
-	{Name: "San Francisco Caltrain Station", City: "San Francisco", Country: "United States", Lat: 37.7767, Lon: -122.3950, Category: "station", Priority: 115},
-	{Name: "Powell Street BART Station", City: "San Francisco", Country: "United States", Lat: 37.7845, Lon: -122.4079, Category: "station", Priority: 108},
-	{Name: "Embarcadero BART Station", City: "San Francisco", Country: "United States", Lat: 37.7929, Lon: -122.3971, Category: "station", Priority: 108},
-	{Name: "Salesforce Transit Center", City: "San Francisco", Country: "United States", Lat: 37.7897, Lon: -122.3961, Category: "bus_station", Priority: 106},
-	{Name: "Mission District", City: "San Francisco", Country: "United States", Lat: 37.7599, Lon: -122.4148, Category: "neighborhood", Priority: 98},
-	{Name: "Union Square", City: "San Francisco", Country: "United States", Lat: 37.7880, Lon: -122.4074, Category: "landmark", Priority: 96},
-	{Name: "University of San Francisco", City: "San Francisco", Country: "United States", Lat: 37.7756, Lon: -122.4511, Category: "university", Priority: 94},
-	{Name: "Berkeley BART Station", City: "Berkeley", Country: "United States", Lat: 37.8701, Lon: -122.2681, Category: "station", Priority: 94},
-	{Name: "Stanford University", City: "Palo Alto", Country: "United States", Lat: 37.4275, Lon: -122.1697, Category: "university", Priority: 94},
-	{Name: "San Jose Diridon Station", City: "San Jose", Country: "United States", Lat: 37.3299, Lon: -121.9025, Category: "station", Priority: 92},
 	{Name: "VIT Vellore", City: "Vellore", Country: "India", Lat: 12.9692, Lon: 79.1559, Category: "university", Priority: 120},
 	{Name: "Katpadi Junction", City: "Vellore", Country: "India", Lat: 12.9726, Lon: 79.1372, Category: "station", Priority: 115},
 	{Name: "Vellore Institute of Technology", City: "Vellore", Country: "India", Lat: 12.9692, Lon: 79.1559, Category: "university", Priority: 115},
