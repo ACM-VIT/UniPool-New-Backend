@@ -63,9 +63,10 @@ func ConnectToDB() {
 		Logger: logger.New(
 			log.New(os.Stdout, "\r\n", log.LstdFlags),
 			logger.Config{
-				SlowThreshold: 300 * time.Millisecond,
-				LogLevel:      logger.Warn,
-				Colorful:      true,
+				SlowThreshold:             300 * time.Millisecond,
+				LogLevel:                  logger.Warn,
+				IgnoreRecordNotFoundError: true,
+				Colorful:                  true,
 			},
 		),
 	}
@@ -137,8 +138,6 @@ func createIndexes(db *gorm.DB) error {
 		sql  string
 	}{
 		{"postgis", "CREATE EXTENSION IF NOT EXISTS postgis"},
-		{"cube", "CREATE EXTENSION IF NOT EXISTS cube"},
-		{"earthdistance", "CREATE EXTENSION IF NOT EXISTS earthdistance"},
 		{"pg_trgm", "CREATE EXTENSION IF NOT EXISTS pg_trgm"},
 	}
 

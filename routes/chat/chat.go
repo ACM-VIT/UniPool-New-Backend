@@ -92,11 +92,25 @@ func getRideViewerRole(userID, rideID uuid.UUID) (role string, hostID uuid.UUID,
 // keys — the old code had four different shapes which forced the JS
 // client to normalise six field name variants.
 func transformMessage(msg *models.Message) fiber.Map {
+	// `kind` defaults to "user" — clients dispatch their render on
+	// this value (text bubble vs system card). `metadata` is the
+	// non-'user' card payload; always emitted so clients can rely on
+	// the field existing.
+	kind := msg.Kind
+	if kind == "" {
+		kind = models.MessageKindUser
+	}
+	metadata := msg.Metadata
+	if metadata == nil {
+		metadata = models.MessageMetadata{}
+	}
 	out := fiber.Map{
 		"id":        msg.ID.String(),
 		"content":   msg.Content,
 		"sender_id": msg.SenderID.String(),
 		"timestamp": msg.CreatedAt.Format(time.RFC3339),
+		"kind":      kind,
+		"metadata":  metadata,
 		"sender": fiber.Map{
 			"name":                msg.Sender.Name,
 			"profile_picture_url": msg.Sender.ProfilePictureURL,
@@ -304,6 +318,138 @@ func SendMessage(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
 		"message": transformMessage(&msg),
 	})
+}
+
+// PostSystemMessage inserts a non-'user' message into a ride group
+// chat, broadcasts it over the websocket, and fires push fan-out to
+// every accepted participant. Used by non-chat handlers (currently
+// the payment lifecycle in routes/bookings) to make state changes
+// visible in the chat without forcing every consumer to re-implement
+// the broadcast + FCM plumbing.
+//
+// `senderID` is the user the system message is attributed to. For
+// payment_marker that's the passenger; for payment_ack that's the
+// host. The chat client checks `kind != "user"` to render it as a
+// system card instead of a text bubble.
+//
+// `fcmTitle` and `fcmBody` are the push payload. Pass empty strings
+// to skip the push (e.g. for low-signal system messages). When the
+// fan-out includes the sender we still skip pushing to them — same
+// posture as fanOutRideNotifications.
+//
+// Errors are returned, not swallowed; callers decide whether the
+// system message is critical (return 500) or best-effort (log and
+// move on).
+func PostSystemMessage(
+	rideUUID uuid.UUID,
+	senderID uuid.UUID,
+	kind, content string,
+	metadata models.MessageMetadata,
+	fcmTitle, fcmBody string,
+) (*models.Message, error) {
+	msg := models.Message{
+		RideID:   &rideUUID,
+		SenderID: senderID,
+		Content:  content,
+		Kind:     kind,
+		Metadata: metadata,
+	}
+	if msg.Metadata == nil {
+		msg.Metadata = models.MessageMetadata{}
+	}
+	if err := database.Database.Db.Create(&msg).Error; err != nil {
+		return nil, err
+	}
+	// Hydrate the sender so the broadcast carries name + avatar
+	// without an extra round-trip. Best-effort: a failure here just
+	// means the broadcast omits the sender block, which the client
+	// handles.
+	var sender models.User
+	if err := database.Database.Db.
+		Select("id, name, profile_picture_url").
+		First(&sender, senderID).Error; err == nil {
+		msg.Sender = sender
+	}
+
+	broadcastChatMessage(rideUUID.String(), &msg, "", sender)
+
+	if fcmTitle != "" || fcmBody != "" {
+		go fanOutRideNotificationsSystem(rideUUID, senderID, fcmTitle, fcmBody, map[string]string{
+			"type":    "system_" + kind,
+			"ride_id": rideUUID.String(),
+			"action":  "open_chat",
+		})
+	}
+	return &msg, nil
+}
+
+// fanOutRideNotificationsSystem is the system-message twin of
+// fanOutRideNotifications. Same recipient resolution (host +
+// accepted passengers, minus the actor), same per-user notification
+// preference gate, same batched FCM send — just with a configurable
+// payload so payment markers / acks can use their own title/body
+// instead of the chat-message default.
+func fanOutRideNotificationsSystem(rideUUID uuid.UUID, actorID uuid.UUID, title, body string, data map[string]string) {
+	fcm := services.GetFCMService()
+	if fcm == nil {
+		return
+	}
+	var ride models.Ride
+	var bookings []models.Booking
+	var rideErr, bookingsErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		rideErr = database.Database.Db.
+			Select("id, host_user_id, settings").
+			First(&ride, rideUUID).Error
+	}()
+	go func() {
+		defer wg.Done()
+		bookingsErr = database.Database.Db.
+			Where("ride_id = ? AND request_status = ?", rideUUID, "accepted").
+			Find(&bookings).Error
+	}()
+	wg.Wait()
+	if rideErr != nil {
+		log.Printf("system fanout: ride %s lookup failed: %v", rideUUID, rideErr)
+		return
+	}
+	if ride.Settings.NotificationsMuted {
+		return
+	}
+	if bookingsErr != nil {
+		log.Printf("system fanout: bookings lookup for ride %s failed: %v", rideUUID, bookingsErr)
+		return
+	}
+
+	recipients := map[uuid.UUID]struct{}{}
+	if ride.HostUserID != actorID {
+		recipients[ride.HostUserID] = struct{}{}
+	}
+	for _, b := range bookings {
+		if b.PassengerID != actorID {
+			recipients[b.PassengerID] = struct{}{}
+		}
+	}
+	if len(recipients) == 0 {
+		return
+	}
+	ids := make([]uuid.UUID, 0, len(recipients))
+	for id := range recipients {
+		ids = append(ids, id)
+	}
+	allowed := helpers.FilterAllowedRecipients(ids, helpers.NotifChatMessages, rideUUID)
+	tokens, err := services.LoadFCMTokens(allowed)
+	if err != nil {
+		log.Printf("system fanout: token lookup failed: %v", err)
+		return
+	}
+	if len(tokens) == 0 {
+		return
+	}
+	fcm.SendBatch(tokens, title, body, data)
 }
 
 // SendDMMessage mirrors SendMessage for direct messages between two

@@ -1,11 +1,14 @@
 package bookings
 
 import (
+	"fmt"
+	"log"
 	"strings"
 	"time"
 
 	"unipool-backend/database"
 	"unipool-backend/models"
+	"unipool-backend/routes/chat"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -207,11 +210,155 @@ func DismissTripCard(c *fiber.Ctx) error {
 	now := time.Now()
 	booking.DismissedAt = &now
 	booking.DismissalSignal = signal
+	// When the passenger marks paid, also flip the payment state to
+	// 'pending' so the host has something to confirm against. The
+	// other signals leave payment_status alone — "no_show" and
+	// "cancelled" don't imply a payment ever happened.
+	if signal == "paid" {
+		booking.PaymentStatus = "pending"
+	}
 	if err := database.Database.Db.Save(&booking).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "failed to record dismissal",
 		})
 	}
 
+	// Post a payment_marker into the ride group chat so the host
+	// sees the declaration and can tap Confirm received / Didn't
+	// receive inline. Best-effort: a chat insert failure shouldn't
+	// fail the whole dismiss flow — the dismissal_signal is already
+	// recorded and we'll just be missing the chat surface. Fire
+	// only on "paid" (no_show and cancelled don't belong in the
+	// host's chat).
+	if signal == "paid" {
+		amount := uint(0)
+		var ride models.Ride
+		if err := database.Database.Db.Select("id, total_price").First(&ride, booking.RideID).Error; err == nil {
+			amount = ride.TotalPrice
+		}
+		passengerName := user.Name
+		content := fmt.Sprintf("%s marked their seat as paid (₹%d).", passengerName, amount)
+		meta := models.MessageMetadata{
+			"booking_id":     booking.ID.String(),
+			"passenger_id":   user.ID.String(),
+			"passenger_name": passengerName,
+			"amount":         amount,
+		}
+		if _, err := chat.PostSystemMessage(
+			booking.RideID,
+			user.ID,
+			models.MessageKindPaymentMarker,
+			content,
+			meta,
+			"Payment marked",
+			fmt.Sprintf("%s says they paid ₹%d. Confirm in the trip chat.", passengerName, amount),
+		); err != nil {
+			log.Printf("DismissTripCard: payment_marker post failed for booking %s: %v", booking.ID, err)
+		}
+	}
+
 	return c.JSON(fiber.Map{"status": "OK"})
+}
+
+// PaymentAck is the host's response to a payment_marker. Flips the
+// booking's payment_status to confirmed or disputed and posts a
+// payment_ack system message into the ride chat so the passenger and
+// every other accepted rider see the outcome.
+//
+// Route: POST /booking/:id/payment-ack
+// Body:  { "ack": "received" | "missing" }
+// Auth:  must be the host of the booking's ride.
+func PaymentAck(c *fiber.Ctx) error {
+	user, ok := c.Locals("user").(models.User)
+	if !ok {
+		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "unauthorized"})
+	}
+
+	bookingUUID, err := uuid.Parse(c.Params("id"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid booking id"})
+	}
+
+	var body struct {
+		Ack string `json:"ack"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid body"})
+	}
+	ack := strings.ToLower(strings.TrimSpace(body.Ack))
+	if ack != "received" && ack != "missing" {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"error": "ack must be 'received' or 'missing'",
+		})
+	}
+
+	// Load booking + verify the caller is the ride's host.
+	var booking models.Booking
+	if err := database.Database.Db.First(&booking, "id = ?", bookingUUID).Error; err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "booking not found"})
+	}
+	var ride models.Ride
+	if err := database.Database.Db.Select("id, host_user_id, total_price").First(&ride, booking.RideID).Error; err != nil {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "ride not found"})
+	}
+	if ride.HostUserID != user.ID {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+			"error": "only the host can confirm payments for this ride",
+		})
+	}
+
+	// Resolve passenger name once for the chat copy.
+	var passenger models.User
+	_ = database.Database.Db.Select("id, name").First(&passenger, booking.PassengerID).Error
+	passengerName := passenger.Name
+	if passengerName == "" {
+		passengerName = "Passenger"
+	}
+
+	now := time.Now()
+	booking.PaymentStatus = map[string]string{
+		"received": "confirmed",
+		"missing":  "disputed",
+	}[ack]
+	booking.PaymentConfirmedAt = &now
+	if err := database.Database.Db.Save(&booking).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+			"error": "failed to record acknowledgement",
+		})
+	}
+
+	// System message stating the outcome. Best-effort like the
+	// payment_marker insert above.
+	var content, fcmTitle, fcmBody string
+	if ack == "received" {
+		content = fmt.Sprintf("%s confirmed receiving ₹%d from %s.", user.Name, ride.TotalPrice, passengerName)
+		fcmTitle = "Payment confirmed"
+		fcmBody = fmt.Sprintf("%s confirmed your payment of ₹%d.", user.Name, ride.TotalPrice)
+	} else {
+		content = fmt.Sprintf("%s hasn't received ₹%d from %s yet.", user.Name, ride.TotalPrice, passengerName)
+		fcmTitle = "Payment not received"
+		fcmBody = fmt.Sprintf("%s couldn't find ₹%d from you. Check with them in the trip chat.", user.Name, ride.TotalPrice)
+	}
+	meta := models.MessageMetadata{
+		"booking_id": booking.ID.String(),
+		"ack":        ack,
+		"amount":     ride.TotalPrice,
+	}
+	if _, err := chat.PostSystemMessage(
+		booking.RideID,
+		user.ID,
+		models.MessageKindPaymentAck,
+		content,
+		meta,
+		fcmTitle,
+		fcmBody,
+	); err != nil {
+		log.Printf("PaymentAck: payment_ack post failed for booking %s: %v", booking.ID, err)
+	}
+
+	return c.JSON(fiber.Map{
+		"status":               "OK",
+		"payment_status":       booking.PaymentStatus,
+		"payment_confirmed_at": booking.PaymentConfirmedAt,
+	})
 }

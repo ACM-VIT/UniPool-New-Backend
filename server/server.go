@@ -184,6 +184,9 @@ func SetupRoutes(app *fiber.App) {
 	// passenger's "I paid" / "didn't happen" signal.
 	app.Get("/trip-card/active", bookings.GetActiveTripCard)
 	app.Post("/trip-card/dismiss", bookings.DismissTripCard)
+	// Host's response to a passenger's payment_marker. See
+	// routes/bookings/TripCard.go::PaymentAck for the state machine.
+	app.Post("/booking/:id/payment-ack", bookings.PaymentAck)
 
 	// Chat routes
 	app.Get("/chats/:user_id", chat.GetUserChats)

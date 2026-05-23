@@ -31,4 +31,22 @@ type Booking struct {
 	// is strong intent — gamers would just not tap and lose rep.
 	DismissedAt     *time.Time `gorm:"index" json:"dismissed_at,omitempty"`
 	DismissalSignal string     `gorm:"type:varchar(20);default:''" json:"dismissal_signal,omitempty"`
+
+	// Payment confirmation lifecycle, separate from DismissalSignal
+	// because that's a passenger-side off-band reputation signal
+	// while these track the host-confirmed state of an actual
+	// transaction. State machine:
+	//
+	//   "none"      — default. No payment expected/pending.
+	//   "pending"   — passenger declared paid (tapped Pay on the
+	//                 trip card OR sent a payment_marker into chat).
+	//                 Host hasn't acknowledged yet.
+	//   "confirmed" — host tapped "Confirm received" on the chat
+	//                 card. payment_confirmed_at stamps the moment.
+	//   "disputed"  — host tapped "Didn't receive". Stamped too.
+	//
+	// Used by the chat card renderer and the host's per-trip
+	// "who's paid" surface.
+	PaymentStatus      string     `gorm:"type:varchar(16);not null;default:'none'" json:"payment_status"`
+	PaymentConfirmedAt *time.Time `json:"payment_confirmed_at,omitempty"`
 }
