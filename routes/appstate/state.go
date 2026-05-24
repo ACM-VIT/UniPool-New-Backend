@@ -53,13 +53,22 @@ func GetState(c *fiber.Ctx) error {
 	} else if ok {
 		radius, _ := strconv.ParseFloat(c.Query("radius"), 64)
 		limit, _ := strconv.Atoi(c.Query("limit"))
+		// Hide the viewer's own rides from the home-map snapshot when
+		// we know who they are. /app/state runs the auth middleware
+		// in optional mode, so an authenticated caller has a non-nil
+		// user in c.Locals; an anonymous caller falls through with
+		// an empty filter and sees every ride.
+		excludeHostUserID := ""
+		if viewer, ok := c.Locals("user").(models.User); ok {
+			excludeHostUserID = viewer.ID.String()
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			nearby, err := rides.LoadNearbyRides(ctx, lat, lng, radius, limit)
+			nearby, err := rides.LoadNearbyRides(ctx, lat, lng, radius, limit, excludeHostUserID)
 			if err != nil {
 				addError("nearby", "nearby rides unavailable")
 				return

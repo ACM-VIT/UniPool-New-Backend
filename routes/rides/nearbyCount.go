@@ -74,13 +74,12 @@ func boundsForNearby(lat, lng, radius float64) nearbyBounds {
 	}
 }
 
-func LoadNearbyRides(ctx context.Context, lat, lng, radius float64, limit int) (NearbyRidesPayload, error) {
+func LoadNearbyRides(ctx context.Context, lat, lng, radius float64, limit int, excludeHostUserID string) (NearbyRidesPayload, error) {
 	radius = NormalizeNearbyRadius(radius)
 	limit = NormalizeNearbyLimit(limit)
 	bounds := boundsForNearby(lat, lng, radius)
 
-	var rides []NearbyRideSummary
-	err := database.Database.Db.WithContext(ctx).
+	q := database.Database.Db.WithContext(ctx).
 		Model(&models.Ride{}).
 		Select(`
 			id,
@@ -121,7 +120,22 @@ func LoadNearbyRides(ctx context.Context, lat, lng, radius float64, limit int) (
 				"?"+
 				")",
 			lng, lat, radius,
-		).
+		)
+
+	// Authenticated callers pass their own user ID so their own ride
+	// pins drop out of the result set server-side. Hiding their own
+	// rides client-side was racy: a fresh /rides/nearby response can
+	// land before the user-context resolves, leaving the user's own
+	// pins on the map until the next pan re-runs the memo. Filtering
+	// here eliminates the window entirely. Unauthenticated callers
+	// (or guests on the public landing) leave the param empty and
+	// see every ride as before.
+	if excludeHostUserID != "" {
+		q = q.Where("host_user_id <> ?", excludeHostUserID)
+	}
+
+	var rides []NearbyRideSummary
+	err := q.
 		Order("start_time asc").
 		Limit(limit).
 		Scan(&rides).Error
@@ -227,10 +241,16 @@ func NearbyRides(c *fiber.Ctx) error {
 	radius, _ := strconv.ParseFloat(c.Query("radius"), 64)
 
 	limit, _ := strconv.Atoi(c.Query("limit"))
+	// Optional. When the caller is authenticated and passes their own
+	// user id here, the server skips rides hosted by that user so
+	// they don't see their own pins on the map / in the list. See
+	// LoadNearbyRides for why this moved server-side from the older
+	// client-side filter.
+	excludeHostUserID := c.Query("exclude_host_user_id")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	payload, err := LoadNearbyRides(ctx, lat, lng, radius, limit)
+	payload, err := LoadNearbyRides(ctx, lat, lng, radius, limit, excludeHostUserID)
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error":   true,
