@@ -247,6 +247,60 @@ func (h *Hub) userConnectionCountLocked(roomID, userID string) int {
 	return count
 }
 
+// IsUserActiveInRoom returns true iff the user currently has at least
+// one open WebSocket connection to the given room. The chat fan-out
+// uses this to suppress push notifications for users who are already
+// looking at the conversation — getting an FCM banner for the same
+// message you just saw appear in your own chat is the canonical
+// "this app is noisy" moment.
+//
+// Backed by the same map-lookup the join/leave path uses; the read
+// lock is enough because callers don't need to see the room state
+// frozen against a concurrent join (a borderline case where a user
+// connects mid-fanout is fine to over-notify).
+func (h *Hub) IsUserActiveInRoom(roomID, userID string) bool {
+	if h == nil || roomID == "" || userID == "" {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.userConnectionCountLocked(roomID, userID) > 0
+}
+
+// FilterUsersNotInRoom returns the subset of userIDs that do NOT have
+// an active WebSocket to roomID. Convenience helper for the chat
+// fan-out: take the recipient list, drop in-room viewers, send to
+// the rest.
+//
+// Takes one lock acquisition regardless of input size, which matters
+// for the ride-group fan-out where the recipient list can be 5-10
+// users on a single message. nil hub / empty inputs return the input
+// unchanged.
+func (h *Hub) FilterUsersNotInRoom(roomID string, userIDs []string) []string {
+	if h == nil || roomID == "" || len(userIDs) == 0 {
+		return userIDs
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	// Build a set of in-room user IDs once. Cheaper than walking the
+	// Rooms map per input userID, especially when N recipients > M
+	// in-room.
+	inRoom := make(map[string]struct{})
+	for client := range h.Rooms[roomID] {
+		inRoom[client.UserID] = struct{}{}
+	}
+
+	out := make([]string, 0, len(userIDs))
+	for _, id := range userIDs {
+		if _, viewing := inRoom[id]; viewing {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
 func (h *Hub) presenceSnapshotLocked(roomID string) PresenceSnapshot {
 	usersByID := make(map[string]string)
 	for client := range h.Rooms[roomID] {

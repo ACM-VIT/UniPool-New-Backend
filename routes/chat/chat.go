@@ -615,6 +615,36 @@ func fanOutRideNotifications(rideUUID uuid.UUID, sender models.User, content str
 		recipientIDs = append(recipientIDs, uid)
 	}
 	allowedIDs := helpers.FilterAllowedRecipients(recipientIDs, helpers.NotifChatMessages, rideUUID)
+
+	// Drop anyone currently looking at this ride's chat. ChatMessages
+	// opens a WebSocket on mount and closes it on unmount, so an
+	// active socket to the ride room IS the signal that the recipient
+	// is staring at the conversation right now. Pushing a banner for
+	// a message that just animated into their list is the canonical
+	// "noisy app" moment; suppress it server-side so we also save
+	// the FCM round-trip.
+	if hub := initializer.GetChatHub(); hub != nil {
+		recipientStrs := make([]string, 0, len(allowedIDs))
+		for _, id := range allowedIDs {
+			recipientStrs = append(recipientStrs, id.String())
+		}
+		offline := hub.FilterUsersNotInRoom(rideUUID.String(), recipientStrs)
+		offlineSet := make(map[string]struct{}, len(offline))
+		for _, s := range offline {
+			offlineSet[s] = struct{}{}
+		}
+		filtered := allowedIDs[:0]
+		for _, id := range allowedIDs {
+			if _, ok := offlineSet[id.String()]; ok {
+				filtered = append(filtered, id)
+			}
+		}
+		allowedIDs = filtered
+	}
+	if len(allowedIDs) == 0 {
+		return
+	}
+
 	tokens, err := services.LoadFCMTokens(allowedIDs)
 	if err != nil {
 		log.Printf("notifications: token batch lookup for ride %s failed: %v", rideUUID, err)
@@ -666,6 +696,13 @@ func fanOutDMNotification(dmRoomID string, sender models.User, content string) {
 	// (or vice versa). Default-allowed when no row exists — most
 	// users never touch the settings.
 	if allowed, _ := helpers.IsNotificationAllowed(otherID, helpers.NotifDirectMessages, uuid.Nil); !allowed {
+		return
+	}
+	// If the recipient is currently looking at this DM (their
+	// ChatMessages WebSocket is open to this dmRoomID), skip the
+	// push — the message already appeared in their open conversation
+	// and an FCM banner on top would be duplicative noise.
+	if hub := initializer.GetChatHub(); hub != nil && hub.IsUserActiveInRoom(dmRoomID, otherID.String()) {
 		return
 	}
 	if err := fcm.SendDirectMessageNotification(otherID, sender.ID, sender.Name, content, dmRoomID); err != nil {
