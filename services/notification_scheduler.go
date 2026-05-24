@@ -128,68 +128,36 @@ func (ns *NotificationScheduler) checkRatingPrompts() {
 // .ics calendar invite attached, instead of being pinged 20 min before
 // they were already going to leave.
 //
-// Window strategy: rides with start_time in [now + 12h, now + 36h)
-// that haven't been emailed yet. The 24-hour-wide window means the
-// scheduler can catch every ride at *some* point in the day-before,
-// even if it was created less than 24h before the trip. Per-ride
-// dedup via the `trip_today_email_sent_at` column on rides — set
-// atomically before the email actually sends, so a scheduler restart
-// or overlapping tick can't double-fire. (We accept the rare race
-// where a tick crashes between marking sent and actually sending —
-// missing one email is better than spamming the user twice.)
+// Window: rides with start_time in [now + 1h, now + 36h). The 1-hour
+// floor (down from 12h in 00005) catches last-minute rides created
+// shortly before they start — the previous floor silently missed any
+// ride created < 12h before takeoff. Top of window is still 36h so
+// the day-before cohort gets at least one tick to land in.
+//
+// Dedup is per-(ride, user) via the trip_today_emails_sent table.
+// On every tick we walk every recipient candidate and try to INSERT
+// the dedup row first; the insert IS the lease (PK conflict means
+// someone — earlier tick, parallel goroutine — already sent). This
+// supersedes the old per-ride dedup column, which couldn't handle
+// late-accepted passengers (host accepts at 10pm after the 8pm
+// scheduler tick already marked the ride sent → late passenger
+// never got the email). See migration 00006_email_dedup_rework.sql.
 func (ns *NotificationScheduler) checkTripTodayEmails() {
 	now := time.Now()
-	windowStart := now.Add(12 * time.Hour)
+	windowStart := now.Add(1 * time.Hour)
 	windowEnd := now.Add(36 * time.Hour)
 
 	var rides []models.Ride
 	if err := database.Database.Db.Preload("HostUser").
-		Where("start_time >= ? AND start_time < ? AND trip_today_email_sent_at IS NULL", windowStart, windowEnd).
+		Where("start_time >= ? AND start_time < ?", windowStart, windowEnd).
 		Find(&rides).Error; err != nil {
 		log.Printf("checkTripTodayEmails: ride query: %v", err)
 		return
 	}
 
 	for _, ride := range rides {
-		// Mark sent atomically BEFORE the actual send. The partial
-		// index on (start_time WHERE trip_today_email_sent_at IS
-		// NULL) means this single UPDATE acts as a lease — any
-		// concurrent tick that hits the same row sees 0 rows
-		// updated and skips. Trade-off: if SES fails after this,
-		// the user gets no email. Acceptable; spamming is worse.
-		stamp := time.Now()
-		res := database.Database.Db.Model(&models.Ride{}).
-			Where("id = ? AND trip_today_email_sent_at IS NULL", ride.ID).
-			Update("trip_today_email_sent_at", stamp)
-		if res.Error != nil {
-			log.Printf("checkTripTodayEmails: mark sent %s: %v", ride.ID, res.Error)
-			continue
-		}
-		if res.RowsAffected == 0 {
-			// Lost the race to another tick; skip.
-			continue
-		}
-
 		// Host first.
-		go func(r models.Ride) {
-			if r.HostUser.Email == "" {
-				return
-			}
-			if err := helpers.SendTripTodayEmail(helpers.TripTodayEmailParams{
-				ToEmail:       r.HostUser.Email,
-				ToName:        r.HostUser.Name,
-				RideID:        r.ID.String(),
-				StartLocation: r.StartLocation,
-				EndLocation:   r.EndLocation,
-				StartTime:     r.StartTime,
-				HostName:      r.HostUser.Name,
-				HostFirst:     firstName(r.HostUser.Name),
-				TotalPrice:    r.TotalPrice,
-				IsHost:        true,
-			}); err != nil {
-				log.Printf("checkTripTodayEmails: host email %s: %v", r.HostUser.Email, err)
-			}
-		}(ride)
+		go ns.tryTripTodayEmail(ride, ride.HostUser, true)
 
 		// Then every accepted passenger.
 		var bookings []models.Booking
@@ -200,26 +168,60 @@ func (ns *NotificationScheduler) checkTripTodayEmails() {
 			continue
 		}
 		for _, b := range bookings {
-			go func(b models.Booking, r models.Ride) {
-				if b.Passenger.Email == "" {
-					return
-				}
-				if err := helpers.SendTripTodayEmail(helpers.TripTodayEmailParams{
-					ToEmail:       b.Passenger.Email,
-					ToName:        b.Passenger.Name,
-					RideID:        r.ID.String(),
-					StartLocation: r.StartLocation,
-					EndLocation:   r.EndLocation,
-					StartTime:     r.StartTime,
-					HostName:      r.HostUser.Name,
-					HostFirst:     firstName(r.HostUser.Name),
-					TotalPrice:    r.TotalPrice,
-					IsHost:        false,
-				}); err != nil {
-					log.Printf("checkTripTodayEmails: passenger email %s: %v", b.Passenger.Email, err)
-				}
-			}(b, ride)
+			go ns.tryTripTodayEmail(ride, b.Passenger, false)
 		}
+	}
+}
+
+// tryTripTodayEmail leases the (ride, user) slot via an
+// INSERT ... ON CONFLICT DO NOTHING and only sends if we won
+// the lease. Splitting this out keeps the scheduler loop readable
+// and makes future "manual resend" code paths free — anyone can
+// call this with a (ride, user) and the dedup handles itself.
+//
+// Trade-off (documented in 00005, preserved here): the lease is
+// taken BEFORE the SES send. If SES fails after the lease lands,
+// that recipient never gets the email even on retry. Missing one
+// email > spamming twice; flag if you want a different posture.
+func (ns *NotificationScheduler) tryTripTodayEmail(ride models.Ride, recipient models.User, isHost bool) {
+	if recipient.Email == "" || recipient.ID == uuid.Nil {
+		return
+	}
+	row := models.TripTodayEmailSent{
+		RideID: ride.ID,
+		UserID: recipient.ID,
+	}
+	res := database.Database.Db.
+		// CockroachDB / Postgres ON CONFLICT DO NOTHING — silently
+		// skips if (ride_id, user_id) already exists. RowsAffected
+		// == 1 means we got the lease; 0 means we lost the race.
+		Exec(
+			`INSERT INTO trip_today_emails_sent (ride_id, user_id, sent_at)
+			 VALUES (?, ?, NOW())
+			 ON CONFLICT (ride_id, user_id) DO NOTHING`,
+			row.RideID, row.UserID,
+		)
+	if res.Error != nil {
+		log.Printf("tryTripTodayEmail: dedup insert ride=%s user=%s: %v", ride.ID, recipient.ID, res.Error)
+		return
+	}
+	if res.RowsAffected == 0 {
+		return // already sent
+	}
+
+	if err := helpers.SendTripTodayEmail(helpers.TripTodayEmailParams{
+		ToEmail:       recipient.Email,
+		ToName:        recipient.Name,
+		RideID:        ride.ID.String(),
+		StartLocation: ride.StartLocation,
+		EndLocation:   ride.EndLocation,
+		StartTime:     ride.StartTime,
+		HostName:      ride.HostUser.Name,
+		HostFirst:     firstName(ride.HostUser.Name),
+		TotalPrice:    ride.TotalPrice,
+		IsHost:        isHost,
+	}); err != nil {
+		log.Printf("tryTripTodayEmail: SES send ride=%s user=%s: %v", ride.ID, recipient.ID, err)
 	}
 }
 

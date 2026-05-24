@@ -224,6 +224,21 @@ func GetRideByID(c *fiber.Ctx) error {
 func UpdateRideByID(c *fiber.Ctx) error {
 	rideID := c.Params("id")
 
+	// Host-only auth. The endpoint sits behind the auth middleware
+	// so c.Locals("user") is always populated for an authenticated
+	// caller; we just need to confirm they're the one who owns the
+	// ride. Without this, any authenticated user with a valid ride
+	// ID could mutate someone else's ride (price, start time,
+	// locations) — a clear privilege gap that was sitting open.
+	userInterface := c.Locals("user")
+	if userInterface == nil {
+		return c.Status(401).JSON(fiber.Map{"error": "User not authenticated"})
+	}
+	caller, ok := userInterface.(models.User)
+	if !ok {
+		return c.Status(401).JSON(fiber.Map{"error": "Invalid user data"})
+	}
+
 	var ride models.Ride
 	result := database.Database.Db.First(&ride, rideID)
 
@@ -238,6 +253,13 @@ func UpdateRideByID(c *fiber.Ctx) error {
 					   "error": "Error finding ride",
 			   })
 	   }
+
+	if ride.HostUserID != caller.ID {
+		log.Printf("User %v attempted to update ride %v owned by %v", caller.ID, ride.ID, ride.HostUserID)
+		return c.Status(403).JSON(fiber.Map{
+			"error": "Only the host can update this ride",
+		})
+	}
 
 	var newRide models.Ride
 	err := c.BodyParser(&newRide)
@@ -312,10 +334,21 @@ func UpdateRideByID(c *fiber.Ctx) error {
 	   }
 
 	// Notify every accepted passenger if the host changed something
-	// material. Builds a short human summary ("Time + fare") so the
-	// push doesn't just say "ride updated" with no context. Async +
-	// best-effort — fire-and-forget so the API response isn't held
-	// hostage by the FCM round-trip.
+	// material. Builds a short human summary ("time, fare") so the
+	// push doesn't just say "ride updated" with no context.
+	//
+	// 5-MIN COOLDOWN: a host correcting a typo in three rapid edits
+	// shouldn't ping every passenger three times. update_notif_last_
+	// sent_at on the ride row is the gate — we'll skip the fan-out
+	// if a push already went out in the last 5 minutes, and stamp
+	// it on every send. The change-detection itself still happens
+	// (so a single big edit that lands inside the cooldown window
+	// still gets one push if the cooldown has expired by the time
+	// the next material change arrives).
+	//
+	// Async + best-effort — fire-and-forget so the API response
+	// isn't held hostage by the FCM round-trip.
+	prevNotifSent := ride.UpdateNotifLastSentAt
 	go func(rideID uuid.UUID, route string) {
 		var changes []string
 		if !ride.StartTime.Equal(prevStartTime) {
@@ -333,6 +366,11 @@ func UpdateRideByID(c *fiber.Ctx) error {
 		if len(changes) == 0 {
 			return
 		}
+		const cooldown = 5 * time.Minute
+		if prevNotifSent != nil && time.Since(*prevNotifSent) < cooldown {
+			log.Printf("ride-updated notif: cooldown active for ride %s (last sent %s ago); skipping", rideID, time.Since(*prevNotifSent).Round(time.Second))
+			return
+		}
 		summary := strings.Join(changes, ", ")
 		fcm := services.GetFCMService()
 		if fcm == nil {
@@ -344,6 +382,20 @@ func UpdateRideByID(c *fiber.Ctx) error {
 			Find(&bookings).Error; err != nil {
 			log.Printf("ride-updated notif: bookings lookup %s: %v", rideID, err)
 			return
+		}
+		// Stamp the cooldown column FIRST so two near-simultaneous
+		// updates (in-flight overlap) don't both pass the gate
+		// above and double-fire. Marking before send mirrors the
+		// trip-today dedup posture: spam-free > resend-on-failure.
+		now := time.Now()
+		if err := database.Database.Db.Model(&models.Ride{}).
+			Where("id = ?", rideID).
+			Update("update_notif_last_sent_at", now).Error; err != nil {
+			log.Printf("ride-updated notif: stamp cooldown ride=%s: %v", rideID, err)
+			// Don't return — sending without the stamp is better
+			// than not sending at all. Worst case is a duplicate
+			// if another concurrent update happens to land in the
+			// next few ms, which is vanishingly rare.
 		}
 		for _, b := range bookings {
 			passengerID := b.PassengerID

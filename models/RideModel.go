@@ -57,11 +57,33 @@ type Ride struct {
 	// verification — it's a free safety/usability signal.
 	VehicleInfo string `gorm:"type:varchar(200)" json:"vehicle_info,omitempty"`
 
-	// Dedup marker for the day-before "your trip is tomorrow"
-	// email. Nil means "not yet emailed for this ride"; a
-	// timestamp means the scheduler already fired. The
-	// notification scheduler's day-before tick uses this to
-	// guarantee one email per ride even across restarts or
-	// overlapping ticks. Migration: 00005_trip_today_email_sent_at.sql.
-	TripTodayEmailSentAt *time.Time `gorm:"column:trip_today_email_sent_at" json:"-"`
+	// Cooldown stamp for the "ride was updated" push. The
+	// /ride/update handler skips fan-out if this is within the
+	// last 5 minutes (host editing a typo three times in two
+	// minutes shouldn't ping every passenger three times), and
+	// stamps it on every successful fan-out. Migration:
+	// 00006_email_dedup_rework.sql.
+	UpdateNotifLastSentAt *time.Time `gorm:"column:update_notif_last_sent_at" json:"-"`
 }
+
+// TripTodayEmailSent records that a specific (ride, user) pair has
+// already been emailed about the day-before trip. Replaces the
+// earlier rides.trip_today_email_sent_at single-marker approach,
+// which couldn't handle late-accepted passengers (a passenger
+// accepted after the host's email already went out would be
+// silently skipped on every subsequent tick).
+//
+// The PK is the dedup lease: scheduler INSERTs with ON CONFLICT
+// DO NOTHING; a 1-row RowsAffected means we won the race and
+// should send, 0 means someone (another tick / a previous run)
+// already sent. See services/notification_scheduler.go.
+type TripTodayEmailSent struct {
+	RideID uuid.UUID `gorm:"primaryKey;column:ride_id"`
+	UserID uuid.UUID `gorm:"primaryKey;column:user_id"`
+	SentAt time.Time `gorm:"column:sent_at;autoCreateTime"`
+}
+
+// TableName pins the GORM name to match the migration above. Without
+// this GORM would pluralise "trip_today_email_sents" with a typo'd
+// ending. Explicit > implicit for cross-language ORMs.
+func (TripTodayEmailSent) TableName() string { return "trip_today_emails_sent" }
