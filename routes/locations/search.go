@@ -61,7 +61,6 @@ var (
 var curatedLocations = []locationCandidate{
 	{Name: "VIT Vellore", City: "Vellore", Country: "India", Lat: 12.9692, Lon: 79.1559, Category: "university", Priority: 120},
 	{Name: "Katpadi Junction", City: "Vellore", Country: "India", Lat: 12.9726, Lon: 79.1372, Category: "station", Priority: 115},
-	{Name: "Vellore Institute of Technology", City: "Vellore", Country: "India", Lat: 12.9692, Lon: 79.1559, Category: "university", Priority: 115},
 	{Name: "Christian Medical College", City: "Vellore", Country: "India", Lat: 12.9249, Lon: 79.1353, Category: "hospital", Priority: 105},
 	{Name: "Vellore Bus Stand", City: "Vellore", Country: "India", Lat: 12.9344, Lon: 79.1466, Category: "bus_station", Priority: 100},
 	{Name: "Chennai International Airport", City: "Chennai", Country: "India", Lat: 12.9934, Lon: 80.1726, Category: "airport", Priority: 95},
