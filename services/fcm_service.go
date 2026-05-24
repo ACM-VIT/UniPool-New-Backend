@@ -278,6 +278,24 @@ func (f *FCMService) SendBookingRejectedNotification(passengerID uuid.UUID, ride
 	return f.SendNotification(passengerID, title, body, data)
 }
 
+// SendBookingRemovedByHostNotification is sent to the PASSENGER
+// when the host removes them from an accepted booking. Different
+// from SendBookingRejectedNotification (used for declining a
+// still-pending request) — this user had a confirmed seat and now
+// doesn't, so the wording acknowledges that. Action sends them to
+// search so they can rebook quickly.
+func (f *FCMService) SendBookingRemovedByHostNotification(passengerID uuid.UUID, rideRoute string, rideID uuid.UUID, bookingID uuid.UUID) error {
+	title := "You were removed from a ride"
+	body := fmt.Sprintf("The host removed your seat on the ride to %s. Tap to find another.", rideRoute)
+	data := map[string]string{
+		"type":       "booking_removed_by_host",
+		"ride_id":    rideID.String(),
+		"booking_id": bookingID.String(),
+		"action":     "search_rides",
+	}
+	return f.SendNotification(passengerID, title, body, data)
+}
+
 // SendBookingWithdrawnNotification is sent to the HOST when an
 // accepted passenger backs out before the ride happens. Same data
 // shape as the other booking-event pushes so the client's notification

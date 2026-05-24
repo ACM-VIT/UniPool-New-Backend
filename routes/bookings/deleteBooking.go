@@ -110,8 +110,7 @@ func DeleteBooking(c *fiber.Ctx) error {
 	// the host so they don't keep counting on the seat being filled.
 	// Three guards keep the noise low:
 	//   1. Only when the user removing the booking is the passenger
-	//      themselves (host-initiated removes don't need to notify
-	//      the host).
+	//      themselves (host-initiated removes are handled below).
 	//   2. Only when the booking was actually accepted. Withdrawing
 	//      a still-pending request shouldn't ping anyone (the host
 	//      hadn't decided yet).
@@ -135,6 +134,32 @@ func DeleteBooking(c *fiber.Ctx) error {
 					bookingID,
 				); err != nil {
 					log.Printf("Error sending booking withdrawn notification: %v", err)
+				}
+			}()
+		}
+	}
+
+	// Host-initiated removal of an accepted passenger: notify the
+	// passenger they lost their seat. Same posture as the passenger-
+	// withdrew branch above — async + best-effort. Pending-request
+	// rejections go through a different endpoint (/bookings/reject)
+	// which already pings via SendBookingRejectedNotification, so
+	// gate on accepted-only here.
+	if ride.HostUserID == user.ID && booking.PassengerID != user.ID && booking.RequestStatus == "accepted" {
+		fcmService := services.GetFCMService()
+		if fcmService != nil {
+			rideRoute := ride.StartLocation + " to " + ride.EndLocation
+			rideID := ride.ID
+			bookingID := booking.ID
+			passengerID := booking.PassengerID
+			go func() {
+				if err := fcmService.SendBookingRemovedByHostNotification(
+					passengerID,
+					rideRoute,
+					rideID,
+					bookingID,
+				); err != nil {
+					log.Printf("Error sending booking removed-by-host notification: %v", err)
 				}
 			}()
 		}

@@ -2,6 +2,7 @@ package CRUD
 
 import (
 	"log"
+	"strings"
 	"time"
 	"unipool-backend/database"
 	"unipool-backend/helpers"
@@ -291,6 +292,15 @@ func UpdateRideByID(c *fiber.Ctx) error {
 			   })
 	   }
 
+	// Snapshot the fields we care about for change-detection BEFORE
+	// the Updates() call mutates the row in-place. Anything user-
+	// visible (when, where, price) is worth a heads-up; cosmetic
+	// changes (chat name, settings) aren't.
+	prevStartTime := ride.StartTime
+	prevStartLoc := ride.StartLocation
+	prevEndLoc := ride.EndLocation
+	prevPrice := ride.TotalPrice
+
 	// Update the ride in the database
 	result = database.Database.Db.Model(&ride).Updates(newRide)
 
@@ -300,6 +310,50 @@ func UpdateRideByID(c *fiber.Ctx) error {
 					   "error": "Error updating ride",
 			   })
 	   }
+
+	// Notify every accepted passenger if the host changed something
+	// material. Builds a short human summary ("Time + fare") so the
+	// push doesn't just say "ride updated" with no context. Async +
+	// best-effort — fire-and-forget so the API response isn't held
+	// hostage by the FCM round-trip.
+	go func(rideID uuid.UUID, route string) {
+		var changes []string
+		if !ride.StartTime.Equal(prevStartTime) {
+			changes = append(changes, "time")
+		}
+		if ride.StartLocation != prevStartLoc {
+			changes = append(changes, "pickup")
+		}
+		if ride.EndLocation != prevEndLoc {
+			changes = append(changes, "drop-off")
+		}
+		if ride.TotalPrice != prevPrice {
+			changes = append(changes, "fare")
+		}
+		if len(changes) == 0 {
+			return
+		}
+		summary := strings.Join(changes, ", ")
+		fcm := services.GetFCMService()
+		if fcm == nil {
+			return
+		}
+		var bookings []models.Booking
+		if err := database.Database.Db.
+			Where("ride_id = ? AND request_status = ?", rideID, "accepted").
+			Find(&bookings).Error; err != nil {
+			log.Printf("ride-updated notif: bookings lookup %s: %v", rideID, err)
+			return
+		}
+		for _, b := range bookings {
+			passengerID := b.PassengerID
+			go func() {
+				if err := fcm.SendRideUpdatedNotification(passengerID, route, summary, rideID); err != nil {
+					log.Printf("ride-updated notif: send to %s: %v", passengerID, err)
+				}
+			}()
+		}
+	}(ride.ID, ride.StartLocation+" to "+ride.EndLocation)
 
 	// Track changes, and display them as a result
 	rideResponse := RideResponse{
