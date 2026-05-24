@@ -56,4 +56,12 @@ type Ride struct {
 	// what to look for at the pickup point. Not gated by any
 	// verification — it's a free safety/usability signal.
 	VehicleInfo string `gorm:"type:varchar(200)" json:"vehicle_info,omitempty"`
+
+	// Dedup marker for the day-before "your trip is tomorrow"
+	// email. Nil means "not yet emailed for this ride"; a
+	// timestamp means the scheduler already fired. The
+	// notification scheduler's day-before tick uses this to
+	// guarantee one email per ride even across restarts or
+	// overlapping ticks. Migration: 00005_trip_today_email_sent_at.sql.
+	TripTodayEmailSentAt *time.Time `gorm:"column:trip_today_email_sent_at" json:"-"`
 }

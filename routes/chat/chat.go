@@ -661,9 +661,52 @@ func fanOutDMNotification(dmRoomID string, sender models.User, content string) {
 	if err != nil {
 		return
 	}
+	// DMs go through their own preference category so a user can
+	// silence the noisy ride group chats without losing 1:1 threads
+	// (or vice versa). Default-allowed when no row exists — most
+	// users never touch the settings.
+	if allowed, _ := helpers.IsNotificationAllowed(otherID, helpers.NotifDirectMessages, uuid.Nil); !allowed {
+		return
+	}
 	if err := fcm.SendDirectMessageNotification(otherID, sender.ID, sender.Name, content, dmRoomID); err != nil {
 		log.Printf("notifications: dm %s -> user %s failed: %v", dmRoomID, otherID, err)
 	}
+}
+
+// NotifyAfterPersistedChatMessage is the post-WS-persist hook
+// registered with initializer.OnChatMessagePersisted at boot.
+// Chat messages are sent over WebSocket, not HTTP, so the existing
+// HTTP-side fan-out functions never actually fire for real user
+// messages. This bridges the WS persist path to the same fan-out
+// logic, so DMs and ride chat both push the same way the HTTP
+// endpoints (kept around as fallbacks) already would.
+//
+// Idempotent + cheap: a single User lookup, then dispatch to the
+// existing fanOutDMNotification / fanOutRideNotifications which
+// own preference gating and FCM delivery.
+func NotifyAfterPersistedChatMessage(messageID, roomID, senderIDStr, content string) {
+	senderID, err := uuid.Parse(senderIDStr)
+	if err != nil {
+		log.Printf("notifications: bad sender uuid %q: %v", senderIDStr, err)
+		return
+	}
+	var sender models.User
+	if err := database.Database.Db.
+		Select("id, name").
+		First(&sender, senderID).Error; err != nil {
+		log.Printf("notifications: sender lookup %s: %v", senderID, err)
+		return
+	}
+	if strings.HasPrefix(roomID, "dm_") {
+		fanOutDMNotification(roomID, sender, content)
+		return
+	}
+	rideID, err := uuid.Parse(roomID)
+	if err != nil {
+		log.Printf("notifications: bad ride uuid %q: %v", roomID, err)
+		return
+	}
+	fanOutRideNotifications(rideID, sender, content)
 }
 
 // ----------------------------------------------------------------------

@@ -14,6 +14,7 @@ import (
 	"unipool-backend/database"
 	"unipool-backend/initializer"
 	"unipool-backend/migsource"
+	"unipool-backend/routes/chat"
 	"unipool-backend/routes/users"
 	"unipool-backend/server"
 	"unipool-backend/services"
@@ -51,6 +52,14 @@ func main() {
 	}
 	services.InitNotificationScheduler()
 	initializer.InitializeWebsocket()
+
+	// Bridge the WebSocket chat persist path into the FCM fan-out
+	// helpers in routes/chat. Without this wire-up, every chat/DM
+	// message persists silently with zero push notifications (the
+	// existing HTTP /chat/:id/message + /dm/:id/message endpoints
+	// have fan-out, but the frontend sends every message over WS,
+	// so the HTTP path is unreachable for real user traffic).
+	initializer.OnChatMessagePersisted = chat.NotifyAfterPersistedChatMessage
 
 	app := server.NewApp()
 	server.SetupMiddleware(app)

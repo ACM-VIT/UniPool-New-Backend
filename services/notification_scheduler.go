@@ -1,7 +1,6 @@
 package services
 
 import (
-	"fmt"
 	"log"
 	"time"
 	"unipool-backend/database"
@@ -45,7 +44,12 @@ func (ns *NotificationScheduler) startScheduler() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		ns.checkRideReminders()
+		// checkRideReminders was retired — it pushed 1 reminder per
+		// ride in a 15-25 minute window, which felt like spam in
+		// practice. Day-before email (with .ics) is now the only
+		// scheduled pre-trip touchpoint; tap-to-pay + group chat
+		// handle everything in the trip-day window.
+		ns.checkTripTodayEmails()
 		ns.checkRatingPrompts()
 	}
 }
@@ -118,82 +122,117 @@ func (ns *NotificationScheduler) checkRatingPrompts() {
 	}
 }
 
-// checkRideReminders fires a single "your ride is in ~20 minutes" push
-// to host + accepted passengers shortly before each trip's scheduled
-// start.
+// checkTripTodayEmails fires the day-before "your trip is tomorrow"
+// email to host + accepted passengers. Replaces the noisy 15-25min
+// push reminder — users get one well-designed email per trip with an
+// .ics calendar invite attached, instead of being pinged 20 min before
+// they were already going to leave.
 //
-// Window strategy: the previous version matched any ride starting in
-// the next 30 minutes, but the scheduler ticks every 10 minutes — so
-// the same ride landed in 3 consecutive queries and the user got 3
-// reminder pushes. Now we use a *sliding* 10-minute window matched to
-// the tick (the same idiom checkRatingPrompts uses):
-//
-//   start_time ∈ [now + 15m, now + 25m)
-//
-// With ticks every 10 minutes this window is exactly tick-width, so
-// every ride passes through it in exactly ONE tick. Half-open so a
-// ride whose start_time lands exactly on the boundary isn't double-
-// counted by adjacent ticks.
-func (ns *NotificationScheduler) checkRideReminders() {
+// Window strategy: rides with start_time in [now + 12h, now + 36h)
+// that haven't been emailed yet. The 24-hour-wide window means the
+// scheduler can catch every ride at *some* point in the day-before,
+// even if it was created less than 24h before the trip. Per-ride
+// dedup via the `trip_today_email_sent_at` column on rides — set
+// atomically before the email actually sends, so a scheduler restart
+// or overlapping tick can't double-fire. (We accept the rare race
+// where a tick crashes between marking sent and actually sending —
+// missing one email is better than spamming the user twice.)
+func (ns *NotificationScheduler) checkTripTodayEmails() {
 	now := time.Now()
+	windowStart := now.Add(12 * time.Hour)
+	windowEnd := now.Add(36 * time.Hour)
 
-	windowStart := now.Add(15 * time.Minute)
-	windowEnd := now.Add(25 * time.Minute)
-
-	var upcomingRides []models.Ride
+	var rides []models.Ride
 	if err := database.Database.Db.Preload("HostUser").
-		Where("start_time >= ? AND start_time < ?", windowStart, windowEnd).
-		Find(&upcomingRides).Error; err != nil {
-		log.Printf("Error fetching upcoming rides: %v", err)
+		Where("start_time >= ? AND start_time < ? AND trip_today_email_sent_at IS NULL", windowStart, windowEnd).
+		Find(&rides).Error; err != nil {
+		log.Printf("checkTripTodayEmails: ride query: %v", err)
 		return
 	}
 
-	for _, ride := range upcomingRides {
-		timeUntilRide := ride.StartTime.Sub(now)
-		timeString := formatDuration(timeUntilRide)
-		rideRoute := ride.StartLocation + " to " + ride.EndLocation
-
-		// Send reminder to host (respect their preferences).
-		go func(r models.Ride) {
-			if allowed, _ := helpers.IsNotificationAllowed(r.HostUserID, helpers.NotifTripReminders, r.ID); !allowed {
-				return
-			}
-			if err := ns.fcmService.SendRideReminderNotification(
-				r.HostUserID,
-				rideRoute,
-				timeString,
-				r.ID,
-			); err != nil {
-				log.Printf("Error sending ride reminder to host %s: %v", r.HostUserID, err)
-			}
-		}(ride)
-
-		// Get all accepted bookings for this ride
-		var bookings []models.Booking
-		if err := database.Database.Db.Where("ride_id = ? AND request_status = ?", ride.ID, "accepted").
-			Find(&bookings).Error; err != nil {
-			log.Printf("Error fetching bookings for ride %s: %v", ride.ID, err)
+	for _, ride := range rides {
+		// Mark sent atomically BEFORE the actual send. The partial
+		// index on (start_time WHERE trip_today_email_sent_at IS
+		// NULL) means this single UPDATE acts as a lease — any
+		// concurrent tick that hits the same row sees 0 rows
+		// updated and skips. Trade-off: if SES fails after this,
+		// the user gets no email. Acceptable; spamming is worse.
+		stamp := time.Now()
+		res := database.Database.Db.Model(&models.Ride{}).
+			Where("id = ? AND trip_today_email_sent_at IS NULL", ride.ID).
+			Update("trip_today_email_sent_at", stamp)
+		if res.Error != nil {
+			log.Printf("checkTripTodayEmails: mark sent %s: %v", ride.ID, res.Error)
+			continue
+		}
+		if res.RowsAffected == 0 {
+			// Lost the race to another tick; skip.
 			continue
 		}
 
-		// Send reminders to all passengers (each respects their own
-		// trip-reminder preference).
-		for _, booking := range bookings {
-			go func(b models.Booking, route, timeStr string, rideID string) {
-				if allowed, _ := helpers.IsNotificationAllowed(b.PassengerID, helpers.NotifTripReminders, ride.ID); !allowed {
+		// Host first.
+		go func(r models.Ride) {
+			if r.HostUser.Email == "" {
+				return
+			}
+			if err := helpers.SendTripTodayEmail(helpers.TripTodayEmailParams{
+				ToEmail:       r.HostUser.Email,
+				ToName:        r.HostUser.Name,
+				RideID:        r.ID.String(),
+				StartLocation: r.StartLocation,
+				EndLocation:   r.EndLocation,
+				StartTime:     r.StartTime,
+				HostName:      r.HostUser.Name,
+				HostFirst:     firstName(r.HostUser.Name),
+				TotalPrice:    r.TotalPrice,
+				IsHost:        true,
+			}); err != nil {
+				log.Printf("checkTripTodayEmails: host email %s: %v", r.HostUser.Email, err)
+			}
+		}(ride)
+
+		// Then every accepted passenger.
+		var bookings []models.Booking
+		if err := database.Database.Db.Preload("Passenger").
+			Where("ride_id = ? AND request_status = ?", ride.ID, "accepted").
+			Find(&bookings).Error; err != nil {
+			log.Printf("checkTripTodayEmails: bookings %s: %v", ride.ID, err)
+			continue
+		}
+		for _, b := range bookings {
+			go func(b models.Booking, r models.Ride) {
+				if b.Passenger.Email == "" {
 					return
 				}
-				if err := ns.fcmService.SendRideReminderNotification(
-					b.PassengerID,
-					route,
-					timeStr,
-					ride.ID,
-				); err != nil {
-					log.Printf("Error sending ride reminder to passenger %s: %v", b.PassengerID, err)
+				if err := helpers.SendTripTodayEmail(helpers.TripTodayEmailParams{
+					ToEmail:       b.Passenger.Email,
+					ToName:        b.Passenger.Name,
+					RideID:        r.ID.String(),
+					StartLocation: r.StartLocation,
+					EndLocation:   r.EndLocation,
+					StartTime:     r.StartTime,
+					HostName:      r.HostUser.Name,
+					HostFirst:     firstName(r.HostUser.Name),
+					TotalPrice:    r.TotalPrice,
+					IsHost:        false,
+				}); err != nil {
+					log.Printf("checkTripTodayEmails: passenger email %s: %v", b.Passenger.Email, err)
 				}
-			}(booking, rideRoute, timeString, ride.ID.String())
+			}(b, ride)
 		}
 	}
+}
+
+// firstName returns the first whitespace-separated token of a name,
+// or the original string if it's a single word. Used to render
+// "Hop in with {firstName}" warmly without using the full name.
+func firstName(full string) string {
+	for i := 0; i < len(full); i++ {
+		if full[i] == ' ' {
+			return full[:i]
+		}
+	}
+	return full
 }
 
 // ScheduleRideCancellationNotifications sends notifications when a ride is cancelled
@@ -228,38 +267,5 @@ func (ns *NotificationScheduler) ScheduleRideCancellationNotifications(rideID st
 	}
 }
 
-// formatDuration formats a time duration into a human-readable string
-func formatDuration(d time.Duration) string {
-	if d < time.Minute {
-		return "less than a minute"
-	}
-	
-	minutes := int(d.Minutes())
-	if minutes < 60 {
-		if minutes == 1 {
-			return "1 minute"
-		}
-		return fmt.Sprintf("%d minutes", minutes)
-	}
-	
-	hours := minutes / 60
-	remainingMinutes := minutes % 60
-	
-	if hours == 1 {
-		if remainingMinutes == 0 {
-			return "1 hour"
-		}
-		if remainingMinutes == 1 {
-			return "1 hour 1 minute"
-		}
-		return fmt.Sprintf("1 hour %d minutes", remainingMinutes)
-	}
-	
-	if remainingMinutes == 0 {
-		return fmt.Sprintf("%d hours", hours)
-	}
-	if remainingMinutes == 1 {
-		return fmt.Sprintf("%d hours 1 minute", hours)
-	}
-	return fmt.Sprintf("%d hours %d minutes", hours, remainingMinutes)
-}
+// (formatDuration humaniser removed alongside checkRideReminders.
+// Day-before email uses time.Format directly; no humaniser needed.)

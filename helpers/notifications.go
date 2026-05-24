@@ -16,15 +16,19 @@ import (
 // migration patches their rows.
 const (
 	NotifChatMessages   = "chat_messages"
+	NotifDirectMessages = "direct_messages"
 	NotifRideUpdates    = "ride_updates"
 	NotifTripReminders  = "trip_reminders"
 	NotifRatingPrompts  = "rating_prompts"
 )
 
 // AllNotifCategories is the canonical list the settings UI walks.
-// Order is presentation order, not severity.
+// Order is presentation order, not severity. DMs surface separately
+// from group ride chat so a user can mute the group without losing
+// 1:1 host-to-passenger threads (and vice versa).
 var AllNotifCategories = []string{
 	NotifChatMessages,
+	NotifDirectMessages,
 	NotifRideUpdates,
 	NotifTripReminders,
 	NotifRatingPrompts,

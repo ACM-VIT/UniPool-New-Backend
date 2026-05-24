@@ -12,6 +12,22 @@ import (
 	"unipool-backend/models"
 )
 
+// OnChatMessagePersisted is the bridge from the WebSocket layer
+// (which lives in this package, the lowest in the dep graph) to the
+// FCM fan-out logic (which lives in services + routes/chat, both
+// higher up). main.go wires this at startup after services init.
+//
+// Why a hook variable: chat messages are sent over WS, not HTTP, so
+// the existing fanOutRideNotifications / fanOutDMNotification calls
+// in the HTTP handlers (routes/chat/chat.go) never actually run for
+// real user messages. Without this hook, every chat / DM message
+// silently persists with zero push notifications fired — which is
+// exactly the "I don't get DM notifications" bug users reported.
+//
+// nil-safe: handleChatMessage no-ops if the hook hasn't been wired,
+// so tests + isolated initializer use stays clean.
+var OnChatMessagePersisted func(messageID, roomID, senderID, content string)
+
 const (
 	writeWait = 10 * time.Second
 
@@ -146,6 +162,13 @@ func (c *Client) handleChatMessage(message []byte) {
 
 		if updatedMessage, err := json.Marshal(m); err == nil {
 			c.Hub.BroadcastToRoom(c.RoomID, updatedMessage)
+		}
+
+		// FCM fan-out. Routes/chat owns the recipient resolution +
+		// preference gating logic; we just hand it the persisted
+		// message's roomID + sender so it can decide who to push.
+		if OnChatMessagePersisted != nil {
+			OnChatMessagePersisted(msg.ID.String(), m.RoomID, m.SenderID, m.Content)
 		}
 	}(chatMsg, tempID)
 }
