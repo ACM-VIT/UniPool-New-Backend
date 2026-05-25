@@ -174,6 +174,7 @@ func createIndexes(db *gorm.DB) error {
 		{"idx_rides_start_lat_lng", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_start_lat_lng ON rides(start_latitude, start_longitude) WHERE start_latitude IS NOT NULL AND start_longitude IS NOT NULL"},
 		{"idx_rides_start_geog", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_start_geog ON rides USING GIST ((ST_SetSRID(ST_MakePoint(start_longitude::float8, start_latitude::float8), 4326)::geography)) WHERE start_latitude IS NOT NULL AND start_longitude IS NOT NULL"},
 		{"idx_rides_open_upcoming", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_open_upcoming ON rides(start_time, host_user_id) WHERE deleted_at IS NULL AND is_ongoing = 0"},
+		{"idx_rides_start_time_active_v2", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_start_time_active_v2 ON rides(start_time, id, host_user_id) WHERE deleted_at IS NULL"},
 
 		{"idx_bookings_ride_id", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_ride_id ON bookings(ride_id)"},
 		{"idx_bookings_passenger_id", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_passenger_id ON bookings(passenger_id)"},
@@ -183,6 +184,7 @@ func createIndexes(db *gorm.DB) error {
 		{"idx_bookings_ride_status", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_ride_status ON bookings(ride_id, request_status) WHERE deleted_at IS NULL"},
 
 		{"idx_bookings_ride_passenger", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_ride_passenger ON bookings(ride_id, passenger_id)"},
+		{"idx_bookings_ride_status_active_v2", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_bookings_ride_status_active_v2 ON bookings(ride_id, request_status, passenger_id) WHERE deleted_at IS NULL"},
 		{"idx_rides_host_time", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_rides_host_time ON rides(host_user_id, start_time)"},
 		{"idx_ratings_rater_ride_rated", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ratings_rater_ride_rated ON ride_ratings(rater_user_id, ride_id, rated_user_id)"},
 		{"idx_ratings_ride_rater", "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ratings_ride_rater ON ride_ratings(ride_id, rater_user_id)"},

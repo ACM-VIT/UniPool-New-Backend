@@ -3,6 +3,7 @@ package appstate
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,24 +86,28 @@ func GetState(c *fiber.Ctx) error {
 	user, ok := c.Locals("user").(models.User)
 	if ok {
 		resp.Authenticated = true
+		includeUser := shouldIncludeUserSummary(c)
 
-		wg.Add(4)
+		if includeUser {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
 
-		go func() {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
+				userSummary, err := buildUserSummary(ctx, user)
+				if err != nil {
+					addError("user", "user details unavailable")
+					return
+				}
 
-			userSummary, err := buildUserSummary(ctx, user)
-			if err != nil {
-				addError("user", "user details unavailable")
-				return
-			}
+				mu.Lock()
+				resp.User = userSummary
+				mu.Unlock()
+			}()
+		}
 
-			mu.Lock()
-			resp.User = userSummary
-			mu.Unlock()
-		}()
+		wg.Add(3)
 
 		go func() {
 			defer wg.Done()
@@ -141,6 +146,16 @@ func GetState(c *fiber.Ctx) error {
 		resp.Errors = errors
 	}
 	return c.JSON(resp)
+}
+
+func shouldIncludeUserSummary(c *fiber.Ctx) bool {
+	raw := strings.ToLower(strings.TrimSpace(c.Query("include_user")))
+	switch raw {
+	case "0", "false", "no":
+		return false
+	default:
+		return true
+	}
 }
 
 func parseLocation(c *fiber.Ctx) (float64, float64, bool, error) {

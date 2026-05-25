@@ -92,24 +92,24 @@ func BuildUserRides(viewerID uuid.UUID, scope string) ([]UserRidesResponse, erro
 	// the scope filter and viewer_state agree on what "past" means.
 	pastCutoff := time.Now().Add(-24 * time.Hour)
 	hostScope := ""
-	bookingScope := ""
+	finalScope := ""
 	args := []any{viewerID}
 	switch scope {
 	case "upcoming":
 		hostScope = "AND r.start_time >= ?"
-		bookingScope = "AND r.start_time >= ?"
+		finalScope = "AND r.start_time >= ?"
 		args = append(args, pastCutoff)
 	case "past":
 		hostScope = "AND r.start_time < ?"
-		bookingScope = "AND r.start_time < ?"
+		finalScope = "AND r.start_time < ?"
 		args = append(args, pastCutoff)
 	}
 
 	args = append(args, viewerID)
-	if bookingScope != "" {
+	args = append(args, viewerID)
+	if finalScope != "" {
 		args = append(args, pastCutoff)
 	}
-	args = append(args, viewerID)
 
 	query := `
 		WITH viewer_ride_ids AS (
@@ -123,11 +123,8 @@ func BuildUserRides(viewerID uuid.UUID, scope string) ([]UserRidesResponse, erro
 
 			SELECT b.ride_id
 			  FROM bookings b
-			  JOIN rides r ON r.id = b.ride_id
 			 WHERE b.passenger_id = ?
 			   AND b.deleted_at IS NULL
-			   AND r.deleted_at IS NULL
-			   ` + bookingScope + `
 		)
 		SELECT r.id AS ride_id,
 		       r.host_user_id,
@@ -151,6 +148,8 @@ func BuildUserRides(viewerID uuid.UUID, scope string) ([]UserRidesResponse, erro
 		    ON b.ride_id = r.id
 		   AND b.passenger_id = ?
 		   AND b.deleted_at IS NULL
+		 WHERE r.deleted_at IS NULL
+		   ` + finalScope + `
 		 ORDER BY r.start_time DESC`
 
 	if err := database.Database.Db.WithContext(ctx).Raw(query, args...).Scan(&rows).Error; err != nil {

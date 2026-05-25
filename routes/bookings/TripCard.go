@@ -78,13 +78,10 @@ func BuildActiveTripCard(userID uuid.UUID) *TripCard {
 	weekAgo := now.Add(-7 * 24 * time.Hour)
 	dayAgo := now.Add(-24 * time.Hour)
 
-	// Bucket priorities: lower number wins. The CASE in the SELECT
-	// gives us per-bucket tie-breaking; ORDER BY bucket ASC, then by
-	// start_time directionally per bucket. We can't order
-	// directionally per bucket in one statement easily, so we sort
-	// upcoming asc and recent desc by adding an "order_key" timestamp
-	// that flips sign for the recent bucket — newest-recent first,
-	// soonest-upcoming first, but upcoming always wins outright.
+	// Pull at most one row per candidate bucket before joining the
+	// host. That keeps the hot home snapshot bounded even for users
+	// with a long accepted-booking history: one upcoming candidate
+	// and one recent-undismissed candidate, then a two-row final sort.
 	type row struct {
 		BookingID         uuid.UUID `gorm:"column:booking_id"`
 		RideID            uuid.UUID `gorm:"column:ride_id"`
@@ -98,44 +95,74 @@ func BuildActiveTripCard(userID uuid.UUID) *TripCard {
 		TotalPrice        int       `gorm:"column:total_price"`
 	}
 	var hit row
-	err := database.Database.Db.
-		Table("bookings AS b").
-		Select(`
-			b.id AS booking_id,
-			r.id AS ride_id,
+	err := database.Database.Db.Raw(`
+		WITH upcoming AS (
+			SELECT
+				b.id AS booking_id,
+				r.id AS ride_id,
+				r.host_user_id,
+				r.start_location,
+				r.end_location,
+				r.start_time,
+				r.total_price,
+				0 AS bucket
+			  FROM rides r
+			  JOIN bookings b
+			    ON b.ride_id = r.id
+			   AND b.passenger_id = ?
+			   AND b.request_status = 'accepted'
+			   AND b.deleted_at IS NULL
+			 WHERE r.deleted_at IS NULL
+			   AND r.host_user_id <> b.passenger_id
+			   AND r.start_time BETWEEN ? AND ?
+			 ORDER BY r.start_time ASC
+			 LIMIT 1
+		),
+		recent AS (
+			SELECT
+				b.id AS booking_id,
+				r.id AS ride_id,
+				r.host_user_id,
+				r.start_location,
+				r.end_location,
+				r.start_time,
+				r.total_price,
+				1 AS bucket
+			  FROM rides r
+			  JOIN bookings b
+			    ON b.ride_id = r.id
+			   AND b.passenger_id = ?
+			   AND b.request_status = 'accepted'
+			   AND b.deleted_at IS NULL
+			 WHERE r.deleted_at IS NULL
+			   AND r.host_user_id <> b.passenger_id
+			   AND b.dismissed_at IS NULL
+			   AND r.start_time >= ?
+			   AND r.start_time < ?
+			 ORDER BY r.start_time DESC
+			 LIMIT 1
+		),
+		candidate AS (
+			SELECT * FROM upcoming
+			UNION ALL
+			SELECT * FROM recent
+		)
+		SELECT
+			c.booking_id,
+			c.ride_id,
 			u.id AS host_user_id,
 			u.name AS host_name,
 			u.profile_picture_url AS host_profile_picture_url,
 			u.upi_vpa AS host_upi_vpa,
-			r.start_location,
-			r.end_location,
-			r.start_time,
-			r.total_price,
-			CASE
-				WHEN r.start_time BETWEEN ? AND ? THEN 0
-				WHEN r.start_time BETWEEN ? AND ? AND b.dismissed_at IS NULL THEN 1
-				ELSE 2
-			END AS bucket
-		`, now, soon, weekAgo, now).
-		Joins("JOIN rides r ON r.id = b.ride_id").
-		Joins("JOIN users u ON u.id = r.host_user_id").
-		Where("b.passenger_id = ? AND b.request_status = ?", userID, "accepted").
-		// Skip self-bookings (legacy data where host_user_id ==
-		// passenger_id from before the /bookings/request guard
-		// existed). Surfacing a "Pay {host_name}" card to a viewer
-		// who IS the host doesn't make sense — they can't pay
-		// themselves, the chat ack flow becomes nonsensical, and
-		// the rating saga earlier today traced back to exactly one
-		// of these rows. Filter at the query so this case never
-		// reaches the client.
-		Where("r.host_user_id <> b.passenger_id").
-		Where(`
-			(r.start_time BETWEEN ? AND ?)
-			OR (r.start_time BETWEEN ? AND ? AND b.dismissed_at IS NULL)
-		`, now, soon, weekAgo, now).
-		Order("bucket ASC, r.start_time DESC").
-		Limit(1).
-		Scan(&hit).Error
+			c.start_location,
+			c.end_location,
+			c.start_time,
+			c.total_price
+		  FROM candidate c
+		  JOIN users u ON u.id = c.host_user_id
+		 ORDER BY c.bucket ASC
+		 LIMIT 1
+	`, userID, now, soon, userID, weekAgo, now).Scan(&hit).Error
 	if err != nil || hit.BookingID == (uuid.UUID{}) {
 		return nil
 	}
