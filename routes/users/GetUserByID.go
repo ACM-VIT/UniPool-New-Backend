@@ -23,7 +23,7 @@ func GetUserByID(c *fiber.Ctx) error {
 	result := database.Database.Db.
 		Select("id, name, email, profile_picture_url, gender, created_at").
 		Where("id = ?", userID).
-		First(&user)
+		Take(&user)
 	if result.Error != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error":   true,

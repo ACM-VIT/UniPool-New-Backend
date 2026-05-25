@@ -1,6 +1,7 @@
 package users
 
 import (
+	"strings"
 	"time"
 	"unipool-backend/database"
 	"unipool-backend/models"
@@ -14,6 +15,91 @@ import (
 func GetUser(c *fiber.Ctx) error {
 	// Extract user info from locals
 	if user, ok := c.Locals("user").(models.User); ok {
+		if wantsUserSummary(c) {
+			type summaryRow struct {
+				ID                uuid.UUID
+				Name              string
+				Email             string
+				ProfilePictureURL string
+				ContactNumber     string
+				Gender            string
+				YOB               uint
+				DefaultAddress    string
+				CreatedAt         time.Time
+				UpdatedAt         time.Time
+				UPIVPA            string
+				IsEmailVerified   bool
+				InstituteEmail    string
+				InstituteID       *uuid.UUID
+				InstituteName     *string
+				InstituteCountry  *string
+			}
+			var row summaryRow
+			if err := database.Database.Db.Raw(`
+				SELECT
+					u.id,
+					u.name,
+					u.email,
+					u.profile_picture_url,
+					u.contact_number,
+					u.gender,
+					u.yob,
+					u.default_address,
+					u.created_at,
+					u.updated_at,
+					u.upi_vpa,
+					u.is_email_verified,
+					u.institute_email,
+					u.institute_id,
+					i.name AS institute_name,
+					i.country AS institute_country
+				  FROM users u
+				  LEFT JOIN institutes i ON i.id = u.institute_id
+				 WHERE u.id = ?
+				 LIMIT 1
+			`, user.ID).Scan(&row).Error; err != nil {
+				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+					"error":   true,
+					"message": "Failed to load user details",
+				})
+			}
+			if row.ID == (uuid.UUID{}) {
+				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+					"error":   true,
+					"message": "User not found",
+				})
+			}
+
+			var institute any
+			if row.InstituteID != nil {
+				institute = fiber.Map{
+					"id":      row.InstituteID,
+					"name":    row.InstituteName,
+					"country": row.InstituteCountry,
+				}
+			}
+
+			return c.Status(fiber.StatusOK).JSON(fiber.Map{
+				"user": fiber.Map{
+					"id":                  row.ID,
+					"name":                row.Name,
+					"email":               row.Email,
+					"profile_picture_url": row.ProfilePictureURL,
+					"contact_number":      row.ContactNumber,
+					"gender":              row.Gender,
+					"yob":                 row.YOB,
+					"default_address":     row.DefaultAddress,
+					"created_at":          row.CreatedAt,
+					"updated_at":          row.UpdatedAt,
+					"upi_vpa":             row.UPIVPA,
+					"is_email_verified":   row.IsEmailVerified,
+					"institute_email":     row.InstituteEmail,
+					"institute":           institute,
+					"institute_id":        row.InstituteID,
+				},
+			})
+		}
+
 		type detailRow struct {
 			ID                uuid.UUID
 			Name              string
@@ -230,4 +316,12 @@ func GetUser(c *fiber.Ctx) error {
 		"error":   true,
 		"message": "User data not found in locals",
 	})
+}
+
+func wantsUserSummary(c *fiber.Ctx) bool {
+	raw := strings.ToLower(strings.TrimSpace(c.Query("summary")))
+	if raw == "1" || raw == "true" || raw == "yes" {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(c.Query("surface")), "context")
 }

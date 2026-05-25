@@ -1,13 +1,9 @@
 package helpers
 
 import (
-	"errors"
-
 	"unipool-backend/database"
-	"unipool-backend/models"
 
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 )
 
 // Notification categories. Keep these strings stable — they're the
@@ -115,30 +111,33 @@ func IsNotificationAllowed(userID uuid.UUID, category string, rideID uuid.UUID) 
 		return true, nil
 	}
 
-	// Per-ride override first.
 	if rideID != uuid.Nil {
-		var perRide models.NotificationPreference
-		err := database.Database.Db.
-			Where("user_id = ? AND category = ? AND ride_id = ?", userID, category, rideID).
-			First(&perRide).Error
-		if err == nil {
-			return perRide.Enabled, nil
-		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return true, err
-		}
+		var enabled bool
+		err := database.Database.Db.Raw(`
+			SELECT COALESCE(rp.enabled, gp.enabled, TRUE) AS enabled
+			  FROM (SELECT 1) seed
+			  LEFT JOIN notification_preferences rp
+			    ON rp.user_id = ?
+			   AND rp.category = ?
+			   AND rp.ride_id = ?
+			  LEFT JOIN notification_preferences gp
+			    ON gp.user_id = ?
+			   AND gp.category = ?
+			   AND gp.ride_id IS NULL
+			 LIMIT 1
+		`, userID, category, rideID, userID, category).Scan(&enabled).Error
+		return enabled, err
 	}
 
-	// Global category.
-	var global models.NotificationPreference
-	err := database.Database.Db.
-		Where("user_id = ? AND category = ? AND ride_id IS NULL", userID, category).
-		First(&global).Error
-	if err == nil {
-		return global.Enabled, nil
-	}
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return true, nil
-	}
-	return true, err
+	var enabled bool
+	err := database.Database.Db.Raw(`
+		SELECT COALESCE(gp.enabled, TRUE) AS enabled
+		  FROM (SELECT 1) seed
+		  LEFT JOIN notification_preferences gp
+		    ON gp.user_id = ?
+		   AND gp.category = ?
+		   AND gp.ride_id IS NULL
+		 LIMIT 1
+	`, userID, category).Scan(&enabled).Error
+	return enabled, err
 }

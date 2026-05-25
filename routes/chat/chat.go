@@ -18,6 +18,7 @@ import (
 	"unipool-backend/database"
 	"unipool-backend/helpers"
 	"unipool-backend/initializer"
+	"unipool-backend/middleware"
 	"unipool-backend/models"
 	"unipool-backend/services"
 )
@@ -138,6 +139,22 @@ type messageRow struct {
 	CreatedAt               time.Time
 	SenderName              string
 	SenderProfilePictureURL string
+	ReadBy                  []string
+}
+
+func splitReadByCSV(csv string) []string {
+	if csv == "" {
+		return []string{}
+	}
+	parts := strings.Split(csv, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func transformMessageRow(row *messageRow) fiber.Map {
@@ -156,6 +173,7 @@ func transformMessageRow(row *messageRow) fiber.Map {
 		"timestamp": row.CreatedAt.Format(time.RFC3339),
 		"kind":      kind,
 		"metadata":  metadata,
+		"read_by":   row.ReadBy,
 		"sender": fiber.Map{
 			"name":                row.SenderName,
 			"profile_picture_url": row.SenderProfilePictureURL,
@@ -202,7 +220,7 @@ func upsertRideReadCursor(userID, rideID uuid.UUID, now time.Time) error {
 		INSERT INTO chat_reads (id, user_id, ride_id, last_read_at, created_at, updated_at)
 		VALUES (gen_random_uuid(), ?, ?, ?, ?, ?)
 		ON CONFLICT (user_id, ride_id) DO UPDATE SET last_read_at = EXCLUDED.last_read_at, updated_at = EXCLUDED.updated_at
-	`, userID, rideID, now, now, now).Error
+	`, userID.String(), rideID.String(), now, now, now).Error
 }
 
 func upsertDMReadCursor(userID uuid.UUID, dmRoomID string, now time.Time) error {
@@ -211,7 +229,7 @@ func upsertDMReadCursor(userID uuid.UUID, dmRoomID string, now time.Time) error 
 		VALUES (gen_random_uuid(), ?, ?, ?, ?, ?)
 		ON CONFLICT (user_id, dm_room_id)
 		DO UPDATE SET last_read_at = EXCLUDED.last_read_at, updated_at = EXCLUDED.updated_at
-	`, userID, dmRoomID, now, now, now).Error
+	`, userID.String(), dmRoomID, now, now, now).Error
 }
 
 // ----------------------------------------------------------------------
@@ -236,45 +254,152 @@ func GetRideMessages(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "User not authenticated or found"})
 	}
 
-	// Membership check: only host / accepted can read the group ride
-	// chat. Pending requesters are routed to a DM with the host
-	// (`/dm/...`) and never touch this endpoint; rejected requesters
-	// and outsiders get 403.
-	role, _, err := getRideViewerRole(user.ID, rideUUID)
-	if err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "membership lookup failed"})
+	limit, before, hasBefore := parsePagination(c)
+
+	type rideMessagePageRow struct {
+		ViewerRole              string                 `gorm:"column:viewer_role"`
+		ID                      *uuid.UUID             `gorm:"column:id"`
+		RideID                  *uuid.UUID             `gorm:"column:ride_id"`
+		DMRoomID                *string                `gorm:"column:dm_room_id"`
+		SenderID                *uuid.UUID             `gorm:"column:sender_id"`
+		Content                 *string                `gorm:"column:content"`
+		Kind                    *string                `gorm:"column:kind"`
+		Metadata                models.MessageMetadata `gorm:"column:metadata"`
+		CreatedAt               *time.Time             `gorm:"column:created_at"`
+		SenderName              *string                `gorm:"column:sender_name"`
+		SenderProfilePictureURL *string                `gorm:"column:sender_profile_picture_url"`
+		ReadByCSV               *string                `gorm:"column:read_by_csv"`
 	}
-	if role != roleHost && role != roleAccepted {
+
+	beforeClause := ""
+	args := []any{
+		user.ID,           // r.host_user_id = ?
+		user.ID,           // b.passenger_id = ?
+		rideUUID,          // r.id = ?
+		rideUUID.String(), // cr.ride_id = ? (chat_reads stores ride ids as strings)
+		rideUUID.String(), // m.ride_id = ? (messages stores ride ids as strings)
+	}
+	if hasBefore {
+		beforeClause = "AND m.created_at < ?"
+		args = append(args, before)
+	}
+	args = append(args, limit)
+
+	// Resolve membership and load the first message page in one DB
+	// statement. The LEFT JOIN keeps one role row even for empty
+	// chats, so authorized no-message rooms still return 200/count 0
+	// and unauthorized viewers still get the same 403 as before.
+	var rows []rideMessagePageRow
+	if err := database.Database.Db.Raw(`
+		WITH membership AS (
+			SELECT
+				CASE
+					WHEN r.host_user_id = ? THEN '`+roleHost+`'
+					WHEN b.request_status IS NOT NULL THEN b.request_status
+					ELSE '`+roleNone+`'
+				END AS viewer_role
+			  FROM rides r
+			  LEFT JOIN bookings b
+			    ON b.ride_id = r.id
+			   AND b.passenger_id = ?
+			   AND b.deleted_at IS NULL
+			 WHERE r.id = ?
+			 LIMIT 1
+		),
+		page AS (
+			SELECT
+				m.id,
+				m.ride_id::UUID AS ride_id,
+				m.dm_room_id,
+				m.sender_id,
+				m.content,
+				m.kind,
+				m.metadata,
+				m.created_at,
+				u.name AS sender_name,
+				u.profile_picture_url AS sender_profile_picture_url,
+				COALESCE((
+					SELECT string_agg(cr.user_id::STRING, ',')
+					  FROM chat_reads cr
+					 WHERE cr.deleted_at IS NULL
+					   AND cr.ride_id = ?
+					   AND cr.user_id <> m.sender_id::STRING
+					   AND cr.last_read_at >= m.created_at
+				), '') AS read_by_csv
+			  FROM messages m
+			  JOIN users u ON u.id = m.sender_id
+			 WHERE m.ride_id = ?
+			   AND m.deleted_at IS NULL
+			   `+beforeClause+`
+			   AND EXISTS (
+					SELECT 1
+					  FROM membership
+					 WHERE viewer_role IN ('`+roleHost+`', '`+roleAccepted+`')
+			   )
+			 ORDER BY m.created_at DESC
+			 LIMIT ?
+		)
+		SELECT
+			membership.viewer_role,
+			page.id,
+			page.ride_id,
+			page.dm_room_id,
+			page.sender_id,
+			page.content,
+			page.kind,
+			page.metadata,
+			page.created_at,
+			page.sender_name,
+			page.sender_profile_picture_url,
+			page.read_by_csv
+		  FROM membership
+		  LEFT JOIN page ON TRUE
+	`, args...).Scan(&rows).Error; err != nil {
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch messages"})
+	}
+	if len(rows) == 0 || (rows[0].ViewerRole != roleHost && rows[0].ViewerRole != roleAccepted) {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not a participant in this ride"})
 	}
 
-	limit, before, hasBefore := parsePagination(c)
-
-	query := database.Database.Db.
-		Table("messages AS m").
-		Select(`
-			m.id,
-			m.ride_id,
-			m.dm_room_id,
-			m.sender_id,
-			m.content,
-			m.kind,
-			m.metadata,
-			m.created_at,
-			u.name AS sender_name,
-			u.profile_picture_url AS sender_profile_picture_url
-		`).
-		Joins("JOIN users u ON u.id = m.sender_id").
-		Where("m.ride_id = ?", rideUUID).
-		Order("m.created_at desc").
-		Limit(limit)
-	if hasBefore {
-		query = query.Where("m.created_at < ?", before)
-	}
-
-	var messages []messageRow
-	if err := query.Scan(&messages).Error; err != nil {
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch messages"})
+	messages := make([]messageRow, 0, len(rows))
+	for i := range rows {
+		row := rows[i]
+		if row.ID == nil || row.SenderID == nil || row.CreatedAt == nil {
+			continue
+		}
+		content := ""
+		if row.Content != nil {
+			content = *row.Content
+		}
+		kind := ""
+		if row.Kind != nil {
+			kind = *row.Kind
+		}
+		senderName := ""
+		if row.SenderName != nil {
+			senderName = *row.SenderName
+		}
+		senderProfilePictureURL := ""
+		if row.SenderProfilePictureURL != nil {
+			senderProfilePictureURL = *row.SenderProfilePictureURL
+		}
+		readBy := []string{}
+		if row.ReadByCSV != nil {
+			readBy = splitReadByCSV(*row.ReadByCSV)
+		}
+		messages = append(messages, messageRow{
+			ID:                      *row.ID,
+			RideID:                  row.RideID,
+			DMRoomID:                row.DMRoomID,
+			SenderID:                *row.SenderID,
+			Content:                 content,
+			Kind:                    kind,
+			Metadata:                row.Metadata,
+			CreatedAt:               *row.CreatedAt,
+			SenderName:              senderName,
+			SenderProfilePictureURL: senderProfilePictureURL,
+			ReadBy:                  readBy,
+		})
 	}
 
 	// Reverse to chronological order on the wire — easier for the
@@ -304,43 +429,152 @@ func GetDMMessages(c *fiber.Ctx) error {
 	if !ok {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "User not authenticated or found"})
 	}
-	if _, allowed, err := canAccessDMRoom(user.ID, dmRoomID); err != nil {
-		if errors.Is(err, errInvalidDMRoomID) {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid dm room id format"})
-		}
-		log.Printf("GetDMMessages: dm access lookup failed: %v", err)
-		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "dm access lookup failed"})
-	} else if !allowed {
+	a, b, err := parseDMRoomID(dmRoomID)
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid dm room id format"})
+	}
+	if user.ID != a && user.ID != b {
 		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not a participant in this dm"})
+	}
+	otherID := b
+	if user.ID == b {
+		otherID = a
 	}
 
 	limit, before, hasBefore := parsePagination(c)
 
-	query := database.Database.Db.
-		Table("messages AS m").
-		Select(`
-			m.id,
-			m.ride_id,
-			m.dm_room_id,
-			m.sender_id,
-			m.content,
-			m.kind,
-			m.metadata,
-			m.created_at,
-			u.name AS sender_name,
-			u.profile_picture_url AS sender_profile_picture_url
-		`).
-		Joins("JOIN users u ON u.id = m.sender_id").
-		Where("m.dm_room_id = ?", dmRoomID).
-		Order("m.created_at desc").
-		Limit(limit)
-	if hasBefore {
-		query = query.Where("m.created_at < ?", before)
+	type dmMessagePageRow struct {
+		Allowed                 bool                   `gorm:"column:allowed"`
+		ID                      *uuid.UUID             `gorm:"column:id"`
+		RideID                  *uuid.UUID             `gorm:"column:ride_id"`
+		DMRoomID                *string                `gorm:"column:dm_room_id"`
+		SenderID                *uuid.UUID             `gorm:"column:sender_id"`
+		Content                 *string                `gorm:"column:content"`
+		Kind                    *string                `gorm:"column:kind"`
+		Metadata                models.MessageMetadata `gorm:"column:metadata"`
+		CreatedAt               *time.Time             `gorm:"column:created_at"`
+		SenderName              *string                `gorm:"column:sender_name"`
+		SenderProfilePictureURL *string                `gorm:"column:sender_profile_picture_url"`
+		ReadByCSV               *string                `gorm:"column:read_by_csv"`
 	}
 
-	var messages []messageRow
-	if err := query.Scan(&messages).Error; err != nil {
+	beforeClause := ""
+	args := []any{user.ID, otherID, otherID, user.ID, dmRoomID, dmRoomID}
+	if hasBefore {
+		beforeClause = "AND m.created_at < ?"
+		args = append(args, before)
+	}
+	args = append(args, limit)
+
+	// Access gate and message page in one statement. The access CTE
+	// always returns exactly one row, so an allowed-but-empty DM
+	// returns count 0 while a non-relationship still returns 403.
+	var rows []dmMessagePageRow
+	if err := database.Database.Db.Raw(`
+		WITH access AS (
+			SELECT EXISTS (
+				SELECT 1
+				  FROM bookings b
+				  JOIN rides r ON r.id = b.ride_id
+				 WHERE b.deleted_at IS NULL
+				   AND r.deleted_at IS NULL
+				   AND (
+				        (r.host_user_id = ? AND b.passenger_id = ?)
+				     OR (r.host_user_id = ? AND b.passenger_id = ?)
+				   )
+				 LIMIT 1
+			) AS allowed
+		),
+		page AS (
+			SELECT
+				m.id,
+				NULLIF(m.ride_id, '')::UUID AS ride_id,
+				m.dm_room_id,
+				m.sender_id,
+				m.content,
+				m.kind,
+				m.metadata,
+				m.created_at,
+				u.name AS sender_name,
+				u.profile_picture_url AS sender_profile_picture_url,
+				COALESCE((
+					SELECT string_agg(cr.user_id::STRING, ',')
+					  FROM chat_reads cr
+					 WHERE cr.deleted_at IS NULL
+					   AND cr.dm_room_id = ?
+					   AND cr.user_id <> m.sender_id::STRING
+					   AND cr.last_read_at >= m.created_at
+				), '') AS read_by_csv
+			  FROM messages m
+			  JOIN users u ON u.id = m.sender_id
+			 WHERE m.dm_room_id = ?
+			   AND m.deleted_at IS NULL
+			   `+beforeClause+`
+			   AND EXISTS (SELECT 1 FROM access WHERE allowed)
+			 ORDER BY m.created_at DESC
+			 LIMIT ?
+		)
+		SELECT
+			access.allowed,
+			page.id,
+			page.ride_id,
+			page.dm_room_id,
+			page.sender_id,
+			page.content,
+			page.kind,
+			page.metadata,
+			page.created_at,
+			page.sender_name,
+			page.sender_profile_picture_url,
+			page.read_by_csv
+		  FROM access
+		  LEFT JOIN page ON TRUE
+	`, args...).Scan(&rows).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch messages"})
+	}
+	if len(rows) == 0 || !rows[0].Allowed {
+		return c.Status(fiber.StatusForbidden).JSON(fiber.Map{"error": "not a participant in this dm"})
+	}
+
+	messages := make([]messageRow, 0, len(rows))
+	for i := range rows {
+		row := rows[i]
+		if row.ID == nil || row.SenderID == nil || row.CreatedAt == nil {
+			continue
+		}
+		content := ""
+		if row.Content != nil {
+			content = *row.Content
+		}
+		kind := ""
+		if row.Kind != nil {
+			kind = *row.Kind
+		}
+		senderName := ""
+		if row.SenderName != nil {
+			senderName = *row.SenderName
+		}
+		senderProfilePictureURL := ""
+		if row.SenderProfilePictureURL != nil {
+			senderProfilePictureURL = *row.SenderProfilePictureURL
+		}
+		readBy := []string{}
+		if row.ReadByCSV != nil {
+			readBy = splitReadByCSV(*row.ReadByCSV)
+		}
+		messages = append(messages, messageRow{
+			ID:                      *row.ID,
+			RideID:                  row.RideID,
+			DMRoomID:                row.DMRoomID,
+			SenderID:                *row.SenderID,
+			Content:                 content,
+			Kind:                    kind,
+			Metadata:                row.Metadata,
+			CreatedAt:               *row.CreatedAt,
+			SenderName:              senderName,
+			SenderProfilePictureURL: senderProfilePictureURL,
+			ReadBy:                  readBy,
+		})
 	}
 
 	transformed := make([]fiber.Map, 0, len(messages))
@@ -883,6 +1117,22 @@ func GetUserChats(c *fiber.Ctx) error {
 	}
 	var rideRows []chatRideRow
 	if err := database.Database.Db.Raw(`
+		WITH viewer_ride_ids AS (
+			SELECT r.id AS ride_id
+			  FROM rides r
+			 WHERE r.host_user_id = ?
+			   AND r.deleted_at IS NULL
+
+			UNION
+
+			SELECT b.ride_id
+			  FROM bookings b
+			  JOIN rides r ON r.id = b.ride_id
+			 WHERE b.deleted_at IS NULL
+			   AND b.passenger_id = ?
+			   AND b.request_status IN ('accepted', 'pending')
+			   AND r.deleted_at IS NULL
+		)
 		SELECT r.id,
 		       r.created_at,
 		       r.host_user_id,
@@ -898,19 +1148,9 @@ func GetUserChats(c *fiber.Ctx) error {
 		       u.name                AS host_user_name,
 		       u.profile_picture_url AS host_profile_picture_url,
 		       u.is_email_verified   AS host_is_email_verified
-		  FROM rides r
+		  FROM viewer_ride_ids v
+		  JOIN rides r ON r.id = v.ride_id
 		  JOIN users u ON u.id = r.host_user_id
-		 WHERE r.deleted_at IS NULL
-		   AND (
-		        r.host_user_id = ?
-		        OR r.id IN (
-		          SELECT b.ride_id
-		            FROM bookings b
-		           WHERE b.deleted_at IS NULL
-		             AND b.passenger_id = ?
-		             AND b.request_status IN ('accepted', 'pending')
-		        )
-		   )
 		 ORDER BY r.start_time DESC
 	`, user.ID, user.ID).Scan(&rideRows).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch chats"})
@@ -974,23 +1214,23 @@ func GetUserChats(c *fiber.Ctx) error {
 	var summaryRows []chatSummaryRow
 	if err := database.Database.Db.Raw(`
 		WITH ride_ids AS (
-			SELECT id AS ride_id
+			SELECT id AS ride_id, id::STRING AS ride_id_text
 			  FROM rides
 			 WHERE id IN ?
 		),
 		latest AS (
-			SELECT DISTINCT ON (m.ride_id)
-			       m.ride_id,
+			SELECT DISTINCT ON (ri.ride_id)
+			       ri.ride_id,
 			       m.id           AS message_id,
 			       m.content,
 			       m.sender_id,
 			       u.name         AS sender_name,
 			       m.created_at
-			  FROM messages m
+			  FROM ride_ids ri
+			  JOIN messages m ON m.ride_id = ri.ride_id_text
 			  JOIN users u ON u.id = m.sender_id
-			 WHERE m.ride_id IN (SELECT ride_id FROM ride_ids)
-			   AND m.deleted_at IS NULL
-			 ORDER BY m.ride_id, m.created_at DESC
+			 WHERE m.deleted_at IS NULL
+			 ORDER BY ri.ride_id, m.created_at DESC
 		),
 		viewer_status AS (
 			SELECT b.ride_id, b.request_status AS status
@@ -1000,15 +1240,15 @@ func GetUserChats(c *fiber.Ctx) error {
 			   AND b.ride_id IN (SELECT ride_id FROM ride_ids)
 		),
 		unread AS (
-			SELECT m.ride_id, COUNT(*) AS unread_count
-			  FROM messages m
+			SELECT ri.ride_id, COUNT(*) AS unread_count
+			  FROM ride_ids ri
+			  JOIN messages m ON m.ride_id = ri.ride_id_text
 			  LEFT JOIN chat_reads cr
-			    ON cr.ride_id = m.ride_id AND cr.user_id = ?
+			    ON cr.ride_id = ri.ride_id_text AND cr.user_id = ?
 			 WHERE m.deleted_at IS NULL
-			   AND m.ride_id IN (SELECT ride_id FROM ride_ids)
 			   AND m.sender_id <> ?
 			   AND m.created_at > COALESCE(cr.last_read_at, 'epoch'::timestamptz)
-			 GROUP BY m.ride_id
+			 GROUP BY ri.ride_id
 		),
 		ride_mutes AS (
 			SELECT np.ride_id, TRUE AS ride_muted
@@ -1046,7 +1286,7 @@ func GetUserChats(c *fiber.Ctx) error {
 		  LEFT JOIN viewer_status vs ON vs.ride_id = ri.ride_id
 		  LEFT JOIN unread u ON u.ride_id = ri.ride_id
 		  LEFT JOIN ride_mutes rm ON rm.ride_id = ri.ride_id
-	`, rideIDs, user.ID, user.ID, user.ID, user.ID, helpers.NotifChatMessages, user.ID, helpers.NotifChatMessages).Scan(&summaryRows).Error; err != nil {
+	`, rideIDs, user.ID, user.ID.String(), user.ID, user.ID, helpers.NotifChatMessages, user.ID, helpers.NotifChatMessages).Scan(&summaryRows).Error; err != nil {
 		log.Printf("GetUserChats: summary query failed: %v", err)
 	}
 	summaryByRide := make(map[uuid.UUID]chatSummaryRow, len(summaryRows))
@@ -1247,7 +1487,7 @@ func pendingRequestRowsForHost(hostID uuid.UUID, rides []models.Ride) []fiber.Ma
 		  FROM room_ids ri
 		  LEFT JOIN latest l ON l.dm_room_id = ri.dm_room_id
 		  LEFT JOIN unread u ON u.dm_room_id = ri.dm_room_id
-	`, dmRoomIDs, dmRoomIDs, hostID, dmRoomIDs, hostID).Scan(&dmSummaries).Error
+	`, dmRoomIDs, dmRoomIDs, hostID.String(), dmRoomIDs, hostID).Scan(&dmSummaries).Error
 	dmSummaryByRoom := make(map[string]dmSummaryRow, len(dmSummaries))
 	for _, r := range dmSummaries {
 		dmSummaryByRoom[r.DMRoomID] = r
@@ -1388,40 +1628,11 @@ func WebSocketHandler(c *websocket.Conn) {
 		return
 	}
 
-	if initializer.FirebaseApp == nil {
-		log.Printf("WebSocket connection rejected: Firebase not initialized")
-		c.WriteMessage(websocket.CloseMessage, []byte("auth unavailable"))
-		c.Close()
-		return
-	}
-	authClient, err := initializer.FirebaseApp.Auth(context.Background())
+	authCtx, cancelAuth := context.WithTimeout(context.Background(), 3*time.Second)
+	socketUser, err := middleware.UserFromBearerToken(authCtx, token)
+	cancelAuth()
 	if err != nil {
-		log.Printf("WebSocket connection rejected: Firebase Auth error: %v", err)
-		c.WriteMessage(websocket.CloseMessage, []byte("auth unavailable"))
-		c.Close()
-		return
-	}
-	decodedToken, err := authClient.VerifyIDToken(context.Background(), token)
-	if err != nil || decodedToken == nil || decodedToken.Claims == nil {
-		log.Printf("WebSocket connection rejected: invalid token: %v", err)
-		c.WriteMessage(websocket.CloseMessage, []byte("invalid token"))
-		c.Close()
-		return
-	}
-	email, ok := decodedToken.Claims["email"].(string)
-	if !ok || strings.TrimSpace(email) == "" {
-		log.Printf("WebSocket connection rejected: token missing email")
-		c.WriteMessage(websocket.CloseMessage, []byte("invalid token"))
-		c.Close()
-		return
-	}
-
-	var socketUser models.User
-	if err := database.Database.Db.
-		Select("id", "name", "profile_picture_url").
-		Where("email = ?", email).
-		First(&socketUser).Error; err != nil {
-		log.Printf("WebSocket connection rejected: user lookup failed: %v", err)
+		log.Printf("WebSocket connection rejected: auth lookup failed: %v", err)
 		c.WriteMessage(websocket.CloseMessage, []byte("user lookup failed"))
 		c.Close()
 		return

@@ -44,6 +44,23 @@ func GetInvolvedRides(c *fiber.Ctx) error {
 
 	var rows []involvedRideRow
 	if err := database.Database.Db.WithContext(ctx).Raw(`
+		WITH viewer_ride_ids AS (
+			SELECT r.id AS ride_id
+			  FROM rides r
+			 WHERE r.host_user_id = ?
+			   AND r.deleted_at IS NULL
+			   AND (r.is_ongoing = 1 OR r.start_time > ?)
+
+			UNION
+
+			SELECT b.ride_id
+			  FROM bookings b
+			  JOIN rides r ON r.id = b.ride_id
+			 WHERE b.passenger_id = ?
+			   AND b.deleted_at IS NULL
+			   AND r.deleted_at IS NULL
+			   AND (r.is_ongoing = 1 OR r.start_time > ?)
+		)
 		SELECT r.id,
 		       r.host_user_id,
 		       r.start_location,
@@ -58,17 +75,11 @@ func GetInvolvedRides(c *fiber.Ctx) error {
 		       u.name AS host_name,
 		       u.profile_picture_url AS host_profile_picture_url,
 		       u.is_email_verified AS host_is_email_verified
-		  FROM rides r
+		  FROM viewer_ride_ids v
+		  JOIN rides r ON r.id = v.ride_id
 		  JOIN users u ON u.id = r.host_user_id
-		  LEFT JOIN bookings b
-		    ON b.ride_id = r.id
-		   AND b.passenger_id = ?
-		   AND b.deleted_at IS NULL
-		 WHERE r.deleted_at IS NULL
-		   AND (r.host_user_id = ? OR b.id IS NOT NULL)
-		   AND (r.is_ongoing = 1 OR r.start_time > ?)
 		 ORDER BY r.start_time DESC
-	`, userUUID, userUUID, oneDayAgo).Scan(&rows).Error; err != nil {
+	`, userUUID, oneDayAgo, userUUID, oneDayAgo).Scan(&rows).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch involved rides"})
 	}
 

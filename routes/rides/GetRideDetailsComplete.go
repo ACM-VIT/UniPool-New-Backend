@@ -3,6 +3,7 @@ package rides
 import (
 	"log"
 	"sync"
+	"time"
 	"unipool-backend/database"
 	"unipool-backend/models"
 
@@ -82,9 +83,9 @@ type RideDetailsComplete struct {
 // frontend's UI variant.
 //
 // Perf notes:
-//   - Host + ride loaded in a single query via JOIN-free Preload.
-//   - Passenger lookup batched into ONE query (was N+1: one passenger
-//     fetch per booking).
+//   - Host + ride loaded in a single projected query.
+//   - Bookings + passenger details loaded in one projected query (was
+//     N+1 passenger fetches, then a separate passenger batch).
 //   - Viewer booking comes free out of that same batch — no extra
 //     round-trip to figure out the viewer's state.
 func GetRideDetailsComplete(c *fiber.Ctx) error {
@@ -103,20 +104,58 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"error": "Invalid user data"})
 	}
 
-	// Three sequential DB round-trips collapsed to two parallel ones.
-	// The ride lookup gives us host_user_id and is the only blocker
-	// for the host+institute follow-up; bookings only need rideID
-	// (which we have from the URL param) so it fires in parallel
-	// with the ride lookup. Then host+institute is one chained pull
-	// (host needs to land before we know its institute_id).
-	//
-	// Wall time was 3-4 sequential round-trips (~75-100ms); now it
-	// peaks at two phases (~50ms) for the typical "viewer has not
-	// signed in to a verified institute" case and ~75ms when the
-	// host institute lookup is needed.
+	type rideHostRow struct {
+		ID                uuid.UUID  `gorm:"column:id"`
+		HostUserID        uuid.UUID  `gorm:"column:host_user_id"`
+		StartLocation     string     `gorm:"column:start_location"`
+		EndLocation       string     `gorm:"column:end_location"`
+		StartLatitude     *float64   `gorm:"column:start_latitude"`
+		StartLongitude    *float64   `gorm:"column:start_longitude"`
+		EndLatitude       *float64   `gorm:"column:end_latitude"`
+		EndLongitude      *float64   `gorm:"column:end_longitude"`
+		StartTime         time.Time  `gorm:"column:start_time"`
+		TotalPrice        uint       `gorm:"column:total_price"`
+		TotalSeats        uint       `gorm:"column:total_seats"`
+		BookedSeats       uint       `gorm:"column:booked_seats"`
+		IsOngoing         uint       `gorm:"column:is_ongoing"`
+		IsSameGender      uint       `gorm:"column:is_same_gender"`
+		VehicleInfo       string     `gorm:"column:vehicle_info"`
+		CreatedAt         time.Time  `gorm:"column:created_at"`
+		HostID            uuid.UUID  `gorm:"column:host_id"`
+		HostName          string     `gorm:"column:host_name"`
+		HostEmail         string     `gorm:"column:host_email"`
+		HostProfilePic    string     `gorm:"column:host_profile_picture_url"`
+		HostContactNumber string     `gorm:"column:host_contact_number"`
+		HostInstituteID   *uuid.UUID `gorm:"column:host_institute_id"`
+		HostVerified      bool       `gorm:"column:host_is_email_verified"`
+		HostInstituteName *string    `gorm:"column:host_institute_name"`
+	}
+
+	type bookingPassengerRow struct {
+		ID                         uuid.UUID `gorm:"column:id"`
+		RideID                     uuid.UUID `gorm:"column:ride_id"`
+		PassengerID                uuid.UUID `gorm:"column:passenger_id"`
+		RequestStatus              string    `gorm:"column:request_status"`
+		CreatedAt                  time.Time `gorm:"column:created_at"`
+		PassengerFound             bool      `gorm:"column:passenger_found"`
+		PassengerName              string    `gorm:"column:passenger_name"`
+		PassengerEmail             string    `gorm:"column:passenger_email"`
+		PassengerProfilePictureURL string    `gorm:"column:passenger_profile_picture_url"`
+		PassengerContactNumber     string    `gorm:"column:passenger_contact_number"`
+		PassengerUPIVPA            string    `gorm:"column:passenger_upi_vpa"`
+		PassengerIsVerified        bool      `gorm:"column:passenger_is_verified"`
+		PassengerInstituteName     *string   `gorm:"column:passenger_institute_name"`
+	}
+
+	// The hot detail-open path now has two parallel DB round-trips:
+	//   1. ride + host + host institute
+	//   2. bookings + passenger + passenger institute
+	// The previous version needed ride, bookings, host, then passenger
+	// batch hydration. Keeping the projections explicit also avoids
+	// GORM model hydration for columns the mobile screen never reads.
 	var (
-		ride        models.Ride
-		bookings    []models.Booking
+		rideHost    rideHostRow
+		bookingRows []bookingPassengerRow
 		rideErr     error
 		bookingsErr error
 		wg          sync.WaitGroup
@@ -125,17 +164,62 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 	go func() {
 		defer wg.Done()
 		rideErr = database.Database.Db.
-			Select("id, host_user_id, start_location, end_location, start_latitude, start_longitude, end_latitude, end_longitude, start_time, total_price, total_seats, booked_seats, is_ongoing, is_same_gender, vehicle_info, created_at, updated_at").
-			Where("id = ?", rideID).
-			First(&ride).Error
+			Table("rides AS r").
+			Select(`
+				r.id,
+				r.host_user_id,
+				r.start_location,
+				r.end_location,
+				r.start_latitude,
+				r.start_longitude,
+				r.end_latitude,
+				r.end_longitude,
+				r.start_time,
+				r.total_price,
+				r.total_seats,
+				r.booked_seats,
+				r.is_ongoing,
+				r.is_same_gender,
+				r.vehicle_info,
+				r.created_at,
+				u.id                  AS host_id,
+				u.name                AS host_name,
+				u.email               AS host_email,
+				u.profile_picture_url AS host_profile_picture_url,
+				u.contact_number      AS host_contact_number,
+				u.institute_id        AS host_institute_id,
+				u.is_email_verified   AS host_is_email_verified,
+				i.name                AS host_institute_name
+			`).
+			Joins("LEFT JOIN users u ON u.id = r.host_user_id").
+			Joins("LEFT JOIN institutes i ON i.id = u.institute_id").
+			Where("r.id = ? AND r.deleted_at IS NULL", rideID).
+			Take(&rideHost).Error
 	}()
 	go func() {
 		defer wg.Done()
 		bookingsErr = database.Database.Db.
-			Select("id, ride_id, passenger_id, request_status, created_at").
-			Where("ride_id = ?", rideID).
-			Order("created_at ASC").
-			Find(&bookings).Error
+			Table("bookings AS b").
+			Select(`
+				b.id,
+				b.ride_id,
+				b.passenger_id,
+				b.request_status,
+				b.created_at,
+				(u.id IS NOT NULL)                         AS passenger_found,
+				COALESCE(u.name, '')                       AS passenger_name,
+				COALESCE(u.email, '')                      AS passenger_email,
+				COALESCE(u.profile_picture_url, '')        AS passenger_profile_picture_url,
+				COALESCE(u.contact_number, '')             AS passenger_contact_number,
+				COALESCE(u.upi_vpa, '')                    AS passenger_upi_vpa,
+				COALESCE(u.is_email_verified, FALSE)       AS passenger_is_verified,
+				i.name                                     AS passenger_institute_name
+			`).
+			Joins("LEFT JOIN users u ON u.id = b.passenger_id").
+			Joins("LEFT JOIN institutes i ON i.id = u.institute_id").
+			Where("b.ride_id = ? AND b.deleted_at IS NULL", rideID).
+			Order("b.created_at ASC").
+			Scan(&bookingRows).Error
 	}()
 	wg.Wait()
 	if rideErr != nil {
@@ -146,43 +230,41 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 		log.Printf("bookings lookup failed for ride %s: %v", rideID, bookingsErr)
 		return c.Status(500).JSON(fiber.Map{"error": "Error fetching bookings"})
 	}
-
-	// Host + institute name in ONE query via LEFT JOIN — the previous
-	// two-step (load host, then conditionally load institute) was
-	// two sequential round-trips for every verified host. Wrapping
-	// institute fields in a NULL-tolerant projection lets us collapse
-	// both cases.
-	type hostRow struct {
-		ID                uuid.UUID  `gorm:"column:id"`
-		Name              string     `gorm:"column:name"`
-		Email             string     `gorm:"column:email"`
-		ProfilePictureURL string     `gorm:"column:profile_picture_url"`
-		ContactNumber     string     `gorm:"column:contact_number"`
-		InstituteID       *uuid.UUID `gorm:"column:institute_id"`
-		IsEmailVerified   bool       `gorm:"column:is_email_verified"`
-		InstituteName     *string    `gorm:"column:institute_name"`
-	}
-	var hr hostRow
-	if err := database.Database.Db.
-		Table("users AS u").
-		Select(`u.id, u.name, u.email, u.profile_picture_url, u.contact_number,
-		        u.institute_id, u.is_email_verified, i.name AS institute_name`).
-		Joins("LEFT JOIN institutes i ON i.id = u.institute_id").
-		Where("u.id = ?", ride.HostUserID).
-		Scan(&hr).Error; err != nil || hr.ID == (uuid.UUID{}) {
-		log.Printf("host lookup failed for ride %s: %v", rideID, err)
+	if rideHost.HostID == (uuid.UUID{}) {
+		log.Printf("host lookup failed for ride %s: host %s not found", rideID, rideHost.HostUserID)
 		return c.Status(500).JSON(fiber.Map{"error": "Host details not found"})
 	}
-	host := models.User{
-		BaseModel:         models.BaseModel{ID: hr.ID},
-		Name:              hr.Name,
-		Email:             hr.Email,
-		ProfilePictureURL: hr.ProfilePictureURL,
-		ContactNumber:     hr.ContactNumber,
-		InstituteID:       hr.InstituteID,
-		IsEmailVerified:   hr.IsEmailVerified,
+
+	ride := models.Ride{
+		BaseModel: models.BaseModel{
+			ID:        rideHost.ID,
+			CreatedAt: rideHost.CreatedAt,
+		},
+		HostUserID:     rideHost.HostUserID,
+		StartLocation:  rideHost.StartLocation,
+		EndLocation:    rideHost.EndLocation,
+		StartLatitude:  rideHost.StartLatitude,
+		StartLongitude: rideHost.StartLongitude,
+		EndLatitude:    rideHost.EndLatitude,
+		EndLongitude:   rideHost.EndLongitude,
+		StartTime:      rideHost.StartTime,
+		TotalPrice:     rideHost.TotalPrice,
+		TotalSeats:     rideHost.TotalSeats,
+		BookedSeats:    rideHost.BookedSeats,
+		IsOngoing:      rideHost.IsOngoing,
+		IsSameGender:   rideHost.IsSameGender,
+		VehicleInfo:    rideHost.VehicleInfo,
 	}
-	hostInstituteName := hr.InstituteName
+	host := models.User{
+		BaseModel:         models.BaseModel{ID: rideHost.HostID},
+		Name:              rideHost.HostName,
+		Email:             rideHost.HostEmail,
+		ProfilePictureURL: rideHost.HostProfilePic,
+		ContactNumber:     rideHost.HostContactNumber,
+		InstituteID:       rideHost.HostInstituteID,
+		IsEmailVerified:   rideHost.HostVerified,
+	}
+	hostInstituteName := rideHost.HostInstituteName
 
 	// Same-institute flag — drives the "Same campus" chip on the
 	// client. Only true if both viewer and host have a non-nil
@@ -191,94 +273,58 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 		user.InstituteID != nil &&
 		*host.InstituteID == *user.InstituteID
 
-	// Batch passenger lookup. Old code did `First(&passenger)` inside
-	// the loop — one round-trip per booking. New code fetches every
-	// passenger in a single `WHERE id IN (...)`.
-	passengerIDs := make([]uuid.UUID, 0, len(bookings))
-	for i := range bookings {
-		if bookings[i].PassengerID != ride.HostUserID {
-			passengerIDs = append(passengerIDs, bookings[i].PassengerID)
-		}
-	}
-	type passengerRow struct {
-		ID                uuid.UUID `gorm:"column:id"`
-		Name              string    `gorm:"column:name"`
-		Email             string    `gorm:"column:email"`
-		ProfilePictureURL string    `gorm:"column:profile_picture_url"`
-		ContactNumber     string    `gorm:"column:contact_number"`
-		UPIVPA            string    `gorm:"column:upi_vpa"`
-		IsEmailVerified   bool      `gorm:"column:is_email_verified"`
-		InstituteName     *string   `gorm:"column:institute_name"`
-	}
-	passengerByID := map[uuid.UUID]passengerRow{}
-	if len(passengerIDs) > 0 {
-		var passengers []passengerRow
-		if err := database.Database.Db.
-			Table("users AS u").
-			Select(`
-				u.id,
-				u.name,
-				u.email,
-				u.profile_picture_url,
-				u.contact_number,
-				u.upi_vpa,
-				u.is_email_verified,
-				i.name AS institute_name
-			`).
-			Joins("LEFT JOIN institutes i ON i.id = u.institute_id").
-			Where("u.id IN ?", passengerIDs).
-			Scan(&passengers).Error; err != nil {
-			log.Printf("batch passenger lookup failed: %v", err)
-		}
-		for _, p := range passengers {
-			passengerByID[p.ID] = p
-		}
-	}
-
-	bookingDetails := make([]BookingDetail, 0, len(bookings))
+	bookingDetails := make([]BookingDetail, 0, len(bookingRows))
 	bookedSeats := 0
 	var viewerBooking *models.Booking
 	isViewerHost := user.ID == ride.HostUserID
-	for i := range bookings {
-		b := bookings[i]
-		if b.PassengerID == ride.HostUserID {
+	for i := range bookingRows {
+		row := bookingRows[i]
+		if row.PassengerID == ride.HostUserID {
 			continue // host doesn't appear in the bookings list
 		}
-		if b.PassengerID == user.ID {
-			bk := b
+		booking := models.Booking{
+			BaseModel: models.BaseModel{
+				ID:        row.ID,
+				CreatedAt: row.CreatedAt,
+			},
+			RideID:        row.RideID,
+			PassengerID:   row.PassengerID,
+			RequestStatus: row.RequestStatus,
+		}
+		if row.PassengerID == user.ID {
+			bk := booking
 			viewerBooking = &bk
 		}
-		if b.RequestStatus == "accepted" {
+		if row.RequestStatus == "accepted" {
 			bookedSeats++
 		}
 		// Booking passenger details include email/contact/UPI. Only
 		// the host gets the full management list; non-host viewers get
 		// their own booking row only so viewer_state hydration still
 		// works without leaking other passengers' PII.
-		if !isViewerHost && b.PassengerID != user.ID {
+		if !isViewerHost && row.PassengerID != user.ID {
 			continue
 		}
-		passenger, ok := passengerByID[b.PassengerID]
-		if !ok {
+		if !row.PassengerFound {
 			// Couldn't load this passenger — skip the row rather
 			// than emit half-empty data.
 			continue
 		}
 		passengerInstituteName := ""
-		if passenger.InstituteName != nil {
-			passengerInstituteName = *passenger.InstituteName
+		if row.PassengerInstituteName != nil {
+			passengerInstituteName = *row.PassengerInstituteName
 		}
 		bookingDetails = append(bookingDetails, BookingDetail{
-			ID:                         b.ID.String(),
-			PassengerID:                b.PassengerID.String(),
-			RequestStatus:              b.RequestStatus,
-			CreatedAt:                  b.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
-			PassengerName:              passenger.Name,
-			PassengerEmail:             passenger.Email,
-			PassengerProfilePictureURL: passenger.ProfilePictureURL,
-			PassengerContactNumber:     passenger.ContactNumber,
-			PassengerUPIVPA:            passenger.UPIVPA,
-			PassengerIsVerified:        passenger.IsEmailVerified,
+			ID:                         row.ID.String(),
+			PassengerID:                row.PassengerID.String(),
+			RequestStatus:              row.RequestStatus,
+			CreatedAt:                  row.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
+			PassengerName:              row.PassengerName,
+			PassengerEmail:             row.PassengerEmail,
+			PassengerProfilePictureURL: row.PassengerProfilePictureURL,
+			PassengerContactNumber:     row.PassengerContactNumber,
+			PassengerUPIVPA:            row.PassengerUPIVPA,
+			PassengerIsVerified:        row.PassengerIsVerified,
 			PassengerInstituteName:     passengerInstituteName,
 		})
 	}

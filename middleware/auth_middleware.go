@@ -16,6 +16,7 @@ import (
 
 	firebaseauth "firebase.google.com/go/v4/auth"
 	"github.com/gofiber/fiber/v2"
+	"golang.org/x/sync/singleflight"
 	"gorm.io/gorm"
 )
 
@@ -47,6 +48,8 @@ var authUserCache struct {
 	sync.RWMutex
 	byEmail map[string]authUserCacheEntry
 }
+
+var authUserLookupGroup singleflight.Group
 
 var authTokenCache struct {
 	sync.RWMutex
@@ -191,6 +194,42 @@ func storeAuthUser(email string, user models.User) {
 	authUserCache.Unlock()
 }
 
+func loadAuthUserByEmail(ctx context.Context, email string) (models.User, error) {
+	if user, ok := cachedAuthUser(email); ok {
+		return user, nil
+	}
+
+	key := normalizeAuthEmail(email)
+	if key == "" {
+		return models.User{}, gorm.ErrRecordNotFound
+	}
+
+	value, err, _ := authUserLookupGroup.Do(key, func() (any, error) {
+		if user, ok := cachedAuthUser(email); ok {
+			return user, nil
+		}
+
+		var user models.User
+		if err := database.Database.Db.WithContext(ctx).
+			Select("id", "email", "name", "profile_picture_url", "contact_number", "gender", "yob", "default_address", "institute_id", "is_email_verified", "institute_email", "upi_vpa", "created_at", "updated_at").
+			Where("email = ?", email).
+			Take(&user).Error; err != nil {
+			return models.User{}, err
+		}
+		storeAuthUser(email, user)
+		return user, nil
+	})
+	if err != nil {
+		return models.User{}, err
+	}
+
+	user, ok := value.(models.User)
+	if !ok {
+		return models.User{}, gorm.ErrInvalidData
+	}
+	return user, nil
+}
+
 // InvalidateAuthUserCacheByEmail is called by profile/signup/delete
 // writes so request auth never serves stale identity fields after a
 // user-facing mutation.
@@ -226,6 +265,25 @@ func firebaseAuthClient(ctx context.Context) (*firebaseauth.Client, error) {
 	return next, nil
 }
 
+// UserFromBearerToken verifies a Firebase ID token and resolves the
+// matching database user through the same token/user caches used by
+// HTTP middleware. WebSocket handlers cannot run Fiber middleware
+// during the upgraded connection, so this keeps chat socket opens from
+// paying a fresh Firebase verification + users lookup every time a
+// conversation is reopened.
+func UserFromBearerToken(ctx context.Context, token string) (models.User, error) {
+	claims, err := verifyAuthTokenClaims(ctx, token)
+	if err != nil {
+		return models.User{}, err
+	}
+	email := claims.email
+	if strings.TrimSpace(email) == "" {
+		return models.User{}, errors.New("invalid token claims")
+	}
+
+	return loadAuthUserByEmail(ctx, email)
+}
+
 // OptionalAuthenticate mirrors Authenticate but never short-circuits
 // with a 401. If the request carries a valid Firebase token AND an
 // existing user row, c.Locals("user") is populated exactly as the
@@ -255,18 +313,8 @@ func OptionalAuthenticate(c *fiber.Ctx) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	if user, ok := cachedAuthUser(email); ok {
-		c.Locals("user", user)
-		return c.Next()
-	}
-
-	var user models.User
-	err = database.Database.Db.WithContext(ctx).
-		Select("id", "email", "name", "profile_picture_url", "contact_number", "gender", "yob", "default_address", "institute_id", "is_email_verified", "institute_email", "upi_vpa", "created_at", "updated_at").
-		Where("email = ?", email).
-		First(&user).Error
+	user, err := loadAuthUserByEmail(ctx, email)
 	if err == nil {
-		storeAuthUser(email, user)
 		c.Locals("user", user)
 	}
 	// Whether or not we resolved a user row, never block the request.
@@ -338,10 +386,7 @@ func Authenticate(c *fiber.Ctx) error {
 			time.Sleep(time.Duration(i) * 100 * time.Millisecond) // Progressive backoff
 		}
 
-		err = database.Database.Db.WithContext(ctx).
-			Select("id", "email", "name", "profile_picture_url", "contact_number", "gender", "yob", "default_address", "institute_id", "is_email_verified", "institute_email", "upi_vpa", "created_at", "updated_at").
-			Where("email = ?", email).
-			First(&user).Error
+		user, err = loadAuthUserByEmail(ctx, email)
 
 		if err == nil {
 			if authDebugLogs {

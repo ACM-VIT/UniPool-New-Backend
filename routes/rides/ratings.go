@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log"
 	"strings"
-	"sync"
 	"time"
 
 	"unipool-backend/database"
@@ -291,148 +290,110 @@ func BuildPendingRatings(userID uuid.UUID) ([]PendingRatingRide, error) {
 	windowFloor := now.Add(-ratingPromptUntil)  // earliest start_time we still prompt for
 	windowCeil := now.Add(-ratingEligibleAfter) // latest start_time that has opened the window
 
-	// All rides the user was involved in (host OR accepted
-	// passenger) that fall inside the rating window. Only the five
-	// fields the response actually emits are pulled — skipping the
-	// fat Settings JSONB and the four decimal lat/lng columns saves
-	// ~30-40% of the wire payload on this hot helper.
-	type rideRow struct {
-		ID            uuid.UUID `gorm:"column:id"`
+	// Single set query for the /app/state hot path. Pre-fix this did
+	// three DB statements: candidate rides, hosted-ride passenger
+	// targets, and already-rated counts. The CTE form lets the
+	// planner use the host and passenger booking indexes separately,
+	// expands counterpart targets, filters already-rated pairs, then
+	// returns the same pending_count per ride in one round-trip.
+	type pendingRow struct {
+		RideID        uuid.UUID `gorm:"column:ride_id"`
 		StartLocation string    `gorm:"column:start_location"`
 		EndLocation   string    `gorm:"column:end_location"`
 		StartTime     time.Time `gorm:"column:start_time"`
-		HostUserID    uuid.UUID `gorm:"column:host_user_id"`
+		PendingCount  int       `gorm:"column:pending_count"`
 	}
-	var rides []rideRow
-	if err := database.Database.Db.WithContext(ctx).
-		Table("rides").
-		Select("id, start_location, end_location, start_time, host_user_id").
-		Where(`
-			start_time BETWEEN ? AND ?
-			AND (
-				host_user_id = ?
-				OR id IN (
-				SELECT ride_id FROM bookings
-					WHERE passenger_id = ? AND request_status = 'accepted'
-				)
-			)
-		`, windowFloor, windowCeil, userID, userID).
-		Order("start_time DESC").
-		Scan(&rides).Error; err != nil {
+	var rows []pendingRow
+	if err := database.Database.Db.WithContext(ctx).Raw(`
+		WITH viewer_rides AS (
+			SELECT
+				r.id AS ride_id,
+				r.start_location,
+				r.end_location,
+				r.start_time,
+				r.host_user_id
+			  FROM rides r
+			 WHERE r.host_user_id = ?
+			   AND r.deleted_at IS NULL
+			   AND r.start_time BETWEEN ? AND ?
+
+			UNION
+
+			SELECT
+				r.id AS ride_id,
+				r.start_location,
+				r.end_location,
+				r.start_time,
+				r.host_user_id
+			  FROM bookings b
+			  JOIN rides r ON r.id = b.ride_id
+			 WHERE b.passenger_id = ?
+			   AND b.request_status = 'accepted'
+			   AND b.deleted_at IS NULL
+			   AND r.deleted_at IS NULL
+			   AND r.start_time BETWEEN ? AND ?
+		),
+		rating_targets AS (
+			SELECT
+				vr.ride_id,
+				vr.start_location,
+				vr.end_location,
+				vr.start_time,
+				b.passenger_id AS target_user_id
+			  FROM viewer_rides vr
+			  JOIN bookings b ON b.ride_id = vr.ride_id
+			 WHERE vr.host_user_id = ?
+			   AND b.request_status = 'accepted'
+			   AND b.deleted_at IS NULL
+
+			UNION ALL
+
+			SELECT
+				vr.ride_id,
+				vr.start_location,
+				vr.end_location,
+				vr.start_time,
+				vr.host_user_id AS target_user_id
+			  FROM viewer_rides vr
+			 WHERE vr.host_user_id <> ?
+		),
+		unrated_targets AS (
+			SELECT
+				t.ride_id,
+				t.start_location,
+				t.end_location,
+				t.start_time,
+				t.target_user_id
+			  FROM rating_targets t
+			  LEFT JOIN ride_ratings rr
+			    ON rr.ride_id = t.ride_id
+			   AND rr.rater_user_id = ?
+			   AND rr.rated_user_id = t.target_user_id
+			 WHERE rr.id IS NULL
+		)
+		SELECT
+			ride_id,
+			start_location,
+			end_location,
+			start_time,
+			COUNT(*)::int AS pending_count
+		  FROM unrated_targets
+		 GROUP BY ride_id, start_location, end_location, start_time
+		 ORDER BY start_time DESC
+	`, userID, windowFloor, windowCeil, userID, windowFloor, windowCeil, userID, userID, userID).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
-	if len(rides) == 0 {
-		return []PendingRatingRide{}, nil
-	}
 
-	// Partition rides into "I was the host" vs "I was a passenger" so
-	// we can resolve each group's counterparts with ONE batched query
-	// instead of a per-ride round-trip. Pre-fix this was a 2N+1
-	// pattern: per-ride lookup of accepted passengers (host case) +
-	// per-ride count of already-rated rows. With ~5 rides in the
-	// window that was ~10 sequential round-trips at ~25ms each
-	// (~250ms on /app/state's hot path); the batched form is two
-	// round-trips total regardless of ride count.
-	hostedRideIDs := make([]uuid.UUID, 0, len(rides))
-	rideIDs := make([]uuid.UUID, 0, len(rides))
-	for _, r := range rides {
-		rideIDs = append(rideIDs, r.ID)
-		if r.HostUserID == userID {
-			hostedRideIDs = append(hostedRideIDs, r.ID)
-		}
-	}
-
-	// 1) For rides I hosted: who's my accepted-passenger counterpart
-	//    set, grouped by ride.
-	passengersByRide := make(map[uuid.UUID][]uuid.UUID, len(hostedRideIDs))
-	// 2) Already-rated counts per ride for THIS user, in one shot.
-	ratedCountByRide := make(map[uuid.UUID]int, len(rideIDs))
-
-	var bookingsErr error
-	var ratedErr error
-	var enrichWG sync.WaitGroup
-	enrichWG.Add(2)
-
-	go func() {
-		defer enrichWG.Done()
-		if len(hostedRideIDs) == 0 {
-			return
-		}
-		type bookingRow struct {
-			RideID      uuid.UUID `gorm:"column:ride_id"`
-			PassengerID uuid.UUID `gorm:"column:passenger_id"`
-		}
-		var bookings []bookingRow
-		bookingsErr = database.Database.Db.WithContext(ctx).
-			Table("bookings").
-			Select("ride_id, passenger_id").
-			Where("ride_id IN ? AND request_status = ?", hostedRideIDs, "accepted").
-			Scan(&bookings).Error
-		if bookingsErr != nil {
-			return
-		}
-		next := make(map[uuid.UUID][]uuid.UUID, len(hostedRideIDs))
-		for _, b := range bookings {
-			next[b.RideID] = append(next[b.RideID], b.PassengerID)
-		}
-		passengersByRide = next
-	}()
-
-	go func() {
-		defer enrichWG.Done()
-		type cntRow struct {
-			RideID uuid.UUID `gorm:"column:ride_id"`
-			Cnt    int       `gorm:"column:cnt"`
-		}
-		var rows []cntRow
-		ratedErr = database.Database.Db.WithContext(ctx).
-			Table("ride_ratings").
-			Select("ride_id, COUNT(*) AS cnt").
-			Where("ride_id IN ? AND rater_user_id = ?", rideIDs, userID).
-			Group("ride_id").
-			Scan(&rows).Error
-		if ratedErr != nil {
-			return
-		}
-		next := make(map[uuid.UUID]int, len(rideIDs))
-		for _, r := range rows {
-			next[r.RideID] = r.Cnt
-		}
-		ratedCountByRide = next
-	}()
-
-	enrichWG.Wait()
-	if bookingsErr != nil {
-		return nil, bookingsErr
-	}
-	if ratedErr != nil {
-		return nil, ratedErr
-	}
-
-	out := make([]PendingRatingRide, 0, len(rides))
-	for _, r := range rides {
-		var targets []uuid.UUID
-		if r.HostUserID == userID {
-			targets = passengersByRide[r.ID]
-		} else {
-			targets = []uuid.UUID{r.HostUserID}
-		}
-		if len(targets) == 0 {
-			continue
-		}
-		pending := len(targets) - ratedCountByRide[r.ID]
-		if pending <= 0 {
-			continue
-		}
+	out := make([]PendingRatingRide, 0, len(rows))
+	for _, r := range rows {
 		out = append(out, PendingRatingRide{
-			RideID:        r.ID,
+			RideID:        r.RideID,
 			StartLocation: r.StartLocation,
 			EndLocation:   r.EndLocation,
 			StartTime:     r.StartTime,
-			PendingCount:  pending,
+			PendingCount:  r.PendingCount,
 		})
 	}
-
 	return out, nil
 }
 
