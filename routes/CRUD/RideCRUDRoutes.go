@@ -125,36 +125,28 @@ func CreateRide(c *fiber.Ctx) error {
 
 // Function to get all rides
 func GetRides(c *fiber.Ctx) error {
-	var rides []models.Ride
-	result := database.Database.Db.
-		Preload("HostUser", func(db *gorm.DB) *gorm.DB {
-			return db.Select("id, name")
-		}).
-		Find(&rides)
-
-	if result.Error != nil {
-		log.Printf("Error getting rides: %v\n", result.Error)
+	var ridesResponse []RideResponse
+	if err := database.Database.Db.Raw(`
+		SELECT r.id AS ride_id,
+		       r.host_user_id,
+		       u.name AS host_user_name,
+		       r.start_location,
+		       r.end_location,
+		       r.start_time,
+		       r.total_seats,
+		       r.booked_seats,
+		       r.total_price,
+		       r.is_ongoing,
+		       r.is_same_gender
+		  FROM rides r
+		  JOIN users u ON u.id = r.host_user_id
+		 WHERE r.deleted_at IS NULL
+		 ORDER BY r.start_time DESC
+	`).Scan(&ridesResponse).Error; err != nil {
+		log.Printf("Error getting rides: %v\n", err)
 		return c.Status(500).JSON(fiber.Map{
 			"error": "Error getting rides",
 		})
-	}
-
-	ridesResponse := make([]RideResponse, len(rides))
-
-	for i, ride := range rides {
-		ridesResponse[i] = RideResponse{
-			RideID:        ride.ID,
-			HostUserID:    ride.HostUserID,
-			HostUserName:  ride.HostUser.Name,
-			StartLocation: ride.StartLocation,
-			EndLocation:   ride.EndLocation,
-			StartTime:     ride.StartTime,
-			TotalSeats:    ride.TotalSeats,
-			BookedSeats:   ride.BookedSeats,
-			TotalPrice:    ride.TotalPrice,
-			IsOngoing:     ride.IsOngoing,
-			IsSameGender:  ride.IsSameGender,
-		}
 	}
 
 	return c.Status(200).JSON(ridesResponse)
@@ -165,8 +157,6 @@ func GetRideByID(c *fiber.Ctx) error {
 
 	rideID := c.Params("id")
 
-	var ride models.Ride
-
 	parsedID, err := uuid.Parse(rideID)
 	if err != nil {
 		log.Printf("Invalid rideID format: %v", rideID)
@@ -174,29 +164,36 @@ func GetRideByID(c *fiber.Ctx) error {
 			"error": "Invalid ride ID format",
 		})
 	}
-	if err := database.Database.Db.
-		Preload("HostUser", func(db *gorm.DB) *gorm.DB {
-			return db.Select("id, name")
-		}).
-		First(&ride, "id = ?", parsedID).Error; err != nil {
+
+	var rideResponse RideResponse
+	if err := database.Database.Db.Raw(`
+		SELECT r.id AS ride_id,
+		       r.host_user_id,
+		       u.name AS host_user_name,
+		       r.start_location,
+		       r.end_location,
+		       r.start_time,
+		       r.total_seats,
+		       r.booked_seats,
+		       r.total_price,
+		       r.is_ongoing,
+		       r.is_same_gender
+		  FROM rides r
+		  JOIN users u ON u.id = r.host_user_id
+		 WHERE r.id = ?
+		   AND r.deleted_at IS NULL
+		 LIMIT 1
+	`, parsedID).Scan(&rideResponse).Error; err != nil {
+		log.Printf("Error getting ride: %v\n", err)
+		return c.Status(500).JSON(fiber.Map{
+			"error": "Error finding ride",
+		})
+	}
+	if rideResponse.RideID == uuid.Nil {
 		log.Printf("Ride does not exist")
 		return c.Status(404).JSON(fiber.Map{
 			"error": "Ride not found",
 		})
-	}
-
-	rideResponse := RideResponse{
-		RideID:        ride.ID,
-		HostUserID:    ride.HostUserID,
-		HostUserName:  ride.HostUser.Name,
-		StartLocation: ride.StartLocation,
-		EndLocation:   ride.EndLocation,
-		StartTime:     ride.StartTime,
-		TotalSeats:    ride.TotalSeats,
-		BookedSeats:   ride.BookedSeats,
-		TotalPrice:    ride.TotalPrice,
-		IsOngoing:     ride.IsOngoing,
-		IsSameGender:  ride.IsSameGender,
 	}
 
 	return c.Status(200).JSON(rideResponse)
