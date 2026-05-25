@@ -293,6 +293,35 @@ func TestMarkRideRead_AcceptsHostAndPassenger(t *testing.T) {
 	}
 }
 
+func TestGetRideMessages_MarkReadQueryUpsertsCursor(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "mrg-host@vitstudent.ac.in", &inst.ID)
+	pax := SeedUser(t, db, "Pax", "mrg-pax@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, host, RideOpts{})
+	if err := db.Create(&models.Booking{
+		RideID: ride.ID, PassengerID: pax.ID, RequestStatus: "accepted",
+	}).Error; err != nil {
+		t.Fatalf("seed booking: %v", err)
+	}
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/chat/"+ride.ID.String()+"/messages?mark_read=1", nil, AsUser(pax.Email))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	ReadJSON(t, resp, nil)
+
+	var read models.ChatRead
+	if err := db.Where("user_id = ? AND ride_id = ?", pax.ID, ride.ID).First(&read).Error; err != nil {
+		t.Fatalf("expected read cursor from message fetch: %v", err)
+	}
+	if read.LastReadAt.IsZero() {
+		t.Fatalf("read cursor timestamp was not set")
+	}
+}
+
 func TestMarkRideRead_AcceptsPendingPassenger(t *testing.T) {
 	db := ConnectTestDB(t)
 	ResetDB(t)
@@ -362,6 +391,38 @@ func TestMarkDMRead_AcceptsParticipant(t *testing.T) {
 			t.Errorf("expected 200 for participant %s, got %d", viewer.Email, resp.StatusCode)
 		}
 		ReadJSON(t, resp, nil)
+	}
+}
+
+func TestGetDMMessages_MarkReadQueryUpsertsCursor(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	a := SeedUser(t, db, "A", "dm-mrg-a@vitstudent.ac.in", &inst.ID)
+	b := SeedUser(t, db, "B", "dm-mrg-b@vitstudent.ac.in", &inst.ID)
+	ride := SeedRide(t, db, a, RideOpts{})
+	if err := db.Create(&models.Booking{
+		RideID: ride.ID, PassengerID: b.ID, RequestStatus: "pending",
+	}).Error; err != nil {
+		t.Fatalf("seed booking: %v", err)
+	}
+	ids := []string{a.ID.String(), b.ID.String()}
+	sort.Strings(ids)
+	dmRoomID := "dm_" + ids[0] + "_" + ids[1]
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet, "/dm/"+dmRoomID+"/messages?mark_read=1", nil, AsUser(b.Email))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	ReadJSON(t, resp, nil)
+
+	var read models.ChatRead
+	if err := db.Where("user_id = ? AND dm_room_id = ?", b.ID, dmRoomID).First(&read).Error; err != nil {
+		t.Fatalf("expected DM read cursor from message fetch: %v", err)
+	}
+	if read.LastReadAt.IsZero() {
+		t.Fatalf("DM read cursor timestamp was not set")
 	}
 }
 

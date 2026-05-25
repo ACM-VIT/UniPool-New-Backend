@@ -7,6 +7,7 @@ import (
 	"unipool-backend/services"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 )
 
 func RejectRoute(c *fiber.Ctx) error {
@@ -36,9 +37,33 @@ func RejectRoute(c *fiber.Ctx) error {
 		}
 	}()
 
-	// Retrieve the booking
-	var booking models.Booking
-	if err := tx.First(&booking, "id = ?", bookingID).Error; err != nil {
+	type bookingRideRow struct {
+		BookingID     uuid.UUID `gorm:"column:booking_id"`
+		RideID        uuid.UUID `gorm:"column:ride_id"`
+		PassengerID   uuid.UUID `gorm:"column:passenger_id"`
+		RequestStatus string    `gorm:"column:request_status"`
+		HostUserID    uuid.UUID `gorm:"column:host_user_id"`
+		StartLocation string    `gorm:"column:start_location"`
+		EndLocation   string    `gorm:"column:end_location"`
+	}
+
+	var row bookingRideRow
+	if err := tx.Raw(`
+		SELECT
+			b.id AS booking_id,
+			b.ride_id,
+			b.passenger_id,
+			b.request_status,
+			r.host_user_id,
+			r.start_location,
+			r.end_location
+		  FROM bookings b
+		  JOIN rides r ON r.id = b.ride_id
+		 WHERE b.id = ?
+		   AND b.deleted_at IS NULL
+		   AND r.deleted_at IS NULL
+		 LIMIT 1
+	`, bookingID).Scan(&row).Error; err != nil || row.BookingID == (uuid.UUID{}) {
 		log.Printf("Error finding booking with ID %v: %v\n", bookingID, err)
 		tx.Rollback()
 		return c.Status(404).JSON(fiber.Map{
@@ -48,15 +73,17 @@ func RejectRoute(c *fiber.Ctx) error {
 		})
 	}
 
-	var ride models.Ride
-	if err := tx.First(&ride, booking.RideID).Error; err != nil {
-		log.Printf("Error finding ride with ID %v: %v\n", booking.RideID, err)
-		tx.Rollback()
-		return c.Status(404).JSON(fiber.Map{
-			"success":    false,
-			"error":      "Ride not found",
-			"booking_id": bookingID,
-		})
+	booking := models.Booking{
+		BaseModel:     models.BaseModel{ID: row.BookingID},
+		RideID:        row.RideID,
+		PassengerID:   row.PassengerID,
+		RequestStatus: row.RequestStatus,
+	}
+	ride := models.Ride{
+		BaseModel:     models.BaseModel{ID: row.RideID},
+		HostUserID:    row.HostUserID,
+		StartLocation: row.StartLocation,
+		EndLocation:   row.EndLocation,
 	}
 
 	if ride.HostUserID != user.ID {

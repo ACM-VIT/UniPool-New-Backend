@@ -2,20 +2,229 @@ package middleware
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 	"unipool-backend/database"
 	"unipool-backend/initializer"
 	"unipool-backend/models"
 
+	firebaseauth "firebase.google.com/go/v4/auth"
 	"github.com/gofiber/fiber/v2"
 	"gorm.io/gorm"
 )
 
 var authDebugLogs = os.Getenv("AUTH_DEBUG_LOGS") == "1"
+
+var firebaseAuthCache struct {
+	sync.RWMutex
+	client *firebaseauth.Client
+}
+
+const authUserCacheTTL = 5 * time.Minute
+const authTokenCacheMaxEntries = 2048
+const authTokenCacheMaxTTL = 5 * time.Minute
+const authTokenCacheExpirySkew = 10 * time.Second
+
+type authUserCacheEntry struct {
+	user      models.User
+	expiresAt time.Time
+}
+
+type authTokenCacheEntry struct {
+	email          string
+	name           string
+	profilePicture string
+	expiresAt      time.Time
+}
+
+var authUserCache struct {
+	sync.RWMutex
+	byEmail map[string]authUserCacheEntry
+}
+
+var authTokenCache struct {
+	sync.RWMutex
+	byTokenHash map[string]authTokenCacheEntry
+}
+
+func normalizeAuthEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+func authTokenCacheKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func cachedVerifiedToken(token string) (authTokenCacheEntry, bool) {
+	if token == "" {
+		return authTokenCacheEntry{}, false
+	}
+	key := authTokenCacheKey(token)
+	authTokenCache.RLock()
+	entry, ok := authTokenCache.byTokenHash[key]
+	authTokenCache.RUnlock()
+	if !ok {
+		return authTokenCacheEntry{}, false
+	}
+	if time.Now().After(entry.expiresAt) {
+		authTokenCache.Lock()
+		if current, exists := authTokenCache.byTokenHash[key]; exists && current.expiresAt.Equal(entry.expiresAt) {
+			delete(authTokenCache.byTokenHash, key)
+		}
+		authTokenCache.Unlock()
+		return authTokenCacheEntry{}, false
+	}
+	return entry, true
+}
+
+func pruneAuthTokenCacheLocked(now time.Time) {
+	for key, entry := range authTokenCache.byTokenHash {
+		if now.After(entry.expiresAt) {
+			delete(authTokenCache.byTokenHash, key)
+		}
+	}
+	if len(authTokenCache.byTokenHash) <= authTokenCacheMaxEntries {
+		return
+	}
+	for key := range authTokenCache.byTokenHash {
+		delete(authTokenCache.byTokenHash, key)
+		if len(authTokenCache.byTokenHash) <= authTokenCacheMaxEntries {
+			break
+		}
+	}
+}
+
+func storeVerifiedToken(token string, decoded *firebaseauth.Token) authTokenCacheEntry {
+	now := time.Now()
+	expiresAt := time.Unix(decoded.Expires, 0)
+	if maxExpiresAt := now.Add(authTokenCacheMaxTTL); expiresAt.After(maxExpiresAt) {
+		expiresAt = maxExpiresAt
+	}
+
+	entry := authTokenCacheEntry{
+		expiresAt: expiresAt.Add(-authTokenCacheExpirySkew),
+	}
+	if email, ok := decoded.Claims["email"].(string); ok {
+		entry.email = email
+	}
+	if name, ok := decoded.Claims["name"].(string); ok {
+		entry.name = name
+	}
+	if picture, ok := decoded.Claims["picture"].(string); ok {
+		entry.profilePicture = picture
+	}
+	if entry.email == "" || !entry.expiresAt.After(now) {
+		return entry
+	}
+
+	key := authTokenCacheKey(token)
+	authTokenCache.Lock()
+	if authTokenCache.byTokenHash == nil {
+		authTokenCache.byTokenHash = make(map[string]authTokenCacheEntry)
+	}
+	pruneAuthTokenCacheLocked(now)
+	authTokenCache.byTokenHash[key] = entry
+	authTokenCache.Unlock()
+	return entry
+}
+
+func verifyAuthTokenClaims(ctx context.Context, token string) (authTokenCacheEntry, error) {
+	if cached, ok := cachedVerifiedToken(token); ok {
+		return cached, nil
+	}
+	client, err := firebaseAuthClient(ctx)
+	if err != nil {
+		return authTokenCacheEntry{}, err
+	}
+	decodedToken, err := client.VerifyIDToken(ctx, token)
+	if err != nil {
+		return authTokenCacheEntry{}, err
+	}
+	if decodedToken == nil || decodedToken.Claims == nil || decodedToken.Claims["email"] == nil {
+		return authTokenCacheEntry{}, errors.New("invalid token claims")
+	}
+	return storeVerifiedToken(token, decodedToken), nil
+}
+
+func cachedAuthUser(email string) (models.User, bool) {
+	key := normalizeAuthEmail(email)
+	if key == "" {
+		return models.User{}, false
+	}
+	authUserCache.RLock()
+	entry, ok := authUserCache.byEmail[key]
+	authUserCache.RUnlock()
+	if !ok {
+		return models.User{}, false
+	}
+	if time.Now().After(entry.expiresAt) {
+		authUserCache.Lock()
+		if current, exists := authUserCache.byEmail[key]; exists && current.expiresAt.Equal(entry.expiresAt) {
+			delete(authUserCache.byEmail, key)
+		}
+		authUserCache.Unlock()
+		return models.User{}, false
+	}
+	return entry.user, true
+}
+
+func storeAuthUser(email string, user models.User) {
+	key := normalizeAuthEmail(email)
+	if key == "" {
+		return
+	}
+	authUserCache.Lock()
+	if authUserCache.byEmail == nil {
+		authUserCache.byEmail = make(map[string]authUserCacheEntry)
+	}
+	authUserCache.byEmail[key] = authUserCacheEntry{
+		user:      user,
+		expiresAt: time.Now().Add(authUserCacheTTL),
+	}
+	authUserCache.Unlock()
+}
+
+// InvalidateAuthUserCacheByEmail is called by profile/signup/delete
+// writes so request auth never serves stale identity fields after a
+// user-facing mutation.
+func InvalidateAuthUserCacheByEmail(email string) {
+	key := normalizeAuthEmail(email)
+	if key == "" {
+		return
+	}
+	authUserCache.Lock()
+	delete(authUserCache.byEmail, key)
+	authUserCache.Unlock()
+}
+
+func firebaseAuthClient(ctx context.Context) (*firebaseauth.Client, error) {
+	firebaseAuthCache.RLock()
+	client := firebaseAuthCache.client
+	firebaseAuthCache.RUnlock()
+	if client != nil {
+		return client, nil
+	}
+
+	firebaseAuthCache.Lock()
+	defer firebaseAuthCache.Unlock()
+	if firebaseAuthCache.client != nil {
+		return firebaseAuthCache.client, nil
+	}
+
+	next, err := initializer.FirebaseApp.Auth(ctx)
+	if err != nil {
+		return nil, err
+	}
+	firebaseAuthCache.client = next
+	return next, nil
+}
 
 // OptionalAuthenticate mirrors Authenticate but never short-circuits
 // with a 401. If the request carries a valid Firebase token AND an
@@ -37,28 +246,27 @@ func OptionalAuthenticate(c *fiber.Ctx) error {
 		return c.Next()
 	}
 
-	client, err := initializer.FirebaseApp.Auth(context.Background())
-	if err != nil {
+	claims, err := verifyAuthTokenClaims(context.Background(), token)
+	if err != nil || claims.email == "" {
 		return c.Next()
 	}
-	decodedToken, err := client.VerifyIDToken(context.Background(), token)
-	if err != nil || decodedToken == nil || decodedToken.Claims == nil || decodedToken.Claims["email"] == nil {
-		return c.Next()
-	}
-	email, ok := decodedToken.Claims["email"].(string)
-	if !ok || email == "" {
-		return c.Next()
-	}
+	email := claims.email
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
+	if user, ok := cachedAuthUser(email); ok {
+		c.Locals("user", user)
+		return c.Next()
+	}
+
 	var user models.User
 	err = database.Database.Db.WithContext(ctx).
-		Select("id", "email", "name", "profile_picture_url", "contact_number", "gender", "yob", "default_address", "institute_id", "is_email_verified").
+		Select("id", "email", "name", "profile_picture_url", "contact_number", "gender", "yob", "default_address", "institute_id", "is_email_verified", "institute_email", "upi_vpa", "created_at", "updated_at").
 		Where("email = ?", email).
 		First(&user).Error
 	if err == nil {
+		storeAuthUser(email, user)
 		c.Locals("user", user)
 	}
 	// Whether or not we resolved a user row, never block the request.
@@ -81,42 +289,40 @@ func Authenticate(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"error": "Token not found"})
 	}
 
-	// Verify the token using Firebase
-	client, err := initializer.FirebaseApp.Auth(context.Background())
-	if err != nil {
-		log.Println("Firebase Auth error:", err)
-		return c.Status(500).JSON(fiber.Map{"error": "Firebase Auth error"})
-	}
-	decodedToken, err := client.VerifyIDToken(context.Background(), token)
+	// Verify the token using Firebase. Successful verifications are
+	// cached until token expiry (capped to a short TTL) so a screen
+	// that fans out five authenticated requests doesn't redo the same
+	// JWT verification five times.
+	claims, err := verifyAuthTokenClaims(context.Background(), token)
 	if err != nil {
 		log.Println("Invalid token:", err)
 		return c.Status(401).JSON(fiber.Map{"error": "Invalid token"})
 	}
 
-	// Extract necessary claims from the token
-	if decodedToken == nil || decodedToken.Claims == nil || decodedToken.Claims["email"] == nil {
+	email := claims.email
+	if strings.TrimSpace(email) == "" {
 		return c.Status(401).JSON(fiber.Map{"error": "Invalid token"})
 	}
 
-	email, ok := decodedToken.Claims["email"].(string)
-	if !ok || strings.TrimSpace(email) == "" {
-		return c.Status(401).JSON(fiber.Map{"error": "Invalid token"})
-	}
-
-	name, nameOk := decodedToken.Claims["name"].(string)
-	if !nameOk {
+	name := claims.name
+	if strings.TrimSpace(name) == "" {
 		return c.Status(401).JSON(fiber.Map{"error": "Please check your privacy settings and allow us to access your name"})
 	}
 
-	profilePicture, picOk := decodedToken.Claims["picture"].(string)
-	if !picOk {
-		profilePicture = "" // INSERT PLACEHOLDER IMAGE URL HERE (@JUXTARYCT - pleaj give image)
-	}
+	profilePicture := claims.profilePicture
 
 	// Check if the user exists in the database (without global activation scope)
 	var user models.User
 	if authDebugLogs {
 		log.Printf("Searching for user with email: %s", email)
+	}
+
+	if cached, ok := cachedAuthUser(email); ok {
+		if authDebugLogs {
+			log.Printf("Found cached auth user: %s (ID: %s)", cached.Email, cached.ID)
+		}
+		c.Locals("user", cached)
+		return c.Next()
 	}
 
 	// Increase timeout to 5 seconds and add retry logic
@@ -141,6 +347,7 @@ func Authenticate(c *fiber.Ctx) error {
 			if authDebugLogs {
 				log.Printf("Found existing user: %s (ID: %s)", user.Email, user.ID)
 			}
+			storeAuthUser(email, user)
 			c.Locals("user", user)
 			break
 		}

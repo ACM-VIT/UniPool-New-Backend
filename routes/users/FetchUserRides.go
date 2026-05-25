@@ -18,6 +18,8 @@ import (
 type UserRidesResponse struct {
 	RideID        uuid.UUID  `json:"ride_id"`
 	HostUserID    uuid.UUID  `json:"host_user_id"`
+	HostUserName  string     `json:"host_user_name,omitempty"`
+	HostUserPic   string     `json:"host_user_profile_picture_url,omitempty"`
 	StartLocation string     `json:"start_location"`
 	EndLocation   string     `json:"end_location"`
 	StartTime     time.Time  `json:"start_time"`
@@ -54,10 +56,11 @@ type UserRidesResponse struct {
 // scope + viewer_state stay consistent.
 //
 // Perf:
-//   - One query for hosted rides, one for booked rides — both bounded
-//     by user-scoped indexes.
-//   - Booking + ride join replaced with a LEFT JOIN inline so we
-//     don't loop fetching bookings per ride.
+//   - Hosted and booked relationships are collected through two
+//     index-friendly branches instead of a wide `host_user_id = ? OR
+//     b.passenger_id = ?` predicate.
+//   - Booking + ride join stays inline so we don't loop fetching
+//     bookings per ride.
 //   - Each ride is touched O(1) by the viewer-state resolver: we
 //     pass it the (already loaded) booking row for that ride.
 func BuildUserRides(viewerID uuid.UUID, scope string) ([]UserRidesResponse, error) {
@@ -70,6 +73,8 @@ func BuildUserRides(viewerID uuid.UUID, scope string) ([]UserRidesResponse, erro
 	type row struct {
 		RideID        uuid.UUID
 		HostUserID    uuid.UUID
+		HostUserName  string
+		HostUserPic   string
 		StartLocation string
 		EndLocation   string
 		StartTime     time.Time
@@ -83,37 +88,72 @@ func BuildUserRides(viewerID uuid.UUID, scope string) ([]UserRidesResponse, erro
 		RequestStatus *string
 	}
 	var rows []row
-	q := database.Database.Db.WithContext(ctx).
-		Table("rides AS r").
-		Select(`
-			r.id            AS ride_id,
-			r.host_user_id,
-			r.start_location,
-			r.end_location,
-			r.start_time,
-			r.total_seats,
-			r.booked_seats,
-			r.total_price,
-			r.is_ongoing,
-			r.is_same_gender,
-			b.id            AS booking_id,
-			b.passenger_id,
-			b.request_status
-		`).
-		Joins("LEFT JOIN bookings b ON b.ride_id = r.id AND b.passenger_id = ?", viewerID).
-		Where("r.host_user_id = ? OR b.passenger_id = ?", viewerID, viewerID)
-
 	// Same 24h cutoff that ResolveViewerState uses for StatePast, so
 	// the scope filter and viewer_state agree on what "past" means.
 	pastCutoff := time.Now().Add(-24 * time.Hour)
+	hostScope := ""
+	bookingScope := ""
+	args := []any{viewerID}
 	switch scope {
 	case "upcoming":
-		q = q.Where("r.start_time >= ?", pastCutoff)
+		hostScope = "AND r.start_time >= ?"
+		bookingScope = "AND r.start_time >= ?"
+		args = append(args, pastCutoff)
 	case "past":
-		q = q.Where("r.start_time < ?", pastCutoff)
+		hostScope = "AND r.start_time < ?"
+		bookingScope = "AND r.start_time < ?"
+		args = append(args, pastCutoff)
 	}
 
-	if err := q.Order("r.start_time DESC").Scan(&rows).Error; err != nil {
+	args = append(args, viewerID)
+	if bookingScope != "" {
+		args = append(args, pastCutoff)
+	}
+	args = append(args, viewerID)
+
+	query := `
+		WITH viewer_ride_ids AS (
+			SELECT r.id AS ride_id
+			  FROM rides r
+			 WHERE r.host_user_id = ?
+			   AND r.deleted_at IS NULL
+			   ` + hostScope + `
+
+			UNION
+
+			SELECT b.ride_id
+			  FROM bookings b
+			  JOIN rides r ON r.id = b.ride_id
+			 WHERE b.passenger_id = ?
+			   AND b.deleted_at IS NULL
+			   AND r.deleted_at IS NULL
+			   ` + bookingScope + `
+		)
+		SELECT r.id AS ride_id,
+		       r.host_user_id,
+		       h.name AS host_user_name,
+		       h.profile_picture_url AS host_user_pic,
+		       r.start_location,
+		       r.end_location,
+		       r.start_time,
+		       r.total_seats,
+		       r.booked_seats,
+		       r.total_price,
+		       r.is_ongoing,
+		       r.is_same_gender,
+		       b.id AS booking_id,
+		       b.passenger_id,
+		       b.request_status
+		  FROM viewer_ride_ids v
+		  JOIN rides r ON r.id = v.ride_id
+		  LEFT JOIN users h ON h.id = r.host_user_id
+		  LEFT JOIN bookings b
+		    ON b.ride_id = r.id
+		   AND b.passenger_id = ?
+		   AND b.deleted_at IS NULL
+		 ORDER BY r.start_time DESC`
+
+	if err := database.Database.Db.WithContext(ctx).Raw(query, args...).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
@@ -155,6 +195,8 @@ func BuildUserRides(viewerID uuid.UUID, scope string) ([]UserRidesResponse, erro
 		entry := UserRidesResponse{
 			RideID:          r.RideID,
 			HostUserID:      r.HostUserID,
+			HostUserName:    r.HostUserName,
+			HostUserPic:     r.HostUserPic,
 			StartLocation:   r.StartLocation,
 			EndLocation:     r.EndLocation,
 			StartTime:       r.StartTime,

@@ -8,7 +8,6 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 )
 
 type PassengerDetail struct {
@@ -133,6 +132,7 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 	go func() {
 		defer wg.Done()
 		bookingsErr = database.Database.Db.
+			Select("id, ride_id, passenger_id, request_status, created_at").
 			Where("ride_id = ?", rideID).
 			Order("created_at ASC").
 			Find(&bookings).Error
@@ -200,19 +200,34 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 			passengerIDs = append(passengerIDs, bookings[i].PassengerID)
 		}
 	}
-	passengerByID := map[uuid.UUID]models.User{}
+	type passengerRow struct {
+		ID                uuid.UUID `gorm:"column:id"`
+		Name              string    `gorm:"column:name"`
+		Email             string    `gorm:"column:email"`
+		ProfilePictureURL string    `gorm:"column:profile_picture_url"`
+		ContactNumber     string    `gorm:"column:contact_number"`
+		UPIVPA            string    `gorm:"column:upi_vpa"`
+		IsEmailVerified   bool      `gorm:"column:is_email_verified"`
+		InstituteName     *string   `gorm:"column:institute_name"`
+	}
+	passengerByID := map[uuid.UUID]passengerRow{}
 	if len(passengerIDs) > 0 {
-		var passengers []models.User
+		var passengers []passengerRow
 		if err := database.Database.Db.
-			Preload("Institute", func(db *gorm.DB) *gorm.DB {
-				// Only Name is read at line ~196; pulling the full
-				// Institute row (Country, timestamps) is wasted bytes
-				// across every passenger.
-				return db.Select("id, name")
-			}).
-			Select("id, name, email, profile_picture_url, contact_number, upi_vpa, is_email_verified, institute_id").
-			Where("id IN ?", passengerIDs).
-			Find(&passengers).Error; err != nil {
+			Table("users AS u").
+			Select(`
+				u.id,
+				u.name,
+				u.email,
+				u.profile_picture_url,
+				u.contact_number,
+				u.upi_vpa,
+				u.is_email_verified,
+				i.name AS institute_name
+			`).
+			Joins("LEFT JOIN institutes i ON i.id = u.institute_id").
+			Where("u.id IN ?", passengerIDs).
+			Scan(&passengers).Error; err != nil {
 			log.Printf("batch passenger lookup failed: %v", err)
 		}
 		for _, p := range passengers {
@@ -250,8 +265,8 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 			continue
 		}
 		passengerInstituteName := ""
-		if passenger.Institute != nil {
-			passengerInstituteName = passenger.Institute.Name
+		if passenger.InstituteName != nil {
+			passengerInstituteName = *passenger.InstituteName
 		}
 		bookingDetails = append(bookingDetails, BookingDetail{
 			ID:                         b.ID.String(),

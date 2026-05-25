@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"unipool-backend/database"
@@ -13,6 +14,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Ratings open up 12h after a ride's scheduled start time. Earlier
@@ -114,6 +116,7 @@ func GetRideRatingEligibility(c *fiber.Ctx) error {
 
 	var ride models.Ride
 	if err := database.Database.Db.WithContext(ctx).
+		Select("id, start_time, start_location, end_location, host_user_id").
 		Where("id = ?", rideID).
 		First(&ride).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -174,12 +177,15 @@ func GetRideRatingEligibility(c *fiber.Ctx) error {
 			ProfilePictureURL string
 		}
 		var rows []row
-		database.Database.Db.WithContext(ctx).
+		if err := database.Database.Db.WithContext(ctx).
 			Table("bookings").
 			Select("users.id, users.name, users.profile_picture_url").
 			Joins("JOIN users ON users.id = bookings.passenger_id").
 			Where("bookings.ride_id = ? AND bookings.request_status = ?", rideID, "accepted").
-			Scan(&rows)
+			Scan(&rows).Error; err != nil {
+			log.Printf("GetRideRatingEligibility: accepted passengers query failed: %v", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "lookup failed"})
+		}
 		for _, r := range rows {
 			// Mirror SubmitRideRating's allowedTargets exclusion. Test
 			// users (and the occasional real one who taps "request" on
@@ -203,6 +209,7 @@ func GetRideRatingEligibility(c *fiber.Ctx) error {
 	} else {
 		var host models.User
 		if err := database.Database.Db.WithContext(ctx).
+			Select("id, name, profile_picture_url").
 			Where("id = ?", ride.HostUserID).
 			First(&host).Error; err == nil {
 			candidates = append(candidates, candidate{
@@ -224,6 +231,7 @@ func GetRideRatingEligibility(c *fiber.Ctx) error {
 	}
 	var alreadyRated []models.RideRating
 	database.Database.Db.WithContext(ctx).
+		Select("rated_user_id").
 		Where("ride_id = ? AND rater_user_id = ? AND rated_user_id IN ?", rideID, user.ID, candidateIDs).
 		Find(&alreadyRated)
 	rated := map[uuid.UUID]bool{}
@@ -337,43 +345,68 @@ func BuildPendingRatings(userID uuid.UUID) ([]PendingRatingRide, error) {
 	// 1) For rides I hosted: who's my accepted-passenger counterpart
 	//    set, grouped by ride.
 	passengersByRide := make(map[uuid.UUID][]uuid.UUID, len(hostedRideIDs))
-	if len(hostedRideIDs) > 0 {
+	// 2) Already-rated counts per ride for THIS user, in one shot.
+	ratedCountByRide := make(map[uuid.UUID]int, len(rideIDs))
+
+	var bookingsErr error
+	var ratedErr error
+	var enrichWG sync.WaitGroup
+	enrichWG.Add(2)
+
+	go func() {
+		defer enrichWG.Done()
+		if len(hostedRideIDs) == 0 {
+			return
+		}
 		type bookingRow struct {
 			RideID      uuid.UUID `gorm:"column:ride_id"`
 			PassengerID uuid.UUID `gorm:"column:passenger_id"`
 		}
 		var bookings []bookingRow
-		if err := database.Database.Db.WithContext(ctx).
+		bookingsErr = database.Database.Db.WithContext(ctx).
 			Table("bookings").
 			Select("ride_id, passenger_id").
 			Where("ride_id IN ? AND request_status = ?", hostedRideIDs, "accepted").
-			Scan(&bookings).Error; err != nil {
-			return nil, err
+			Scan(&bookings).Error
+		if bookingsErr != nil {
+			return
 		}
+		next := make(map[uuid.UUID][]uuid.UUID, len(hostedRideIDs))
 		for _, b := range bookings {
-			passengersByRide[b.RideID] = append(passengersByRide[b.RideID], b.PassengerID)
+			next[b.RideID] = append(next[b.RideID], b.PassengerID)
 		}
-	}
+		passengersByRide = next
+	}()
 
-	// 2) Already-rated counts per ride for THIS user, in one shot.
-	ratedCountByRide := make(map[uuid.UUID]int, len(rideIDs))
-	{
+	go func() {
+		defer enrichWG.Done()
 		type cntRow struct {
 			RideID uuid.UUID `gorm:"column:ride_id"`
 			Cnt    int       `gorm:"column:cnt"`
 		}
 		var rows []cntRow
-		if err := database.Database.Db.WithContext(ctx).
+		ratedErr = database.Database.Db.WithContext(ctx).
 			Table("ride_ratings").
 			Select("ride_id, COUNT(*) AS cnt").
 			Where("ride_id IN ? AND rater_user_id = ?", rideIDs, userID).
 			Group("ride_id").
-			Scan(&rows).Error; err != nil {
-			return nil, err
+			Scan(&rows).Error
+		if ratedErr != nil {
+			return
 		}
+		next := make(map[uuid.UUID]int, len(rideIDs))
 		for _, r := range rows {
-			ratedCountByRide[r.RideID] = r.Cnt
+			next[r.RideID] = r.Cnt
 		}
+		ratedCountByRide = next
+	}()
+
+	enrichWG.Wait()
+	if bookingsErr != nil {
+		return nil, bookingsErr
+	}
+	if ratedErr != nil {
+		return nil, ratedErr
 	}
 
 	out := make([]PendingRatingRide, 0, len(rides))
@@ -454,6 +487,7 @@ func SubmitRideRating(c *fiber.Ctx) error {
 	// accepted passenger -> host.
 	var ride models.Ride
 	if err := database.Database.Db.WithContext(ctx).
+		Select("id, start_time, host_user_id").
 		Where("id = ?", rideID).
 		First(&ride).Error; err != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "ride not found"})
@@ -510,41 +544,47 @@ func SubmitRideRating(c *fiber.Ctx) error {
 		}
 	}
 
-	saved := 0
+	rowsByTarget := make(map[uuid.UUID]models.RideRating, len(body.Ratings))
+	targetOrder := make([]uuid.UUID, 0, len(body.Ratings))
 	for _, item := range body.Ratings {
 		comment := strings.TrimSpace(item.Comment)
 		if len(comment) > 240 {
 			comment = comment[:240]
 		}
-
-		// Upsert on (ride_id, rater_user_id, rated_user_id).
-		existing := models.RideRating{}
-		err := database.Database.Db.WithContext(ctx).
-			Where("ride_id = ? AND rater_user_id = ? AND rated_user_id = ?", rideID, user.ID, item.RatedUserID).
-			First(&existing).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			row := models.RideRating{
-				RideID:      rideID,
-				RaterUserID: user.ID,
-				RatedUserID: item.RatedUserID,
-				Stars:       item.Stars,
-				Comment:     comment,
-			}
-			if err := database.Database.Db.WithContext(ctx).Create(&row).Error; err != nil {
-				log.Printf("SubmitRideRating: insert failed: %v", err)
-				continue
-			}
-			saved++
-		} else if err == nil {
-			if err := database.Database.Db.WithContext(ctx).
-				Model(&existing).
-				Updates(map[string]any{"stars": item.Stars, "comment": comment}).Error; err != nil {
-				log.Printf("SubmitRideRating: update failed: %v", err)
-				continue
-			}
-			saved++
+		if _, seen := rowsByTarget[item.RatedUserID]; !seen {
+			targetOrder = append(targetOrder, item.RatedUserID)
+		}
+		rowsByTarget[item.RatedUserID] = models.RideRating{
+			RideID:      rideID,
+			RaterUserID: user.ID,
+			RatedUserID: item.RatedUserID,
+			Stars:       item.Stars,
+			Comment:     comment,
 		}
 	}
 
-	return c.JSON(fiber.Map{"saved": saved})
+	rows := make([]models.RideRating, 0, len(targetOrder))
+	for _, targetID := range targetOrder {
+		rows = append(rows, rowsByTarget[targetID])
+	}
+
+	if err := database.Database.Db.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "ride_id"},
+				{Name: "rater_user_id"},
+				{Name: "rated_user_id"},
+			},
+			DoUpdates: clause.Assignments(map[string]any{
+				"stars":      gorm.Expr("excluded.stars"),
+				"comment":    gorm.Expr("excluded.comment"),
+				"updated_at": gorm.Expr("NOW()"),
+			}),
+		}).
+		Create(&rows).Error; err != nil {
+		log.Printf("SubmitRideRating: batch upsert failed: %v", err)
+		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "save failed"})
+	}
+
+	return c.JSON(fiber.Map{"saved": len(rows)})
 }

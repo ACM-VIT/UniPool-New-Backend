@@ -15,6 +15,7 @@ import (
 
 	"unipool-backend/database"
 	"unipool-backend/helpers"
+	"unipool-backend/middleware"
 	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
@@ -300,6 +301,7 @@ func ConfirmEmailVerification(c *fiber.Ctx) error {
 	if err := tx.Commit().Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "commit failed"})
 	}
+	middleware.InvalidateAuthUserCacheByEmail(user.Email)
 
 	// Return the post-update user row so the client can refresh in
 	// place without a second round-trip.

@@ -2,13 +2,12 @@ package rides
 
 import (
 	"strings"
+	"time"
 	"unipool-backend/database"
 	"unipool-backend/helpers"
-	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 )
 
 // PreviewResponse is the sanitised view of a ride that powers the
@@ -50,8 +49,7 @@ type PreviewResponse struct {
 //	404 — no ride with that ID exists, or the host has been deleted
 //	500 — anything else
 //
-// Performance: a single SELECT against rides + a single SELECT against
-// users for the host's first name + institute. Both indexed by ID.
+// Performance: one projected SELECT against rides + host + institute.
 func GetRidePreview(c *fiber.Ctx) error {
 	idParam := c.Params("id")
 	rideID, err := uuid.Parse(idParam)
@@ -63,56 +61,70 @@ func GetRidePreview(c *fiber.Ctx) error {
 
 	db := database.Database.Db
 
-	var ride models.Ride
-	if err := db.Where("id = ?", rideID).First(&ride).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-				"error": "Ride not found",
-			})
-		}
+	type previewRow struct {
+		ID                uuid.UUID `gorm:"column:id"`
+		StartLocation     string    `gorm:"column:start_location"`
+		EndLocation       string    `gorm:"column:end_location"`
+		StartTime         time.Time `gorm:"column:start_time"`
+		TotalSeats        uint      `gorm:"column:total_seats"`
+		BookedSeats       uint      `gorm:"column:booked_seats"`
+		TotalPrice        uint      `gorm:"column:total_price"`
+		IsSameGender      uint      `gorm:"column:is_same_gender"`
+		HostName          string    `gorm:"column:host_name"`
+		HostInstituteName *string   `gorm:"column:host_institute_name"`
+	}
+	var row previewRow
+	result := db.Table("rides AS r").
+		Select(`
+			r.id,
+			r.start_location,
+			r.end_location,
+			r.start_time,
+			r.total_seats,
+			r.booked_seats,
+			r.total_price,
+			r.is_same_gender,
+			u.name AS host_name,
+			i.name AS host_institute_name
+		`).
+		Joins("JOIN users AS u ON u.id = r.host_user_id").
+		Joins("LEFT JOIN institutes AS i ON i.id = u.institute_id").
+		Where("r.id = ?", rideID).
+		Scan(&row)
+	if result.Error != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"error": "Failed to fetch ride",
 		})
 	}
-
-	// Resolve the host's first name and institute label. We only need
-	// the columns we surface — pulling the full User row would also
-	// drag in contact_number, dob, fcm_token, etc, which we do not
-	// want anywhere near a public endpoint.
-	type hostBasics struct {
-		Name          string  `gorm:"column:name"`
-		InstituteName *string `gorm:"column:institute_name"`
+	if result.RowsAffected == 0 {
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"error": "Ride not found",
+		})
 	}
-	var host hostBasics
-	db.Table("users AS u").
-		Select("u.name AS name, i.name AS institute_name").
-		Joins("LEFT JOIN institutes AS i ON i.id = u.institute_id").
-		Where("u.id = ?", ride.HostUserID).
-		Take(&host)
 
-	firstName := firstNameOf(host.Name)
+	firstName := firstNameOf(row.HostName)
 
 	// Ride.TotalPrice is the passenger-facing per-seat amount in the
 	// mobile app. Keep the preview explicit so the launch site doesn't
 	// divide it again and advertise a bogus underpriced ride.
-	pricePerSeat := ride.TotalPrice
-	seatsAvailable := helpers.PassengerSeatsLeft(ride.TotalSeats, ride.BookedSeats)
+	pricePerSeat := row.TotalPrice
+	seatsAvailable := helpers.PassengerSeatsLeft(row.TotalSeats, row.BookedSeats)
 
 	resp := PreviewResponse{
-		ID:             ride.ID.String(),
-		StartLocation:  ride.StartLocation,
-		EndLocation:    ride.EndLocation,
-		StartTime:      ride.StartTime.UTC().Format("2006-01-02T15:04:05Z"),
-		TotalSeats:     ride.TotalSeats,
-		BookedSeats:    ride.BookedSeats,
+		ID:             row.ID.String(),
+		StartLocation:  row.StartLocation,
+		EndLocation:    row.EndLocation,
+		StartTime:      row.StartTime.UTC().Format("2006-01-02T15:04:05Z"),
+		TotalSeats:     row.TotalSeats,
+		BookedSeats:    row.BookedSeats,
 		SeatsAvailable: seatsAvailable,
-		TotalPrice:     ride.TotalPrice,
+		TotalPrice:     row.TotalPrice,
 		PricePerSeat:   pricePerSeat,
-		IsSameGender:   ride.IsSameGender == 1,
+		IsSameGender:   row.IsSameGender == 1,
 		HostFirstName:  firstName,
 	}
-	if host.InstituteName != nil {
-		resp.HostInstituteName = *host.InstituteName
+	if row.HostInstituteName != nil {
+		resp.HostInstituteName = *row.HostInstituteName
 	}
 
 	// Strip cache-buster surfaces. The share poster is allowed to be

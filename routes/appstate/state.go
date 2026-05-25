@@ -13,6 +13,8 @@ import (
 	"unipool-backend/routes/users"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type HomeState struct {
@@ -159,38 +161,68 @@ func parseLocation(c *fiber.Ctx) (float64, float64, bool, error) {
 }
 
 func buildUserSummary(ctx context.Context, user models.User) (fiber.Map, error) {
-	// The hosted-rides count and the user-with-institute load are
-	// completely independent — run them concurrently so total wall
-	// time is max(t1, t2) instead of t1 + t2. With a ~25ms DB
-	// round-trip this halves the slowest path inside /app/state.
-	var (
-		totalHostedRides int64
-		full             models.User
-		countErr         error
-		loadErr          error
-		wg               sync.WaitGroup
-	)
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		countErr = database.Database.Db.WithContext(ctx).
-			Model(&models.Ride{}).
-			Where("host_user_id = ?", user.ID).
-			Count(&totalHostedRides).Error
-	}()
-	go func() {
-		defer wg.Done()
-		loadErr = database.Database.Db.WithContext(ctx).
-			Preload("Institute").
-			Where("id = ?", user.ID).
-			First(&full).Error
-	}()
-	wg.Wait()
-	if countErr != nil {
-		return nil, countErr
+	type row struct {
+		ID                uuid.UUID
+		Name              string
+		Email             string
+		ProfilePictureURL string
+		ContactNumber     string
+		Gender            string
+		YOB               uint
+		DefaultAddress    string
+		CreatedAt         time.Time
+		UpdatedAt         time.Time
+		UPIVPA            string
+		IsEmailVerified   bool
+		InstituteEmail    string
+		InstituteID       *uuid.UUID
+		InstituteName     *string
+		InstituteCountry  *string
+		TotalHostedRides  int64
 	}
-	if loadErr != nil {
-		return nil, loadErr
+	var full row
+	if err := database.Database.Db.WithContext(ctx).Raw(`
+		SELECT
+			u.id,
+			u.name,
+			u.email,
+			u.profile_picture_url,
+			u.contact_number,
+			u.gender,
+			u.yob,
+			u.default_address,
+			u.created_at,
+			u.updated_at,
+			u.upi_vpa,
+			u.is_email_verified,
+			u.institute_email,
+			u.institute_id,
+			i.name AS institute_name,
+			i.country AS institute_country,
+			(
+				SELECT COUNT(*)
+				  FROM rides r
+				 WHERE r.host_user_id = u.id
+				   AND r.deleted_at IS NULL
+			) AS total_hosted_rides
+		  FROM users u
+		  LEFT JOIN institutes i ON i.id = u.institute_id
+		 WHERE u.id = ?
+		 LIMIT 1
+	`, user.ID).Scan(&full).Error; err != nil {
+		return nil, err
+	}
+	if full.ID == (uuid.UUID{}) {
+		return nil, gorm.ErrRecordNotFound
+	}
+
+	var institute any
+	if full.InstituteID != nil {
+		institute = fiber.Map{
+			"id":      full.InstituteID,
+			"name":    full.InstituteName,
+			"country": full.InstituteCountry,
+		}
 	}
 
 	return fiber.Map{
@@ -204,11 +236,11 @@ func buildUserSummary(ctx context.Context, user models.User) (fiber.Map, error) 
 		"default_address":     full.DefaultAddress,
 		"created_at":          full.CreatedAt,
 		"updated_at":          full.UpdatedAt,
-		"total_hosted_rides":  totalHostedRides,
+		"total_hosted_rides":  full.TotalHostedRides,
 		"upi_vpa":             full.UPIVPA,
 		"is_email_verified":   full.IsEmailVerified,
 		"institute_email":     full.InstituteEmail,
-		"institute":           full.Institute,
+		"institute":           institute,
 		"institute_id":        full.InstituteID,
 	}, nil
 }

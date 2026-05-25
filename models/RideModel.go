@@ -9,20 +9,25 @@ import (
 )
 
 type RideSettings struct {
-	ChatName             string `json:"chat_name,omitempty"`
-	NotificationsMuted   bool   `json:"notifications_muted,omitempty"`
+	ChatName           string `json:"chat_name,omitempty"`
+	NotificationsMuted bool   `json:"notifications_muted,omitempty"`
 }
 
 func (rs *RideSettings) Scan(value interface{}) error {
 	if value == nil {
 		return nil
 	}
-	
-	bytes, ok := value.([]byte)
-	if !ok {
+
+	var bytes []byte
+	switch v := value.(type) {
+	case []byte:
+		bytes = v
+	case string:
+		bytes = []byte(v)
+	default:
 		return nil
 	}
-	
+
 	return json.Unmarshal(bytes, rs)
 }
 

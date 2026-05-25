@@ -52,16 +52,6 @@ func Request(c *fiber.Ctx) error {
 	}
 	booking.RequestStatus = "pending"
 
-	// Check if a booking with the same RideID and PassengerID already exists
-	existingBooking := models.Booking{}
-	if database.Database.Db.Where("ride_id = ? AND passenger_id = ?", booking.RideID, PassengerID).First(&existingBooking).Error == nil {
-		log.Println("Similar booking already exists")
-		return c.Status(409).JSON(fiber.Map{
-			"error": "Similar booking already exists",
-			"code":  "already_booked",
-		})
-	}
-
 	// Pre-flight on the target ride. Three things to check before we
 	// touch the bookings table:
 	//   1. The ride exists.
@@ -74,12 +64,59 @@ func Request(c *fiber.Ctx) error {
 	//   3. The ride is still upcoming and has a passenger seat left.
 	//   4. Women-only ride enforcement (existing behaviour). Done
 	//      BEFORE the insert so we never write a doomed booking row.
-	var targetRide models.Ride
-	if err := database.Database.Db.
-		Select("id, host_user_id, is_same_gender, start_time, is_ongoing, total_seats, booked_seats").
-		First(&targetRide, booking.RideID).Error; err != nil {
+	type requestPreflight struct {
+		ID                uuid.UUID  `gorm:"column:id"`
+		HostUserID        uuid.UUID  `gorm:"column:host_user_id"`
+		IsSameGender      uint       `gorm:"column:is_same_gender"`
+		StartTime         time.Time  `gorm:"column:start_time"`
+		IsOngoing         uint       `gorm:"column:is_ongoing"`
+		TotalSeats        uint       `gorm:"column:total_seats"`
+		StartLocation     string     `gorm:"column:start_location"`
+		EndLocation       string     `gorm:"column:end_location"`
+		AcceptedCount     int64      `gorm:"column:accepted_count"`
+		ExistingBookingID *uuid.UUID `gorm:"column:existing_booking_id"`
+	}
+
+	var targetRide requestPreflight
+	if err := database.Database.Db.Raw(`
+		SELECT
+			r.id,
+			r.host_user_id,
+			r.is_same_gender,
+			r.start_time,
+			r.is_ongoing,
+			r.total_seats,
+			r.start_location,
+			r.end_location,
+			(
+				SELECT COUNT(*)
+				  FROM bookings accepted
+				 WHERE accepted.ride_id = r.id
+				   AND accepted.request_status = 'accepted'
+				   AND accepted.deleted_at IS NULL
+			) AS accepted_count,
+			(
+				SELECT existing.id
+				  FROM bookings existing
+				 WHERE existing.ride_id = r.id
+				   AND existing.passenger_id = ?
+				   AND existing.deleted_at IS NULL
+				 LIMIT 1
+			) AS existing_booking_id
+		  FROM rides r
+		 WHERE r.id = ?
+		   AND r.deleted_at IS NULL
+		 LIMIT 1
+	`, PassengerID, booking.RideID).Scan(&targetRide).Error; err != nil || targetRide.ID == (uuid.UUID{}) {
 		log.Printf("ride lookup for booking pre-flight failed: %v", err)
 		return c.Status(404).SendString("Ride not found")
+	}
+	if targetRide.ExistingBookingID != nil {
+		log.Println("Similar booking already exists")
+		return c.Status(409).JSON(fiber.Map{
+			"error": "Similar booking already exists",
+			"code":  "already_booked",
+		})
 	}
 	if targetRide.HostUserID == PassengerID {
 		log.Printf("user %v tried to request their own ride %v", PassengerID, targetRide.ID)
@@ -94,14 +131,7 @@ func Request(c *fiber.Ctx) error {
 			"code":  "ride_started",
 		})
 	}
-	var acceptedCount int64
-	if err := database.Database.Db.Model(&models.Booking{}).
-		Where("ride_id = ? AND request_status = ?", targetRide.ID, "accepted").
-		Count(&acceptedCount).Error; err != nil {
-		log.Printf("accepted booking count failed for ride %v: %v", targetRide.ID, err)
-		return c.Status(500).JSON(fiber.Map{"error": "Could not check ride capacity"})
-	}
-	if !helpers.CanAcceptAnotherPassenger(targetRide.TotalSeats, uint(acceptedCount)) {
+	if !helpers.CanAcceptAnotherPassenger(targetRide.TotalSeats, uint(targetRide.AcceptedCount)) {
 		return c.Status(409).JSON(fiber.Map{
 			"error": "No available seats for this ride",
 			"code":  "ride_full",
@@ -117,6 +147,7 @@ func Request(c *fiber.Ctx) error {
 
 	// Associate the PassengerID with the booking
 	booking.PassengerID = PassengerID
+	booking.RideID = targetRide.ID
 
 	// Insert the booking record using the models.Booking struct
 	if err := database.Database.Db.Create(&booking).Error; err != nil {
@@ -124,19 +155,14 @@ func Request(c *fiber.Ctx) error {
 		return c.Status(500).SendString("Database error")
 	}
 
-	// Get ride details for notification
-	var ride models.Ride
-	if err := database.Database.Db.First(&ride, booking.RideID).Error; err == nil {
-		// Send FCM notification to the ride owner
-		fcmService := services.GetFCMService()
-		if fcmService != nil {
-			rideRoute := ride.StartLocation + " to " + ride.EndLocation
-			go func() {
-				if err := fcmService.SendBookingRequestNotification(ride.HostUserID, user.ID, user.Name, rideRoute, ride.ID, booking.ID); err != nil {
-					log.Printf("Error sending booking request notification: %v", err)
-				}
-			}()
-		}
+	fcmService := services.GetFCMService()
+	if fcmService != nil {
+		rideRoute := targetRide.StartLocation + " to " + targetRide.EndLocation
+		go func() {
+			if err := fcmService.SendBookingRequestNotification(targetRide.HostUserID, user.ID, user.Name, rideRoute, targetRide.ID, booking.ID); err != nil {
+				log.Printf("Error sending booking request notification: %v", err)
+			}
+		}()
 	}
 
 	// Create the response

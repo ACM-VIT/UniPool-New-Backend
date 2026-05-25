@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 	"unipool-backend/database"
-	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -170,27 +169,39 @@ func rideLocationCandidates(query string, limit int) []rideLocationRow {
 		q = "%" + q + "%"
 	}
 
-	var starts []rideLocationRow
-	_ = database.Database.Db.Model(&models.Ride{}).
-		Select("start_location AS name, start_latitude AS lat, start_longitude AS lon").
-		Where("start_location ILIKE ?", q).
-		Where("start_location <> ''").
-		Group("start_location, start_latitude, start_longitude").
-		Order("max(created_at) DESC").
-		Limit(limit).
-		Scan(&starts).Error
+	var rows []rideLocationRow
+	_ = database.Database.Db.Raw(`
+		SELECT name, lat, lon
+		  FROM (
+			SELECT name, lat, lon, MAX(last_seen) AS last_seen
+			  FROM (
+				SELECT start_location AS name,
+				       start_latitude AS lat,
+				       start_longitude AS lon,
+				       MAX(created_at) AS last_seen
+				  FROM rides
+				 WHERE start_location ILIKE ?
+				   AND trim(start_location) <> ''
+				   AND deleted_at IS NULL
+				 GROUP BY start_location, start_latitude, start_longitude
+				UNION ALL
+				SELECT end_location AS name,
+				       end_latitude AS lat,
+				       end_longitude AS lon,
+				       MAX(created_at) AS last_seen
+				  FROM rides
+				 WHERE end_location ILIKE ?
+				   AND trim(end_location) <> ''
+				   AND deleted_at IS NULL
+				 GROUP BY end_location, end_latitude, end_longitude
+			  ) location_hits
+			 GROUP BY name, lat, lon
+		  ) ranked
+		 ORDER BY last_seen DESC
+		 LIMIT ?
+	`, q, q, limit*2).Scan(&rows).Error
 
-	var ends []rideLocationRow
-	_ = database.Database.Db.Model(&models.Ride{}).
-		Select("end_location AS name, end_latitude AS lat, end_longitude AS lon").
-		Where("end_location ILIKE ?", q).
-		Where("end_location <> ''").
-		Group("end_location, end_latitude, end_longitude").
-		Order("max(created_at) DESC").
-		Limit(limit).
-		Scan(&ends).Error
-
-	return append(starts, ends...)
+	return rows
 }
 
 func searchNominatim(parent context.Context, query string, limit int, hasUserLocation bool, userLat, userLon float64) []LocationResult {

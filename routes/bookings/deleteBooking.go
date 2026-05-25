@@ -48,11 +48,36 @@ func DeleteBooking(c *fiber.Ctx) error {
 		}
 	}()
 
-	var booking models.Booking
-	err = tx.First(&booking, "id = ?", bookingID).Error
-	if err != nil {
+	type bookingRideRow struct {
+		BookingID     uuid.UUID `gorm:"column:booking_id"`
+		RideID        uuid.UUID `gorm:"column:ride_id"`
+		PassengerID   uuid.UUID `gorm:"column:passenger_id"`
+		RequestStatus string    `gorm:"column:request_status"`
+		HostUserID    uuid.UUID `gorm:"column:host_user_id"`
+		StartLocation string    `gorm:"column:start_location"`
+		EndLocation   string    `gorm:"column:end_location"`
+	}
+
+	var row bookingRideRow
+	err = tx.Raw(`
+		SELECT
+			b.id AS booking_id,
+			b.ride_id,
+			b.passenger_id,
+			b.request_status,
+			r.host_user_id,
+			r.start_location,
+			r.end_location
+		  FROM bookings b
+		  JOIN rides r ON r.id = b.ride_id
+		 WHERE b.id = ?
+		   AND b.deleted_at IS NULL
+		   AND r.deleted_at IS NULL
+		 LIMIT 1
+	`, bookingID).Scan(&row).Error
+	if err != nil || row.BookingID == (uuid.UUID{}) {
 		tx.Rollback()
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		if err == nil || errors.Is(err, gorm.ErrRecordNotFound) {
 			return c.Status(404).JSON(fiber.Map{
 				"success":    false,
 				"error":      "Booking not found",
@@ -63,15 +88,17 @@ func DeleteBooking(c *fiber.Ctx) error {
 		return &fiber.Error{Code: 502, Message: "Error finding booking"}
 	}
 
-	var ride models.Ride
-	if err := tx.First(&ride, booking.RideID).Error; err != nil {
-		tx.Rollback()
-		log.Printf("Error finding ride with ID %v: %v\n", booking.RideID, err)
-		return c.Status(404).JSON(fiber.Map{
-			"success":    false,
-			"error":      "Ride not found",
-			"booking_id": bookingID.String(),
-		})
+	booking := models.Booking{
+		BaseModel:     models.BaseModel{ID: row.BookingID},
+		RideID:        row.RideID,
+		PassengerID:   row.PassengerID,
+		RequestStatus: row.RequestStatus,
+	}
+	ride := models.Ride{
+		BaseModel:     models.BaseModel{ID: row.RideID},
+		HostUserID:    row.HostUserID,
+		StartLocation: row.StartLocation,
+		EndLocation:   row.EndLocation,
 	}
 
 	if ride.HostUserID != user.ID && booking.PassengerID != user.ID {

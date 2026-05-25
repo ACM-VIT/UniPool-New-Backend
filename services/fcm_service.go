@@ -7,7 +7,6 @@ import (
 	"sort"
 	"unipool-backend/database"
 	"unipool-backend/initializer"
-	"unipool-backend/models"
 
 	"firebase.google.com/go/v4/messaging"
 	"github.com/google/uuid"
@@ -48,10 +47,20 @@ func GetFCMService() *FCMService {
 
 // SendNotification sends a push notification to a specific user
 func (f *FCMService) SendNotification(userID uuid.UUID, title, body string, data map[string]string) error {
-	// Get user's FCM token from database
-	var user models.User
-	if err := database.Database.Db.First(&user, userID).Error; err != nil {
-		return fmt.Errorf("user not found: %v", err)
+	type row struct {
+		ID       uuid.UUID `gorm:"column:id"`
+		FCMToken string    `gorm:"column:fcm_token"`
+	}
+	var user row
+	if err := database.Database.Db.
+		Table("users").
+		Select("id, fcm_token").
+		Where("id = ?", userID).
+		Scan(&user).Error; err != nil {
+		return fmt.Errorf("user lookup failed: %v", err)
+	}
+	if user.ID == uuid.Nil {
+		return fmt.Errorf("user not found: %s", userID)
 	}
 
 	if user.FCMToken == "" {
@@ -91,7 +100,7 @@ func (f *FCMService) SendNotification(userID uuid.UUID, title, body string, data
 		// Check if token is invalid and clear it from database
 		if messaging.IsInvalidArgument(err) || messaging.IsRegistrationTokenNotRegistered(err) {
 			log.Printf("Invalid FCM token for user %s, clearing from database", userID)
-			database.Database.Db.Model(&user).Update("fcm_token", "")
+			database.Database.Db.Table("users").Where("id = ?", userID).Update("fcm_token", "")
 		}
 		return fmt.Errorf("error sending message: %v", err)
 	}
@@ -153,6 +162,181 @@ func LoadFCMTokens(userIDs []uuid.UUID) ([]FCMRecipient, error) {
 	for _, r := range rows {
 		out = append(out, FCMRecipient{UserID: r.ID, Token: r.FCMToken})
 	}
+	return out, nil
+}
+
+// LoadAllowedFCMTokens merges notification preference resolution and
+// token loading into one DB query. It replaces the older
+// FilterAllowedRecipients + LoadFCMTokens pair that paid two or
+// three round-trips before every chat fan-out.
+func LoadAllowedFCMTokens(userIDs []uuid.UUID, category string, rideID uuid.UUID) ([]FCMRecipient, error) {
+	if len(userIDs) == 0 {
+		return nil, nil
+	}
+	if category == "" {
+		return LoadFCMTokens(userIDs)
+	}
+
+	type row struct {
+		ID       uuid.UUID `gorm:"column:id"`
+		FCMToken string    `gorm:"column:fcm_token"`
+	}
+	var rows []row
+	if err := database.Database.Db.
+		Table("users AS u").
+		Select("u.id, u.fcm_token").
+		Joins(`
+			LEFT JOIN notification_preferences gp
+			  ON gp.user_id = u.id
+			 AND gp.category = ?
+			 AND gp.ride_id IS NULL
+		`, category).
+		Joins(`
+			LEFT JOIN notification_preferences rp
+			  ON rp.user_id = u.id
+			 AND rp.category = ?
+			 AND rp.ride_id = ?
+		`, category, rideID).
+		Where("u.id IN ? AND u.fcm_token IS NOT NULL AND u.fcm_token <> ''", userIDs).
+		Where("COALESCE(rp.enabled, gp.enabled, TRUE) = TRUE").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	out := make([]FCMRecipient, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, FCMRecipient{UserID: r.ID, Token: r.FCMToken})
+	}
+	return out, nil
+}
+
+// LoadAllowedFCMTokensByRide resolves notification preferences and
+// FCM tokens for many ride-scoped recipient sets at once. It keeps
+// the same precedence as LoadAllowedFCMTokens:
+//
+//	per-ride preference > global category preference > default allowed
+//
+// Scheduler paths use this to avoid one preference/token DB query
+// per ride in a tick.
+func LoadAllowedFCMTokensByRide(rideUserIDs map[uuid.UUID][]uuid.UUID, category string) (map[uuid.UUID][]FCMRecipient, error) {
+	out := make(map[uuid.UUID][]FCMRecipient, len(rideUserIDs))
+	if len(rideUserIDs) == 0 {
+		return out, nil
+	}
+	if len(rideUserIDs) == 1 {
+		for rideID, userIDs := range rideUserIDs {
+			recipients, err := LoadAllowedFCMTokens(userIDs, category, rideID)
+			if err != nil {
+				return nil, err
+			}
+			out[rideID] = recipients
+		}
+		return out, nil
+	}
+
+	rideIDSet := make(map[uuid.UUID]struct{}, len(rideUserIDs))
+	userIDSet := make(map[uuid.UUID]struct{}, len(rideUserIDs)*2)
+	for rideID, userIDs := range rideUserIDs {
+		rideIDSet[rideID] = struct{}{}
+		for _, userID := range userIDs {
+			if userID == uuid.Nil {
+				continue
+			}
+			userIDSet[userID] = struct{}{}
+		}
+	}
+	if len(userIDSet) == 0 {
+		return out, nil
+	}
+
+	rideIDs := make([]uuid.UUID, 0, len(rideIDSet))
+	for rideID := range rideIDSet {
+		rideIDs = append(rideIDs, rideID)
+	}
+	userIDs := make([]uuid.UUID, 0, len(userIDSet))
+	for userID := range userIDSet {
+		userIDs = append(userIDs, userID)
+	}
+
+	type userRow struct {
+		ID            uuid.UUID `gorm:"column:id"`
+		FCMToken      string    `gorm:"column:fcm_token"`
+		GlobalEnabled *bool     `gorm:"column:global_enabled"`
+	}
+	var users []userRow
+	query := database.Database.Db.
+		Table("users AS u").
+		Select("u.id, u.fcm_token").
+		Where("u.id IN ? AND u.fcm_token IS NOT NULL AND u.fcm_token <> ''", userIDs)
+	if category != "" {
+		query = query.
+			Select("u.id, u.fcm_token, gp.enabled AS global_enabled").
+			Joins(`
+				LEFT JOIN notification_preferences gp
+				  ON gp.user_id = u.id
+				 AND gp.category = ?
+				 AND gp.ride_id IS NULL
+			`, category)
+	}
+	if err := query.Scan(&users).Error; err != nil {
+		return nil, err
+	}
+
+	tokenByUser := make(map[uuid.UUID]FCMRecipient, len(users))
+	globalAllowedByUser := make(map[uuid.UUID]bool, len(users))
+	for _, row := range users {
+		tokenByUser[row.ID] = FCMRecipient{UserID: row.ID, Token: row.FCMToken}
+		globalAllowedByUser[row.ID] = row.GlobalEnabled == nil || *row.GlobalEnabled
+	}
+
+	type rideUserKey struct {
+		rideID uuid.UUID
+		userID uuid.UUID
+	}
+	rideAllowedByUser := make(map[rideUserKey]bool)
+	if category != "" {
+		type prefRow struct {
+			UserID  uuid.UUID `gorm:"column:user_id"`
+			RideID  uuid.UUID `gorm:"column:ride_id"`
+			Enabled bool      `gorm:"column:enabled"`
+		}
+		var prefs []prefRow
+		if err := database.Database.Db.
+			Table("notification_preferences").
+			Select("user_id, ride_id, enabled").
+			Where("user_id IN ? AND ride_id IN ? AND category = ?", userIDs, rideIDs, category).
+			Scan(&prefs).Error; err != nil {
+			return nil, err
+		}
+		for _, pref := range prefs {
+			rideAllowedByUser[rideUserKey{rideID: pref.RideID, userID: pref.UserID}] = pref.Enabled
+		}
+	}
+
+	for rideID, userIDsForRide := range rideUserIDs {
+		recipients := make([]FCMRecipient, 0, len(userIDsForRide))
+		seen := make(map[uuid.UUID]struct{}, len(userIDsForRide))
+		for _, userID := range userIDsForRide {
+			if _, ok := seen[userID]; ok {
+				continue
+			}
+			seen[userID] = struct{}{}
+
+			recipient, hasToken := tokenByUser[userID]
+			if !hasToken {
+				continue
+			}
+			allowed, hasRidePreference := rideAllowedByUser[rideUserKey{rideID: rideID, userID: userID}]
+			if !hasRidePreference {
+				allowed = globalAllowedByUser[userID]
+			}
+			if allowed {
+				recipients = append(recipients, recipient)
+			}
+		}
+		out[rideID] = recipients
+	}
+
 	return out, nil
 }
 

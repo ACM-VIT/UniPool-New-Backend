@@ -33,53 +33,53 @@ type RideResponse struct {
 func CreateRide(c *fiber.Ctx) error {
 	var ride models.Ride
 
-	   err := c.BodyParser(&ride)
-	   if err != nil {
-			   log.Printf("Error parsing JSON: %v\n", err)
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Error parsing JSON (body parser)",
-			   })
-	   }
+	err := c.BodyParser(&ride)
+	if err != nil {
+		log.Printf("Error parsing JSON: %v\n", err)
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Error parsing JSON (body parser)",
+		})
+	}
 
 	//Logs a 400 error if the Ride struct is invalid
-	   err = helpers.ValidateRide(ride)
-	   if err != nil {
-			   log.Printf("Error validating ride: %v\n", err)
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Error validating ride - (helper function)",
-			   })
-	   }
+	err = helpers.ValidateRide(ride)
+	if err != nil {
+		log.Printf("Error validating ride: %v\n", err)
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Error validating ride - (helper function)",
+		})
+	}
 
 	// Checks if the host user ID exists
-	   var hostUser models.User
-	   result := database.Database.Db.First(&hostUser, ride.HostUserID)
-	   if result.Error == gorm.ErrRecordNotFound {
-			   log.Printf("Host user ID does not exist")
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Host user ID does not exist",
-			   })
-	   } else if result.Error != nil {
-			   log.Printf("Error finding host user: %v\n", result.Error)
-			   return c.Status(502).JSON(fiber.Map{
-					   "error": "Error finding host user",
-			   })
-	   }
+	var hostUser models.User
+	result := database.Database.Db.Select("id, name").First(&hostUser, ride.HostUserID)
+	if result.Error == gorm.ErrRecordNotFound {
+		log.Printf("Host user ID does not exist")
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Host user ID does not exist",
+		})
+	} else if result.Error != nil {
+		log.Printf("Error finding host user: %v\n", result.Error)
+		return c.Status(502).JSON(fiber.Map{
+			"error": "Error finding host user",
+		})
+	}
 
 	// Checks if start time is in the future
-	   if ride.StartTime.Before(time.Now()) {
-			   log.Printf("Start time is in the past")
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Start time is in the past",
-			   })
-	   }
+	if ride.StartTime.Before(time.Now()) {
+		log.Printf("Start time is in the past")
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Start time is in the past",
+		})
+	}
 
 	// Checks if the host user has enough seats
-	   if ride.TotalSeats <= ride.BookedSeats {
-			   log.Printf("Total seats available should be more than booked seats")
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Total seats available should be more than booked seats",
-			   })
-	   }
+	if ride.TotalSeats <= ride.BookedSeats {
+		log.Printf("Total seats available should be more than booked seats")
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Total seats available should be more than booked seats",
+		})
+	}
 
 	if ride.IsSameGender == 1 {
 		log.Printf("This ride has been created for the same gender only.")
@@ -87,22 +87,22 @@ func CreateRide(c *fiber.Ctx) error {
 		log.Printf("This ride has been created for any gender.")
 	}
 
-	   if ride.TotalPrice < 25 || ride.TotalPrice > 10000 {
-			   log.Printf("Price too low")
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Price too low!",
-			   })
-	   }
+	if ride.TotalPrice < 25 || ride.TotalPrice > 10000 {
+		log.Printf("Price too low")
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Price too low!",
+		})
+	}
 
 	// Create the ride in the database
-	   result = database.Database.Db.Create(&ride)
+	result = database.Database.Db.Create(&ride)
 
-	   if result.Error != nil {
-			   log.Printf("Error creating ride: %v\n", result.Error)
-			   return c.Status(500).JSON(fiber.Map{
-					   "error": "Error creating ride - (database creation error)",
-			   })
-	   }
+	if result.Error != nil {
+		log.Printf("Error creating ride: %v\n", result.Error)
+		return c.Status(500).JSON(fiber.Map{
+			"error": "Error creating ride - (database creation error)",
+		})
+	}
 
 	// Create the ride response
 	rideResponse := RideResponse{
@@ -126,32 +126,26 @@ func CreateRide(c *fiber.Ctx) error {
 // Function to get all rides
 func GetRides(c *fiber.Ctx) error {
 	var rides []models.Ride
-	result := database.Database.Db.Find(&rides)
+	result := database.Database.Db.
+		Preload("HostUser", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id, name")
+		}).
+		Find(&rides)
 
-	   if result.Error != nil {
-			   log.Printf("Error getting rides: %v\n", result.Error)
-			   return c.Status(500).JSON(fiber.Map{
-					   "error": "Error getting rides",
-			   })
-	   }
+	if result.Error != nil {
+		log.Printf("Error getting rides: %v\n", result.Error)
+		return c.Status(500).JSON(fiber.Map{
+			"error": "Error getting rides",
+		})
+	}
 
 	ridesResponse := make([]RideResponse, len(rides))
 
 	for i, ride := range rides {
-		// Find the host user
-		var hostUser models.User
-		result := database.Database.Db.First(&hostUser, ride.HostUserID)
-			   if result.Error != nil {
-					   log.Printf("Error finding host user: %v\n", result.Error)
-					   return c.Status(502).JSON(fiber.Map{
-							   "error": "Error finding host user",
-					   })
-			   }
-
 		ridesResponse[i] = RideResponse{
 			RideID:        ride.ID,
 			HostUserID:    ride.HostUserID,
-			HostUserName:  hostUser.Name,
+			HostUserName:  ride.HostUser.Name,
 			StartLocation: ride.StartLocation,
 			EndLocation:   ride.EndLocation,
 			StartTime:     ride.StartTime,
@@ -171,42 +165,30 @@ func GetRideByID(c *fiber.Ctx) error {
 
 	rideID := c.Params("id")
 
-	// Start a database transaction
-	tx := database.Database.Db.Begin()
-
 	var ride models.Ride
 
 	parsedID, err := uuid.Parse(rideID)
 	if err != nil {
-		tx.Rollback()
 		log.Printf("Invalid rideID format: %v", rideID)
 		return c.Status(400).JSON(fiber.Map{
 			"error": "Invalid ride ID format",
 		})
 	}
-	if err := tx.First(&ride, "id = ?", parsedID).Error; err != nil {
-		tx.Rollback()
+	if err := database.Database.Db.
+		Preload("HostUser", func(db *gorm.DB) *gorm.DB {
+			return db.Select("id, name")
+		}).
+		First(&ride, "id = ?", parsedID).Error; err != nil {
 		log.Printf("Ride does not exist")
 		return c.Status(404).JSON(fiber.Map{
 			"error": "Ride not found",
 		})
 	}
 
-	// Find the host user
-	var hostUser models.User
-	   if err := tx.First(&hostUser, ride.HostUserID).Error; err != nil {
-			   // Rollback the transaction in case of an error
-			   tx.Rollback()
-			   log.Printf("Host user not found")
-			   return c.Status(502).JSON(fiber.Map{
-					   "error": "Error finding host user",
-			   })
-	   }
-
 	rideResponse := RideResponse{
 		RideID:        ride.ID,
 		HostUserID:    ride.HostUserID,
-		HostUserName:  hostUser.Name,
+		HostUserName:  ride.HostUser.Name,
 		StartLocation: ride.StartLocation,
 		EndLocation:   ride.EndLocation,
 		StartTime:     ride.StartTime,
@@ -242,17 +224,17 @@ func UpdateRideByID(c *fiber.Ctx) error {
 	var ride models.Ride
 	result := database.Database.Db.First(&ride, rideID)
 
-	   if result.Error == gorm.ErrRecordNotFound {
-			   log.Printf("Ride with id %v not found\n", rideID)
-			   return c.Status(404).JSON(fiber.Map{
-					   "error": "Ride not found",
-			   })
-	   } else if result.Error != nil {
-			   log.Printf("Error finding ride: %v\n", result.Error)
-			   return c.Status(500).JSON(fiber.Map{
-					   "error": "Error finding ride",
-			   })
-	   }
+	if result.Error == gorm.ErrRecordNotFound {
+		log.Printf("Ride with id %v not found\n", rideID)
+		return c.Status(404).JSON(fiber.Map{
+			"error": "Ride not found",
+		})
+	} else if result.Error != nil {
+		log.Printf("Error finding ride: %v\n", result.Error)
+		return c.Status(500).JSON(fiber.Map{
+			"error": "Error finding ride",
+		})
+	}
 
 	if ride.HostUserID != caller.ID {
 		log.Printf("User %v attempted to update ride %v owned by %v", caller.ID, ride.ID, ride.HostUserID)
@@ -263,43 +245,43 @@ func UpdateRideByID(c *fiber.Ctx) error {
 
 	var newRide models.Ride
 	err := c.BodyParser(&newRide)
-	   if err != nil {
-			   log.Printf("Error parsing JSON: %v\n", err)
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Error parsing JSON (body parser)",
-			   })
-	   }
+	if err != nil {
+		log.Printf("Error parsing JSON: %v\n", err)
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Error parsing JSON (body parser)",
+		})
+	}
 
 	// Check if the host user ID exists
 	var hostUser models.User
-	result = database.Database.Db.First(&hostUser, newRide.HostUserID)
-	   if result.Error == gorm.ErrRecordNotFound {
-			   log.Printf("Host user ID does not exist")
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Host user ID does not exist",
-			   })
-	   } else if result.Error != nil {
-			   log.Printf("Error finding host user: %v\n", result.Error)
-			   return c.Status(502).JSON(fiber.Map{
-					   "error": "Error finding host user",
-			   })
-	   }
+	result = database.Database.Db.Select("id, name").First(&hostUser, newRide.HostUserID)
+	if result.Error == gorm.ErrRecordNotFound {
+		log.Printf("Host user ID does not exist")
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Host user ID does not exist",
+		})
+	} else if result.Error != nil {
+		log.Printf("Error finding host user: %v\n", result.Error)
+		return c.Status(502).JSON(fiber.Map{
+			"error": "Error finding host user",
+		})
+	}
 
 	// Check if start time is in the future
-	   if newRide.StartTime.Before(time.Now()) {
-			   log.Printf("Start time is in the past")
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Start time is in the past",
-			   })
-	   }
+	if newRide.StartTime.Before(time.Now()) {
+		log.Printf("Start time is in the past")
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Start time is in the past",
+		})
+	}
 
 	// Check if the host user has enough seats
-	   if newRide.TotalSeats <= newRide.BookedSeats {
-			   log.Printf("Total seats available should be more than booked seats")
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Total seats available should be more than booked seats",
-			   })
-	   }
+	if newRide.TotalSeats <= newRide.BookedSeats {
+		log.Printf("Total seats available should be more than booked seats")
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Total seats available should be more than booked seats",
+		})
+	}
 
 	if newRide.IsSameGender == 1 {
 		log.Printf("This ride has been created for the same gender only.")
@@ -307,12 +289,12 @@ func UpdateRideByID(c *fiber.Ctx) error {
 		log.Printf("This ride has been created for any gender.")
 	}
 
-	   if newRide.TotalPrice < 25 || newRide.TotalPrice > 10000 {
-			   log.Printf("Price too low")
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Price too low!",
-			   })
-	   }
+	if newRide.TotalPrice < 25 || newRide.TotalPrice > 10000 {
+		log.Printf("Price too low")
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Price too low!",
+		})
+	}
 
 	// Snapshot the fields we care about for change-detection BEFORE
 	// the Updates() call mutates the row in-place. Anything user-
@@ -326,12 +308,12 @@ func UpdateRideByID(c *fiber.Ctx) error {
 	// Update the ride in the database
 	result = database.Database.Db.Model(&ride).Updates(newRide)
 
-	   if result.Error != nil {
-			   log.Printf("Error updating ride: %v\n", result.Error)
-			   return c.Status(500).JSON(fiber.Map{
-					   "error": "Error updating ride",
-			   })
-	   }
+	if result.Error != nil {
+		log.Printf("Error updating ride: %v\n", result.Error)
+		return c.Status(500).JSON(fiber.Map{
+			"error": "Error updating ride",
+		})
+	}
 
 	// Notify every accepted passenger if the host changed something
 	// material. Builds a short human summary ("time, fare") so the
@@ -397,14 +379,25 @@ func UpdateRideByID(c *fiber.Ctx) error {
 			// if another concurrent update happens to land in the
 			// next few ms, which is vanishingly rare.
 		}
+		passengerIDs := make([]uuid.UUID, 0, len(bookings))
 		for _, b := range bookings {
-			passengerID := b.PassengerID
-			go func() {
-				if err := fcm.SendRideUpdatedNotification(passengerID, route, summary, rideID); err != nil {
-					log.Printf("ride-updated notif: send to %s: %v", passengerID, err)
-				}
-			}()
+			passengerIDs = append(passengerIDs, b.PassengerID)
 		}
+		recipients, err := services.LoadFCMTokens(passengerIDs)
+		if err != nil {
+			log.Printf("ride-updated notif: token lookup %s: %v", rideID, err)
+			return
+		}
+		fcm.SendBatch(
+			recipients,
+			"Ride Updated",
+			"The ride to "+route+" has been updated: "+summary,
+			map[string]string{
+				"type":    "ride_updated",
+				"ride_id": rideID.String(),
+				"action":  "view_ride",
+			},
+		)
 	}(ride.ID, ride.StartLocation+" to "+ride.EndLocation)
 
 	// Track changes, and display them as a result
@@ -477,7 +470,7 @@ func DeleteRideByID(c *fiber.Ctx) error {
 	err = database.Database.Db.Model(&models.Booking{}).
 		Where("ride_id = ? AND request_status = ?", rideUUID, "accepted").
 		Count(&acceptedBookingsCount).Error
-	
+
 	if err != nil {
 		log.Printf("Error checking bookings for ride %v: %v\n", rideID, err)
 		return c.Status(500).JSON(fiber.Map{
@@ -522,27 +515,33 @@ func DeleteRideByID(c *fiber.Ctx) error {
 	if len(pendingBookings) > 0 {
 		fcm := services.GetFCMService()
 		if fcm != nil {
-			pendingCopy := pendingBookings
+			passengerIDs := make([]uuid.UUID, 0, len(pendingBookings))
+			for _, b := range pendingBookings {
+				passengerIDs = append(passengerIDs, b.PassengerID)
+			}
 			rideRoute := ride.StartLocation + " → " + ride.EndLocation
-			go func() {
-				for _, b := range pendingCopy {
-					_ = fcm.SendNotification(
-						b.PassengerID,
-						"Ride no longer available",
-						"The host pulled "+rideRoute+". Find another one — there are usually more on the same route.",
-						map[string]string{
-							"type":    "ride_cancelled_pending",
-							"ride_id": ride.ID.String(),
-						},
-					)
+			go func(ids []uuid.UUID, route string, rideID uuid.UUID) {
+				recipients, err := services.LoadFCMTokens(ids)
+				if err != nil {
+					log.Printf("ride-delete pending notif: token lookup ride=%s: %v", rideID, err)
+					return
 				}
-			}()
+				fcm.SendBatch(
+					recipients,
+					"Ride no longer available",
+					"The host pulled "+route+". Find another one — there are usually more on the same route.",
+					map[string]string{
+						"type":    "ride_cancelled_pending",
+						"ride_id": rideID.String(),
+					},
+				)
+			}(passengerIDs, rideRoute, ride.ID)
 		}
 	}
 
 	log.Printf("Ride with id %v deleted by user %v (notified %d pending passengers)\n", ride.ID, user.ID, len(pendingBookings))
 	return c.Status(200).JSON(fiber.Map{
-		"message":             "Ride deleted",
-		"pending_notified":    len(pendingBookings),
+		"message":          "Ride deleted",
+		"pending_notified": len(pendingBookings),
 	})
 }

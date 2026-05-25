@@ -10,6 +10,7 @@ import (
 	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
+	"gorm.io/gorm"
 )
 
 type NearbyRideSummary struct {
@@ -57,6 +58,17 @@ func NormalizeNearbyLimit(limit int) int {
 	return limit
 }
 
+func conservativeCoordinateRadius(radius float64) float64 {
+	if radius <= 0 {
+		return radius
+	}
+	padding := radius * 0.01
+	if padding < 25 {
+		padding = 25
+	}
+	return radius + padding
+}
+
 func boundsForNearby(lat, lng, radius float64) nearbyBounds {
 	const metersPerDegree = 111320.0
 	latDelta := radius / metersPerDegree
@@ -74,10 +86,22 @@ func boundsForNearby(lat, lng, radius float64) nearbyBounds {
 	}
 }
 
+func applyNearbyRadiusFilter(q *gorm.DB, lat, lng, radius float64) *gorm.DB {
+	return q.Where(`
+		12742.0::float8 * ASIN(SQRT(
+			POWER(SIN(RADIANS((start_latitude::float8 - ?::float8) / 2.0::float8)), 2.0::float8) +
+			COS(RADIANS(?::float8)) *
+			COS(RADIANS(start_latitude::float8)) *
+			POWER(SIN(RADIANS((start_longitude::float8 - ?::float8) / 2.0::float8)), 2.0::float8)
+		)) <= (?::float8 / 1000.0::float8)
+	`, lat, lat, lng, radius)
+}
+
 func LoadNearbyRides(ctx context.Context, lat, lng, radius float64, limit int, excludeHostUserID string) (NearbyRidesPayload, error) {
 	radius = NormalizeNearbyRadius(radius)
 	limit = NormalizeNearbyLimit(limit)
-	bounds := boundsForNearby(lat, lng, radius)
+	filterRadius := conservativeCoordinateRadius(radius)
+	bounds := boundsForNearby(lat, lng, filterRadius)
 
 	q := database.Database.Db.WithContext(ctx).
 		Model(&models.Ride{}).
@@ -112,15 +136,8 @@ func LoadNearbyRides(ctx context.Context, lat, lng, radius float64, limit int, e
 		Where("is_ongoing = 0").
 		Where("start_longitude IS NOT NULL AND start_latitude IS NOT NULL").
 		Where("start_latitude BETWEEN ? AND ?", bounds.minLat, bounds.maxLat).
-		Where("start_longitude BETWEEN ? AND ?", bounds.minLng, bounds.maxLng).
-		Where(
-			"ST_DWithin("+
-				"ST_SetSRID(ST_MakePoint(?::float8, ?::float8), 4326)::geography, "+
-				"ST_SetSRID(ST_MakePoint(start_longitude::float8, start_latitude::float8), 4326)::geography, "+
-				"?"+
-				")",
-			lng, lat, radius,
-		)
+		Where("start_longitude BETWEEN ? AND ?", bounds.minLng, bounds.maxLng)
+	q = applyNearbyRadiusFilter(q, lat, lng, radius)
 
 	// Authenticated callers pass their own user ID so their own ride
 	// pins drop out of the result set server-side. Hiding their own
@@ -173,7 +190,8 @@ func NearbyRidesCount(c *fiber.Ctx) error {
 	// Default radius 5km. Clamp to keep the index-friendly range tight.
 	radius, _ := strconv.ParseFloat(c.Query("radius"), 64)
 	radius = NormalizeNearbyRadius(radius)
-	bounds := boundsForNearby(lat, lng, radius)
+	filterRadius := conservativeCoordinateRadius(radius)
+	bounds := boundsForNearby(lat, lng, filterRadius)
 
 	// PUBLIC endpoint — a slow PostGIS plan or a DB hiccup must not
 	// be able to pile up requests against the unauthenticated route
@@ -183,7 +201,7 @@ func NearbyRidesCount(c *fiber.Ctx) error {
 	defer cancel()
 
 	var count int64
-	err := database.Database.Db.WithContext(ctx).Model(&models.Ride{}).
+	q := database.Database.Db.WithContext(ctx).Model(&models.Ride{}).
 		// Matches the strict `>` filter used by NearbyRides above for
 		// the same reason — a ride that has reached its scheduled
 		// start_time should drop out of the count too, otherwise the
@@ -197,16 +215,8 @@ func NearbyRidesCount(c *fiber.Ctx) error {
 		Where("is_ongoing = 0").
 		Where("start_longitude IS NOT NULL AND start_latitude IS NOT NULL").
 		Where("start_latitude BETWEEN ? AND ?", bounds.minLat, bounds.maxLat).
-		Where("start_longitude BETWEEN ? AND ?", bounds.minLng, bounds.maxLng).
-		Where(
-			"ST_DWithin("+
-				"ST_SetSRID(ST_MakePoint(?::float8, ?::float8), 4326)::geography, "+
-				"ST_SetSRID(ST_MakePoint(start_longitude::float8, start_latitude::float8), 4326)::geography, "+
-				"?"+
-				")",
-			lng, lat, radius,
-		).
-		Count(&count).Error
+		Where("start_longitude BETWEEN ? AND ?", bounds.minLng, bounds.maxLng)
+	err := applyNearbyRadiusFilter(q, lat, lng, radius).Count(&count).Error
 
 	if err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{

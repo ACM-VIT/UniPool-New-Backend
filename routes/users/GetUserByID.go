@@ -1,8 +1,9 @@
 package users
 
 import (
-	"unipool-backend/models"
 	"unipool-backend/database"
+	"unipool-backend/models"
+
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -19,7 +20,10 @@ func GetUserByID(c *fiber.Ctx) error {
 
 	// Find user in database
 	var user models.User
-	result := database.Database.Db.Where("id = ?", userID).First(&user)
+	result := database.Database.Db.
+		Select("id, name, email, profile_picture_url, gender, created_at").
+		Where("id = ?", userID).
+		First(&user)
 	if result.Error != nil {
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error":   true,
@@ -30,10 +34,10 @@ func GetUserByID(c *fiber.Ctx) error {
 	// Return public user information (no sensitive data)
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
 		"id":                  user.ID,
-		"name":               user.Name,
-		"email":              user.Email,
+		"name":                user.Name,
+		"email":               user.Email,
 		"profile_picture_url": user.ProfilePictureURL,
-		"gender":             user.Gender,
-		"created_at":         user.CreatedAt,
+		"gender":              user.Gender,
+		"created_at":          user.CreatedAt,
 	})
 }

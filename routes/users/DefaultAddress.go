@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 	"unipool-backend/database"
+	"unipool-backend/middleware"
 	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
@@ -49,6 +50,7 @@ func SetDefaultAddress(c *fiber.Ctx) error {
 		log.Printf("Error updating address: %v\n", err)
 		return c.Status(500).JSON(fiber.Map{"error": "Failed to update address"})
 	}
+	middleware.InvalidateAuthUserCacheByEmail(user.Email)
 
 	return c.Status(200).JSON(fiber.Map{"status": "OK"})
 }

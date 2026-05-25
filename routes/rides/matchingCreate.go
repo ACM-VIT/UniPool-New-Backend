@@ -3,10 +3,12 @@ package rides
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
 	"unipool-backend/database"
+	"unipool-backend/helpers"
 	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
@@ -85,6 +87,19 @@ func NormalizeStrictMatchParams(p *StrictMatchParams) {
 	}
 }
 
+func strictMatchCosLat(lat float64) float64 {
+	cosLat := math.Abs(math.Cos(lat * math.Pi / 180))
+	if cosLat < 0.01 {
+		return 0.01
+	}
+	return cosLat
+}
+
+func strictMatchRadiusDegreesSq(radiusM float64) float64 {
+	const metersPerDegree = 111320.0
+	return math.Pow(radiusM/metersPerDegree, 2)
+}
+
 // FindStrictRouteMatches runs the strict "is this ride already on
 // offer?" probe and returns up to p.Limit candidates ordered by
 // combined distance ascending. Match shape:
@@ -114,6 +129,12 @@ func FindStrictRouteMatches(ctx context.Context, p StrictMatchParams) ([]Matchin
 
 	windowStart := p.StartTime.Add(-time.Duration(p.WindowHours * float64(time.Hour)))
 	windowEnd := p.StartTime.Add(time.Duration(p.WindowHours * float64(time.Hour)))
+	filterRadiusM := conservativeCoordinateRadius(p.RadiusM)
+	startBounds := boundsForNearby(p.StartLat, p.StartLon, filterRadiusM)
+	endBounds := boundsForNearby(p.EndLat, p.EndLon, filterRadiusM)
+	startCosLat := strictMatchCosLat(p.StartLat)
+	endCosLat := strictMatchCosLat(p.EndLat)
+	radiusDegreesSq := strictMatchRadiusDegreesSq(filterRadiusM)
 
 	type row struct {
 		ID             uuid.UUID `gorm:"column:id"`
@@ -142,87 +163,108 @@ func FindStrictRouteMatches(ctx context.Context, p StrictMatchParams) ([]Matchin
 			r.start_latitude, r.start_longitude,
 			r.end_latitude, r.end_longitude,
 			r.start_time, r.total_seats,
-			(
-				SELECT COUNT(*)
-				FROM bookings b
-				WHERE b.ride_id = r.id
-				  AND b.request_status = 'accepted'
-				  AND b.deleted_at IS NULL
-			)::int AS booked_seats,
+			COALESCE(bc.accepted_count, 0)::int AS booked_seats,
 			r.total_price,
-			ST_Distance(
-				ST_SetSRID(ST_MakePoint(?::float8, ?::float8), 4326)::geography,
-				ST_SetSRID(ST_MakePoint(r.start_longitude::float8, r.start_latitude::float8), 4326)::geography
+			111320.0::float8 * SQRT(
+				((r.start_latitude::float8 - ?::float8) * (r.start_latitude::float8 - ?::float8)) +
+				(((r.start_longitude::float8 - ?::float8) * ?::float8) * ((r.start_longitude::float8 - ?::float8) * ?::float8))
 			) AS start_distance_m,
-			ST_Distance(
-				ST_SetSRID(ST_MakePoint(?::float8, ?::float8), 4326)::geography,
-				ST_SetSRID(ST_MakePoint(r.end_longitude::float8, r.end_latitude::float8), 4326)::geography
+			111320.0::float8 * SQRT(
+				((r.end_latitude::float8 - ?::float8) * (r.end_latitude::float8 - ?::float8)) +
+				(((r.end_longitude::float8 - ?::float8) * ?::float8) * ((r.end_longitude::float8 - ?::float8) * ?::float8))
 			) AS end_distance_m
-		`, p.StartLon, p.StartLat, p.EndLon, p.EndLat).
+		`,
+			p.StartLat, p.StartLat, p.StartLon, startCosLat, p.StartLon, startCosLat,
+			p.EndLat, p.EndLat, p.EndLon, endCosLat, p.EndLon, endCosLat,
+		).
 		Joins("LEFT JOIN users u ON u.id = r.host_user_id").
+		Joins(`
+			LEFT JOIN (
+				SELECT ride_id, COUNT(*) AS accepted_count
+				FROM bookings
+				WHERE request_status = 'accepted'
+				  AND deleted_at IS NULL
+				GROUP BY ride_id
+			) bc ON bc.ride_id = r.id
+		`).
 		Where("r.start_time BETWEEN ? AND ?", windowStart, windowEnd).
 		// Equivalent of helpers.PassengerSeatsLeftPredicate but
 		// counted live from the bookings table (booked_seats can
 		// briefly disagree mid-transaction during accept/reject).
 		// `r.total_seats - 1` discounts the host's seat — see
 		// helpers/seats.go for the canonical contract.
-		Where(`
-			r.total_seats - 1 > (
-				SELECT COUNT(*) FROM bookings b
-				WHERE b.ride_id = r.id
-				  AND b.request_status = 'accepted'
-				  AND b.deleted_at IS NULL
-			)
-		`).
+		Where("r.total_seats - 1 > COALESCE(bc.accepted_count, 0)").
 		Where("r.is_ongoing = 0").
 		Where("r.deleted_at IS NULL").
 		Where("r.start_latitude IS NOT NULL AND r.start_longitude IS NOT NULL").
 		Where("r.end_latitude IS NOT NULL AND r.end_longitude IS NOT NULL").
+		Where("r.start_latitude BETWEEN ? AND ?", startBounds.minLat, startBounds.maxLat).
+		Where("r.start_longitude BETWEEN ? AND ?", startBounds.minLng, startBounds.maxLng).
+		Where("r.end_latitude BETWEEN ? AND ?", endBounds.minLat, endBounds.maxLat).
+		Where("r.end_longitude BETWEEN ? AND ?", endBounds.minLng, endBounds.maxLng).
 		Where(`
-			ST_DWithin(
-				ST_SetSRID(ST_MakePoint(?::float8, ?::float8), 4326)::geography,
-				ST_SetSRID(ST_MakePoint(r.start_longitude::float8, r.start_latitude::float8), 4326)::geography,
-				?
-			)`, p.StartLon, p.StartLat, p.RadiusM).
+			(
+				((r.start_latitude::float8 - ?::float8) * (r.start_latitude::float8 - ?::float8)) +
+				(((r.start_longitude::float8 - ?::float8) * ?::float8) * ((r.start_longitude::float8 - ?::float8) * ?::float8))
+			) <= ?::float8
+		`, p.StartLat, p.StartLat, p.StartLon, startCosLat, p.StartLon, startCosLat, radiusDegreesSq).
 		Where(`
-			ST_DWithin(
-				ST_SetSRID(ST_MakePoint(?::float8, ?::float8), 4326)::geography,
-				ST_SetSRID(ST_MakePoint(r.end_longitude::float8, r.end_latitude::float8), 4326)::geography,
-				?
-			)`, p.EndLon, p.EndLat, p.RadiusM)
+			(
+				((r.end_latitude::float8 - ?::float8) * (r.end_latitude::float8 - ?::float8)) +
+				(((r.end_longitude::float8 - ?::float8) * ?::float8) * ((r.end_longitude::float8 - ?::float8) * ?::float8))
+			) <= ?::float8
+		`, p.EndLat, p.EndLat, p.EndLon, endCosLat, p.EndLon, endCosLat, radiusDegreesSq)
 	if p.ExcludeUserID != (uuid.UUID{}) {
 		q = q.Where("r.host_user_id <> ?", p.ExcludeUserID)
 		q = q.Where(`
-			r.id NOT IN (
-				SELECT b.ride_id FROM bookings b
+			NOT EXISTS (
+				SELECT 1 FROM bookings b
 				WHERE b.passenger_id = ?
 				  AND b.deleted_at IS NULL
+				  AND b.ride_id = r.id
 			)
 		`, p.ExcludeUserID)
 	}
-	// CockroachDB doesn't accept SELECT aliases inside an arithmetic
-	// ORDER BY expression — only bare-alias references work. Inline
-	// the ST_Distance calls so the sort uses the expression directly.
+	// CockroachDB doesn't accept SELECT aliases inside an arithmetic ORDER BY
+	// expression. Inline the cheap distance expressions so the sort preserves
+	// the previous "combined pickup+drop distance" behavior without per-row
+	// geography construction.
 	// Coordinate floats come from the caller (validated upstream) so
 	// fmt.Sprintf has no SQL-injection surface.
 	orderBy := fmt.Sprintf(`
-		(ST_Distance(
-			ST_SetSRID(ST_MakePoint(%f::float8, %f::float8), 4326)::geography,
-			ST_SetSRID(ST_MakePoint(r.start_longitude::float8, r.start_latitude::float8), 4326)::geography
-		) + ST_Distance(
-			ST_SetSRID(ST_MakePoint(%f::float8, %f::float8), 4326)::geography,
-			ST_SetSRID(ST_MakePoint(r.end_longitude::float8, r.end_latitude::float8), 4326)::geography
-		)) ASC, r.start_time ASC
-	`, p.StartLon, p.StartLat, p.EndLon, p.EndLat)
+		(
+			111320.0::float8 * SQRT(
+				((r.start_latitude::float8 - %f::float8) * (r.start_latitude::float8 - %f::float8)) +
+				(((r.start_longitude::float8 - %f::float8) * %f::float8) * ((r.start_longitude::float8 - %f::float8) * %f::float8))
+			) +
+			111320.0::float8 * SQRT(
+				((r.end_latitude::float8 - %f::float8) * (r.end_latitude::float8 - %f::float8)) +
+				(((r.end_longitude::float8 - %f::float8) * %f::float8) * ((r.end_longitude::float8 - %f::float8) * %f::float8))
+			)
+		) ASC, r.start_time ASC
+	`,
+		p.StartLat, p.StartLat, p.StartLon, startCosLat, p.StartLon, startCosLat,
+		p.EndLat, p.EndLat, p.EndLon, endCosLat, p.EndLon, endCosLat,
+	)
+	scanLimit := p.Limit * 3
+	if scanLimit < p.Limit {
+		scanLimit = p.Limit
+	}
+
 	if err := q.
 		Order(orderBy).
-		Limit(p.Limit).
+		Limit(scanLimit).
 		Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
 	matches := make([]MatchingRideSummary, 0, len(rows))
 	for _, r := range rows {
+		startDistanceM := helpers.CalculateDistance(p.StartLat, p.StartLon, r.StartLatitude, r.StartLongitude) * 1000
+		endDistanceM := helpers.CalculateDistance(p.EndLat, p.EndLon, r.EndLatitude, r.EndLongitude) * 1000
+		if startDistanceM > p.RadiusM || endDistanceM > p.RadiusM {
+			continue
+		}
 		matches = append(matches, MatchingRideSummary{
 			ID:             r.ID.String(),
 			HostUserID:     r.HostUserID.String(),
@@ -237,9 +279,12 @@ func FindStrictRouteMatches(ctx context.Context, p StrictMatchParams) ([]Matchin
 			TotalSeats:     r.TotalSeats,
 			BookedSeats:    r.BookedSeats,
 			TotalPrice:     r.TotalPrice,
-			StartDistanceM: r.StartDistanceM,
-			EndDistanceM:   r.EndDistanceM,
+			StartDistanceM: startDistanceM,
+			EndDistanceM:   endDistanceM,
 		})
+		if len(matches) >= p.Limit {
+			break
+		}
 	}
 	return matches, nil
 }
@@ -253,10 +298,11 @@ func FindStrictRouteMatches(ctx context.Context, p StrictMatchParams) ([]Matchin
 //
 // Route: GET /ride/matching-create
 // Query: start_lat, start_lon, end_lat, end_lon (required),
-//        start_time (RFC3339, default now+1h),
-//        radius_m (default 500, max 3000),
-//        window_hours (default 3, max 12),
-//        limit (default 5, max 10).
+//
+//	start_time (RFC3339, default now+1h),
+//	radius_m (default 500, max 3000),
+//	window_hours (default 3, max 12),
+//	limit (default 5, max 10).
 func MatchingCreate(c *fiber.Ctx) error {
 	startLat, sLatErr := strconv.ParseFloat(c.Query("start_lat"), 64)
 	startLon, sLonErr := strconv.ParseFloat(c.Query("start_lon"), 64)

@@ -4,6 +4,7 @@ import (
 	"log"
 	"strings"
 	"unipool-backend/database"
+	"unipool-backend/middleware"
 	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
@@ -96,6 +97,7 @@ func CreateOrUpdateUser(c *fiber.Ctx) error {
 			return &fiber.Error{Code: 500, Message: "Error creating user metadata"}
 		}
 		tx.Commit()
+		middleware.InvalidateAuthUserCacheByEmail(newUser.Email)
 
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{"message": "User created successfully", "user": newUser})
 	}
@@ -115,6 +117,7 @@ func CreateOrUpdateUser(c *fiber.Ctx) error {
 			log.Println("Error updating user metadata:", err)
 			return &fiber.Error{Code: 500, Message: "Error updating user metadata"}
 		}
+		middleware.InvalidateAuthUserCacheByEmail(existingUser.Email)
 
 		return c.Status(fiber.StatusOK).JSON(fiber.Map{
 			"message": "User FCM token updated successfully",

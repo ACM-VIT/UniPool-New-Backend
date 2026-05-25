@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"unipool-backend/database"
+	"unipool-backend/middleware"
 	"unipool-backend/models"
 
 	"github.com/gofiber/fiber/v2"
@@ -103,6 +104,7 @@ func UpdateProfile(c *fiber.Ctx) error {
 			"error": "failed to update profile",
 		})
 	}
+	middleware.InvalidateAuthUserCacheByEmail(user.Email)
 
 	// Return the post-update user row so the client can update its
 	// cached state without a round-trip. Preloads Institute so the

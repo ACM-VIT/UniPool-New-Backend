@@ -110,6 +110,37 @@ func TestRideSearch_StartCoordOnly(t *testing.T) {
 	assertIDPresent(t, body.Rides, target.ID.String())
 }
 
+func TestRideSearch_LimitIsCapped(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+
+	inst := SeedInstitute(t, db, "VIT Vellore", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Limit Host", "limit-host@vitstudent.ac.in", &inst.ID)
+
+	for i := 0; i < 60; i++ {
+		SeedRide(t, db, host, RideOpts{
+			StartLocation: "VIT Main Gate",
+			EndLocation:   "Katpadi Junction",
+			StartTime:     time.Now().Add(time.Duration(i+1) * time.Hour).UTC(),
+		})
+	}
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet,
+		"/ride/search?start_location=VIT&end_location=Katpadi&limit=500",
+		nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Rides []map[string]any `json:"rides"`
+	}
+	ReadJSON(t, resp, &body)
+	if len(body.Rides) > 50 {
+		t.Fatalf("expected search limit cap of 50, got %d", len(body.Rides))
+	}
+}
+
 // TestRideSearch_EndCoordOnly is the mirror — only an end pin. Covers
 // the ST_MakePoint(end_*) branch.
 func TestRideSearch_EndCoordOnly(t *testing.T) {

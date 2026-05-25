@@ -15,7 +15,6 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 	"unipool-backend/database"
 	"unipool-backend/helpers"
 	"unipool-backend/initializer"
@@ -62,6 +61,7 @@ func getRideViewerRole(userID, rideID uuid.UUID) (role string, hostID uuid.UUID,
 		  LEFT JOIN bookings b
 		    ON b.ride_id = r.id
 		   AND b.passenger_id = ?
+		   AND b.deleted_at IS NULL
 		 WHERE r.id = ?
 		 LIMIT 1
 	`, userID, rideID).Scan(&row)
@@ -127,6 +127,49 @@ func transformMessage(msg *models.Message) fiber.Map {
 	return out
 }
 
+type messageRow struct {
+	ID                      uuid.UUID
+	RideID                  *uuid.UUID
+	DMRoomID                *string
+	SenderID                uuid.UUID
+	Content                 string
+	Kind                    string
+	Metadata                models.MessageMetadata
+	CreatedAt               time.Time
+	SenderName              string
+	SenderProfilePictureURL string
+}
+
+func transformMessageRow(row *messageRow) fiber.Map {
+	kind := row.Kind
+	if kind == "" {
+		kind = models.MessageKindUser
+	}
+	metadata := row.Metadata
+	if metadata == nil {
+		metadata = models.MessageMetadata{}
+	}
+	out := fiber.Map{
+		"id":        row.ID.String(),
+		"content":   row.Content,
+		"sender_id": row.SenderID.String(),
+		"timestamp": row.CreatedAt.Format(time.RFC3339),
+		"kind":      kind,
+		"metadata":  metadata,
+		"sender": fiber.Map{
+			"name":                row.SenderName,
+			"profile_picture_url": row.SenderProfilePictureURL,
+		},
+	}
+	if row.RideID != nil {
+		out["ride_id"] = row.RideID.String()
+	}
+	if row.DMRoomID != nil {
+		out["dm_room_id"] = *row.DMRoomID
+	}
+	return out
+}
+
 // parsePagination reads `?limit=` and `?before=<rfc3339-ts>` query
 // params. `before` lets the client ask for messages older than a given
 // timestamp, which is the natural cursor for an infinite-scroll list.
@@ -147,6 +190,28 @@ func parsePagination(c *fiber.Ctx) (limit int, before time.Time, hasBefore bool)
 		}
 	}
 	return
+}
+
+func shouldMarkReadFromQuery(c *fiber.Ctx) bool {
+	raw := strings.ToLower(strings.TrimSpace(c.Query("mark_read")))
+	return raw == "1" || raw == "true" || raw == "yes"
+}
+
+func upsertRideReadCursor(userID, rideID uuid.UUID, now time.Time) error {
+	return database.Database.Db.Exec(`
+		INSERT INTO chat_reads (id, user_id, ride_id, last_read_at, created_at, updated_at)
+		VALUES (gen_random_uuid(), ?, ?, ?, ?, ?)
+		ON CONFLICT (user_id, ride_id) DO UPDATE SET last_read_at = EXCLUDED.last_read_at, updated_at = EXCLUDED.updated_at
+	`, userID, rideID, now, now, now).Error
+}
+
+func upsertDMReadCursor(userID uuid.UUID, dmRoomID string, now time.Time) error {
+	return database.Database.Db.Exec(`
+		INSERT INTO chat_reads (id, user_id, dm_room_id, last_read_at, created_at, updated_at)
+		VALUES (gen_random_uuid(), ?, ?, ?, ?, ?)
+		ON CONFLICT (user_id, dm_room_id)
+		DO UPDATE SET last_read_at = EXCLUDED.last_read_at, updated_at = EXCLUDED.updated_at
+	`, userID, dmRoomID, now, now, now).Error
 }
 
 // ----------------------------------------------------------------------
@@ -186,22 +251,29 @@ func GetRideMessages(c *fiber.Ctx) error {
 	limit, before, hasBefore := parsePagination(c)
 
 	query := database.Database.Db.
-		// `transformMessage` only reads sender.Name +
-		// sender.ProfilePictureURL; pulling the full User row (incl.
-		// the 500-char FCMToken, DeviceID, InstituteEmail, etc.) per
-		// message ballooned the response on a 50-message page.
-		Preload("Sender", func(db *gorm.DB) *gorm.DB {
-			return db.Select("id, name, profile_picture_url")
-		}).
-		Where("ride_id = ?", rideUUID).
-		Order("created_at desc").
+		Table("messages AS m").
+		Select(`
+			m.id,
+			m.ride_id,
+			m.dm_room_id,
+			m.sender_id,
+			m.content,
+			m.kind,
+			m.metadata,
+			m.created_at,
+			u.name AS sender_name,
+			u.profile_picture_url AS sender_profile_picture_url
+		`).
+		Joins("JOIN users u ON u.id = m.sender_id").
+		Where("m.ride_id = ?", rideUUID).
+		Order("m.created_at desc").
 		Limit(limit)
 	if hasBefore {
-		query = query.Where("created_at < ?", before)
+		query = query.Where("m.created_at < ?", before)
 	}
 
-	var messages []models.Message
-	if err := query.Find(&messages).Error; err != nil {
+	var messages []messageRow
+	if err := query.Scan(&messages).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch messages"})
 	}
 
@@ -209,7 +281,13 @@ func GetRideMessages(c *fiber.Ctx) error {
 	// client to render in a top-down list.
 	transformed := make([]fiber.Map, 0, len(messages))
 	for i := len(messages) - 1; i >= 0; i-- {
-		transformed = append(transformed, transformMessage(&messages[i]))
+		transformed = append(transformed, transformMessageRow(&messages[i]))
+	}
+
+	if shouldMarkReadFromQuery(c) {
+		if err := upsertRideReadCursor(user.ID, rideUUID, time.Now()); err != nil {
+			log.Printf("GetRideMessages mark_read failed: %v", err)
+		}
 	}
 
 	return c.JSON(fiber.Map{
@@ -239,26 +317,41 @@ func GetDMMessages(c *fiber.Ctx) error {
 	limit, before, hasBefore := parsePagination(c)
 
 	query := database.Database.Db.
-		// Same narrowing as GetRideMessages — transformMessage only
-		// needs Name + ProfilePictureURL from the sender.
-		Preload("Sender", func(db *gorm.DB) *gorm.DB {
-			return db.Select("id, name, profile_picture_url")
-		}).
-		Where("dm_room_id = ?", dmRoomID).
-		Order("created_at desc").
+		Table("messages AS m").
+		Select(`
+			m.id,
+			m.ride_id,
+			m.dm_room_id,
+			m.sender_id,
+			m.content,
+			m.kind,
+			m.metadata,
+			m.created_at,
+			u.name AS sender_name,
+			u.profile_picture_url AS sender_profile_picture_url
+		`).
+		Joins("JOIN users u ON u.id = m.sender_id").
+		Where("m.dm_room_id = ?", dmRoomID).
+		Order("m.created_at desc").
 		Limit(limit)
 	if hasBefore {
-		query = query.Where("created_at < ?", before)
+		query = query.Where("m.created_at < ?", before)
 	}
 
-	var messages []models.Message
-	if err := query.Find(&messages).Error; err != nil {
+	var messages []messageRow
+	if err := query.Scan(&messages).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch messages"})
 	}
 
 	transformed := make([]fiber.Map, 0, len(messages))
 	for i := len(messages) - 1; i >= 0; i-- {
-		transformed = append(transformed, transformMessage(&messages[i]))
+		transformed = append(transformed, transformMessageRow(&messages[i]))
+	}
+
+	if shouldMarkReadFromQuery(c) {
+		if err := upsertDMReadCursor(user.ID, dmRoomID, time.Now()); err != nil {
+			log.Printf("GetDMMessages mark_read failed: %v", err)
+		}
 	}
 
 	return c.JSON(fiber.Map{
@@ -452,8 +545,7 @@ func fanOutRideNotificationsSystem(rideUUID uuid.UUID, actorID uuid.UUID, title,
 	for id := range recipients {
 		ids = append(ids, id)
 	}
-	allowed := helpers.FilterAllowedRecipients(ids, helpers.NotifChatMessages, rideUUID)
-	tokens, err := services.LoadFCMTokens(allowed)
+	tokens, err := services.LoadAllowedFCMTokens(ids, helpers.NotifChatMessages, rideUUID)
 	if err != nil {
 		log.Printf("system fanout: token lookup failed: %v", err)
 		return
@@ -603,18 +695,13 @@ func fanOutRideNotifications(rideUUID uuid.UUID, sender models.User, content str
 	}
 
 	// Batched recipient pipeline. Pre-fix this loop spawned one
-	// goroutine per recipient and each one did:
-	//   1. IsNotificationAllowed → 2 DB lookups
-	//   2. fcm.SendChatMessageNotification → 1 DB lookup + 1 FCM HTTP
-	// At 10 accepted passengers that was ~30 DB round-trips and 10
-	// separate FCM HTTP calls. Now: 2 DB queries (allowed-filter +
-	// token-batch) and 1 FCM HTTP call (SendEach fan-out) regardless
-	// of recipient count.
+	// goroutine per recipient and each one did preference + token
+	// reads on its own. Now preference resolution and token loading
+	// are one set-oriented query, followed by one batched FCM call.
 	recipientIDs := make([]uuid.UUID, 0, len(recipients))
 	for uid := range recipients {
 		recipientIDs = append(recipientIDs, uid)
 	}
-	allowedIDs := helpers.FilterAllowedRecipients(recipientIDs, helpers.NotifChatMessages, rideUUID)
 
 	// Drop anyone currently looking at this ride's chat. ChatMessages
 	// opens a WebSocket on mount and closes it on unmount, so an
@@ -624,8 +711,8 @@ func fanOutRideNotifications(rideUUID uuid.UUID, sender models.User, content str
 	// "noisy app" moment; suppress it server-side so we also save
 	// the FCM round-trip.
 	if hub := initializer.GetChatHub(); hub != nil {
-		recipientStrs := make([]string, 0, len(allowedIDs))
-		for _, id := range allowedIDs {
+		recipientStrs := make([]string, 0, len(recipientIDs))
+		for _, id := range recipientIDs {
 			recipientStrs = append(recipientStrs, id.String())
 		}
 		offline := hub.FilterUsersNotInRoom(rideUUID.String(), recipientStrs)
@@ -633,19 +720,19 @@ func fanOutRideNotifications(rideUUID uuid.UUID, sender models.User, content str
 		for _, s := range offline {
 			offlineSet[s] = struct{}{}
 		}
-		filtered := allowedIDs[:0]
-		for _, id := range allowedIDs {
+		filtered := recipientIDs[:0]
+		for _, id := range recipientIDs {
 			if _, ok := offlineSet[id.String()]; ok {
 				filtered = append(filtered, id)
 			}
 		}
-		allowedIDs = filtered
+		recipientIDs = filtered
 	}
-	if len(allowedIDs) == 0 {
+	if len(recipientIDs) == 0 {
 		return
 	}
 
-	tokens, err := services.LoadFCMTokens(allowedIDs)
+	tokens, err := services.LoadAllowedFCMTokens(recipientIDs, helpers.NotifChatMessages, rideUUID)
 	if err != nil {
 		log.Printf("notifications: token batch lookup for ride %s failed: %v", rideUUID, err)
 		return
@@ -691,13 +778,6 @@ func fanOutDMNotification(dmRoomID string, sender models.User, content string) {
 	if err != nil {
 		return
 	}
-	// DMs go through their own preference category so a user can
-	// silence the noisy ride group chats without losing 1:1 threads
-	// (or vice versa). Default-allowed when no row exists — most
-	// users never touch the settings.
-	if allowed, _ := helpers.IsNotificationAllowed(otherID, helpers.NotifDirectMessages, uuid.Nil); !allowed {
-		return
-	}
 	// If the recipient is currently looking at this DM (their
 	// ChatMessages WebSocket is open to this dmRoomID), skip the
 	// push — the message already appeared in their open conversation
@@ -705,9 +785,26 @@ func fanOutDMNotification(dmRoomID string, sender models.User, content string) {
 	if hub := initializer.GetChatHub(); hub != nil && hub.IsUserActiveInRoom(dmRoomID, otherID.String()) {
 		return
 	}
-	if err := fcm.SendDirectMessageNotification(otherID, sender.ID, sender.Name, content, dmRoomID); err != nil {
-		log.Printf("notifications: dm %s -> user %s failed: %v", dmRoomID, otherID, err)
+	tokens, err := services.LoadAllowedFCMTokens([]uuid.UUID{otherID}, helpers.NotifDirectMessages, uuid.Nil)
+	if err != nil {
+		log.Printf("notifications: dm token lookup %s -> user %s failed: %v", dmRoomID, otherID, err)
+		return
 	}
+	if len(tokens) == 0 {
+		return
+	}
+	title := fmt.Sprintf("New message from %s", sender.Name)
+	body := fmt.Sprintf("💬 %s", content)
+	if len(body) > 100 {
+		body = body[:97] + "..."
+	}
+	fcm.SendBatch(tokens, title, body, map[string]string{
+		"type":        "direct_message",
+		"dm_room_id":  dmRoomID,
+		"sender_id":   sender.ID.String(),
+		"sender_name": sender.Name,
+		"action":      "open_dm",
+	})
 }
 
 // NotifyAfterPersistedChatMessage is the post-WS-persist hook
@@ -763,34 +860,63 @@ func GetUserChats(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "User not authenticated or found"})
 	}
 
-	// 1) Every ride the user touches — hosting OR ANY booking
-	//    (pending, accepted, or rejected). Pending passengers stay
-	//    in the chat list so they can message the host before being
-	//    accepted; their viewer_role tells the client how to gate
-	//    visibility of the rest of the thread.
-	var rides []models.Ride
-	if err := database.Database.Db.
-		// Narrow both the ride row and the preloaded HostUser to the
-		// columns the chat-list response actually emits — pre-fix
-		// we were pulling the full Ride (incl. Settings JSONB,
-		// VehicleInfo, four lat/lng decimals) AND the full User
-		// (incl. 500-char FCMToken, DeviceID, DefaultAddress,
-		// InstituteEmail, contact_number) for every row in the
-		// Chats list. On a user with 20 chats that's >50KB of
-		// wasted wire bytes per request.
-		Select("id, host_user_id, start_location, end_location, start_time, booked_seats, total_seats, total_price, created_at, is_ongoing, is_same_gender, settings").
-		Preload("HostUser", func(db *gorm.DB) *gorm.DB {
-			return db.Select("id, name, profile_picture_url, is_email_verified")
-		}).
-		Where("host_user_id = ?", user.ID).
-		Or("id IN (SELECT ride_id FROM bookings WHERE passenger_id = ? AND request_status IN ?)",
-			user.ID, []string{"accepted", "pending"}).
-		Order("start_time desc").
-		Find(&rides).Error; err != nil {
+	// 1) Every ride the user touches — hosting OR pending/accepted
+	//    booking — joined to the tiny host projection the chat list
+	//    emits. This replaces GORM Preload's two SQL statements with
+	//    one set query and still preserves the exact response shape.
+	type chatRideRow struct {
+		ID                    uuid.UUID
+		CreatedAt             time.Time
+		HostUserID            uuid.UUID
+		StartLocation         string
+		EndLocation           string
+		StartTime             time.Time
+		BookedSeats           uint
+		TotalSeats            uint
+		TotalPrice            uint
+		IsOngoing             uint
+		IsSameGender          uint
+		Settings              models.RideSettings
+		HostUserName          string
+		HostProfilePictureURL string
+		HostIsEmailVerified   bool
+	}
+	var rideRows []chatRideRow
+	if err := database.Database.Db.Raw(`
+		SELECT r.id,
+		       r.created_at,
+		       r.host_user_id,
+		       r.start_location,
+		       r.end_location,
+		       r.start_time,
+		       r.booked_seats,
+		       r.total_seats,
+		       r.total_price,
+		       r.is_ongoing,
+		       r.is_same_gender,
+		       r.settings,
+		       u.name                AS host_user_name,
+		       u.profile_picture_url AS host_profile_picture_url,
+		       u.is_email_verified   AS host_is_email_verified
+		  FROM rides r
+		  JOIN users u ON u.id = r.host_user_id
+		 WHERE r.deleted_at IS NULL
+		   AND (
+		        r.host_user_id = ?
+		        OR r.id IN (
+		          SELECT b.ride_id
+		            FROM bookings b
+		           WHERE b.deleted_at IS NULL
+		             AND b.passenger_id = ?
+		             AND b.request_status IN ('accepted', 'pending')
+		        )
+		   )
+		 ORDER BY r.start_time DESC
+	`, user.ID, user.ID).Scan(&rideRows).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch chats"})
 	}
 
-	if len(rides) == 0 {
+	if len(rideRows) == 0 {
 		return c.JSON(fiber.Map{
 			"chat_rooms":       []fiber.Map{},
 			"count":            0,
@@ -799,85 +925,133 @@ func GetUserChats(c *fiber.Ctx) error {
 		})
 	}
 
-	rideIDs := make([]uuid.UUID, 0, len(rides))
-	for _, r := range rides {
-		rideIDs = append(rideIDs, r.ID)
-	}
-
-	// 2) Last message per ride — one query using a window function
-	//    (DISTINCT ON in PostgreSQL is even faster but less portable).
-	//    Replaces N round-trips with 1.
-	type latestRow struct {
-		RideID     uuid.UUID
-		MessageID  uuid.UUID
-		Content    string
-		SenderID   uuid.UUID
-		SenderName string
-		CreatedAt  time.Time
-	}
-	var rows []latestRow
-	err := database.Database.Db.Raw(`
-		SELECT DISTINCT ON (m.ride_id)
-		       m.ride_id,
-		       m.id           AS message_id,
-		       m.content,
-		       m.sender_id,
-		       u.name         AS sender_name,
-		       m.created_at
-		  FROM messages m
-		  JOIN users u ON u.id = m.sender_id
-		 WHERE m.ride_id IN ?
-		 ORDER BY m.ride_id, m.created_at DESC
-	`, rideIDs).Scan(&rows).Error
-	if err != nil {
-		log.Printf("GetUserChats: latest-message query failed: %v", err)
-	}
-	latestByRide := make(map[uuid.UUID]latestRow, len(rows))
-	for _, r := range rows {
-		latestByRide[r.RideID] = r
-	}
-
-	// 2a) Viewer's booking status per ride — drives the per-row
-	//     viewer_role chip ("Hosting" / "Confirmed" / "Pending")
-	//     on the chat list. Single batched query.
-	type bookingStatusRow struct {
-		RideID uuid.UUID
-		Status string
-	}
-	viewerStatus := make(map[uuid.UUID]string, len(rides))
-	{
-		var statusRows []bookingStatusRow
-		_ = database.Database.Db.Raw(`
-			SELECT ride_id, request_status AS status
-			  FROM bookings
-			 WHERE passenger_id = ?
-			   AND ride_id IN ?
-		`, user.ID, rideIDs).Scan(&statusRows).Error
-		for _, r := range statusRows {
-			viewerStatus[r.RideID] = r.Status
+	rides := make([]models.Ride, 0, len(rideRows))
+	rideIDs := make([]uuid.UUID, 0, len(rideRows))
+	for _, row := range rideRows {
+		ride := models.Ride{
+			BaseModel: models.BaseModel{
+				ID:        row.ID,
+				CreatedAt: row.CreatedAt,
+			},
+			HostUserID:    row.HostUserID,
+			StartLocation: row.StartLocation,
+			EndLocation:   row.EndLocation,
+			StartTime:     row.StartTime,
+			BookedSeats:   row.BookedSeats,
+			TotalSeats:    row.TotalSeats,
+			TotalPrice:    row.TotalPrice,
+			IsOngoing:     row.IsOngoing,
+			IsSameGender:  row.IsSameGender,
+			Settings:      row.Settings,
+			HostUser: models.User{
+				BaseModel:         models.BaseModel{ID: row.HostUserID},
+				Name:              row.HostUserName,
+				ProfilePictureURL: row.HostProfilePictureURL,
+				IsEmailVerified:   row.HostIsEmailVerified,
+			},
 		}
+		rides = append(rides, ride)
+		rideIDs = append(rideIDs, row.ID)
 	}
 
-	// 3) Unread count per ride — messages newer than the user's
-	//    `last_read_at` for that ride (single grouped query).
-	var unreadRows []struct {
-		RideID uuid.UUID
-		Cnt    int64
+	// 2) Per-ride chat summary in one round trip: latest message,
+	//    viewer booking status, unread count, and mute state. The
+	//    previous implementation issued four independent queries for
+	//    these maps after loading rides; this keeps all lookups
+	//    set-oriented and returns one row per chat.
+	type chatSummaryRow struct {
+		RideID          uuid.UUID
+		MessageID       *uuid.UUID
+		Content         *string
+		SenderID        *uuid.UUID
+		SenderName      *string
+		CreatedAt       *time.Time
+		Status          *string
+		UnreadCount     int64
+		RideMuted       bool
+		GlobalChatMuted bool
 	}
-	_ = database.Database.Db.Raw(`
-		SELECT m.ride_id,
-		       COUNT(*) AS cnt
-		  FROM messages m
-		  LEFT JOIN chat_reads r
-		    ON r.ride_id = m.ride_id AND r.user_id = ?
-		 WHERE m.ride_id IN ?
-		   AND m.sender_id <> ?
-		   AND m.created_at > COALESCE(r.last_read_at, 'epoch'::timestamptz)
-		 GROUP BY m.ride_id
-	`, user.ID, rideIDs, user.ID).Scan(&unreadRows).Error
-	unreadByRide := make(map[uuid.UUID]int64, len(unreadRows))
-	for _, u := range unreadRows {
-		unreadByRide[u.RideID] = u.Cnt
+	var summaryRows []chatSummaryRow
+	if err := database.Database.Db.Raw(`
+		WITH ride_ids AS (
+			SELECT id AS ride_id
+			  FROM rides
+			 WHERE id IN ?
+		),
+		latest AS (
+			SELECT DISTINCT ON (m.ride_id)
+			       m.ride_id,
+			       m.id           AS message_id,
+			       m.content,
+			       m.sender_id,
+			       u.name         AS sender_name,
+			       m.created_at
+			  FROM messages m
+			  JOIN users u ON u.id = m.sender_id
+			 WHERE m.ride_id IN (SELECT ride_id FROM ride_ids)
+			   AND m.deleted_at IS NULL
+			 ORDER BY m.ride_id, m.created_at DESC
+		),
+		viewer_status AS (
+			SELECT b.ride_id, b.request_status AS status
+			  FROM bookings b
+			 WHERE b.deleted_at IS NULL
+			   AND b.passenger_id = ?
+			   AND b.ride_id IN (SELECT ride_id FROM ride_ids)
+		),
+		unread AS (
+			SELECT m.ride_id, COUNT(*) AS unread_count
+			  FROM messages m
+			  LEFT JOIN chat_reads cr
+			    ON cr.ride_id = m.ride_id AND cr.user_id = ?
+			 WHERE m.deleted_at IS NULL
+			   AND m.ride_id IN (SELECT ride_id FROM ride_ids)
+			   AND m.sender_id <> ?
+			   AND m.created_at > COALESCE(cr.last_read_at, 'epoch'::timestamptz)
+			 GROUP BY m.ride_id
+		),
+		ride_mutes AS (
+			SELECT np.ride_id, TRUE AS ride_muted
+			  FROM notification_preferences np
+			 WHERE np.deleted_at IS NULL
+			   AND np.user_id = ?
+			   AND np.category = ?
+			   AND np.enabled = false
+			   AND np.ride_id IN (SELECT ride_id FROM ride_ids)
+		),
+		global_mute AS (
+			SELECT EXISTS (
+				SELECT 1
+				  FROM notification_preferences np
+				 WHERE np.deleted_at IS NULL
+				   AND np.user_id = ?
+				   AND np.category = ?
+				   AND np.enabled = false
+				   AND np.ride_id IS NULL
+			) AS global_chat_muted
+		)
+		SELECT ri.ride_id,
+		       l.message_id,
+		       l.content,
+		       l.sender_id,
+		       l.sender_name,
+		       l.created_at,
+		       vs.status,
+		       COALESCE(u.unread_count, 0) AS unread_count,
+		       COALESCE(rm.ride_muted, FALSE) AS ride_muted,
+		       gm.global_chat_muted
+		  FROM ride_ids ri
+		  CROSS JOIN global_mute gm
+		  LEFT JOIN latest l ON l.ride_id = ri.ride_id
+		  LEFT JOIN viewer_status vs ON vs.ride_id = ri.ride_id
+		  LEFT JOIN unread u ON u.ride_id = ri.ride_id
+		  LEFT JOIN ride_mutes rm ON rm.ride_id = ri.ride_id
+	`, rideIDs, user.ID, user.ID, user.ID, user.ID, helpers.NotifChatMessages, user.ID, helpers.NotifChatMessages).Scan(&summaryRows).Error; err != nil {
+		log.Printf("GetUserChats: summary query failed: %v", err)
+	}
+	summaryByRide := make(map[uuid.UUID]chatSummaryRow, len(summaryRows))
+	for _, r := range summaryRows {
+		summaryByRide[r.RideID] = r
 	}
 
 	// 4) Assemble the response. Sorted by latest activity (newest
@@ -888,6 +1062,7 @@ func GetUserChats(c *fiber.Ctx) error {
 	}
 	rooms := make([]roomEntry, 0, len(rides))
 	for _, ride := range rides {
+		summary := summaryByRide[ride.ID]
 		// Compute viewer_role from host + (cached) booking status —
 		// the chat-list client renders directly off this string so
 		// it doesn't have to do its own "am I host? am I confirmed?"
@@ -895,8 +1070,8 @@ func GetUserChats(c *fiber.Ctx) error {
 		viewerRole := "passenger"
 		if ride.HostUserID == user.ID {
 			viewerRole = "host"
-		} else if status, ok := viewerStatus[ride.ID]; ok {
-			switch status {
+		} else if summary.Status != nil {
+			switch *summary.Status {
 			case "accepted":
 				viewerRole = "confirmed_passenger"
 			case "pending":
@@ -921,19 +1096,28 @@ func GetUserChats(c *fiber.Ctx) error {
 			// the host's name without a second round-trip.
 			"host_is_verified":    ride.HostUser.IsEmailVerified,
 			"viewer_role":         viewerRole,
-			"notifications_muted": ride.Settings.NotificationsMuted,
-			"unread_count":        unreadByRide[ride.ID],
+			"chat_name":           ride.Settings.ChatName,
+			"notifications_muted": ride.Settings.NotificationsMuted || summary.GlobalChatMuted || summary.RideMuted,
+			"unread_count":        summary.UnreadCount,
 		}
 		sortKey := ride.CreatedAt
-		if last, ok := latestByRide[ride.ID]; ok {
-			room["last_message"] = fiber.Map{
-				"id":        last.MessageID.String(),
-				"content":   last.Content,
-				"sender":    last.SenderName,
-				"sender_id": last.SenderID.String(),
-				"timestamp": last.CreatedAt.Format(time.RFC3339),
+		if summary.MessageID != nil && summary.SenderID != nil && summary.CreatedAt != nil {
+			content := ""
+			if summary.Content != nil {
+				content = *summary.Content
 			}
-			sortKey = last.CreatedAt
+			senderName := ""
+			if summary.SenderName != nil {
+				senderName = *summary.SenderName
+			}
+			room["last_message"] = fiber.Map{
+				"id":        summary.MessageID.String(),
+				"content":   content,
+				"sender":    senderName,
+				"sender_id": summary.SenderID.String(),
+				"timestamp": summary.CreatedAt.Format(time.RFC3339),
+			}
+			sortKey = *summary.CreatedAt
 		}
 		rooms = append(rooms, roomEntry{Room: room, SortKey: sortKey})
 	}
@@ -999,6 +1183,7 @@ func pendingRequestRowsForHost(hostID uuid.UUID, rides []models.Ride) []fiber.Ma
 		  FROM bookings b
 		  JOIN users u ON u.id = b.passenger_id
 		 WHERE b.ride_id IN ?
+		   AND b.deleted_at IS NULL
 		   AND b.request_status = 'pending'
 		 ORDER BY b.created_at DESC
 	`, hostedRideIDs).Scan(&pending).Error; err != nil {
@@ -1009,52 +1194,63 @@ func pendingRequestRowsForHost(hostID uuid.UUID, rides []models.Ride) []fiber.Ma
 		return []fiber.Map{}
 	}
 
-	// Batch-fetch latest DM message + unread count per requester.
+	// Batch-fetch latest DM message + unread count per requester in
+	// one query. Pre-fix this pending-host section did separate
+	// latest/unread scans after loading pending bookings.
 	dmRoomIDs := make([]string, 0, len(pending))
 	for _, p := range pending {
 		rid := dmRoomID(hostID, p.PassengerID)
 		dmRoomIDs = append(dmRoomIDs, rid)
 	}
 
-	type dmLatestRow struct {
-		DMRoomID  string
-		Content   string
-		SenderID  uuid.UUID
-		CreatedAt time.Time
+	type dmSummaryRow struct {
+		DMRoomID    string
+		Content     *string
+		SenderID    *uuid.UUID
+		CreatedAt   *time.Time
+		UnreadCount int64
 	}
-	var latestDM []dmLatestRow
+	var dmSummaries []dmSummaryRow
 	_ = database.Database.Db.Raw(`
-		SELECT DISTINCT ON (m.dm_room_id)
-		       m.dm_room_id, m.content, m.sender_id, m.created_at
-		  FROM messages m
-		 WHERE m.dm_room_id IN ?
-		 ORDER BY m.dm_room_id, m.created_at DESC
-	`, dmRoomIDs).Scan(&latestDM).Error
-	latestByRoom := make(map[string]dmLatestRow, len(latestDM))
-	for _, r := range latestDM {
-		latestByRoom[r.DMRoomID] = r
-	}
-
-	// Unread = DM messages newer than chat_reads.last_read_at,
-	// excluding ones the host themselves sent.
-	type unreadRow struct {
-		DMRoomID string
-		Cnt      int64
-	}
-	var unreadRows []unreadRow
-	_ = database.Database.Db.Raw(`
-		SELECT m.dm_room_id, COUNT(*) AS cnt
-		  FROM messages m
-		  LEFT JOIN chat_reads r
-		    ON r.dm_room_id = m.dm_room_id AND r.user_id = ?
-		 WHERE m.dm_room_id IN ?
-		   AND m.sender_id <> ?
-		   AND m.created_at > COALESCE(r.last_read_at, 'epoch'::timestamptz)
-		 GROUP BY m.dm_room_id
-	`, hostID, dmRoomIDs, hostID).Scan(&unreadRows).Error
-	unreadByRoom := make(map[string]int64, len(unreadRows))
-	for _, u := range unreadRows {
-		unreadByRoom[u.DMRoomID] = u.Cnt
+		WITH room_ids AS (
+			SELECT DISTINCT dm_room_id
+			  FROM messages
+			 WHERE dm_room_id IN ?
+		),
+		latest AS (
+			SELECT DISTINCT ON (m.dm_room_id)
+			       m.dm_room_id,
+			       m.content,
+			       m.sender_id,
+			       m.created_at
+			  FROM messages m
+			 WHERE m.deleted_at IS NULL
+			   AND m.dm_room_id IN ?
+			 ORDER BY m.dm_room_id, m.created_at DESC
+		),
+		unread AS (
+			SELECT m.dm_room_id, COUNT(*) AS unread_count
+			  FROM messages m
+			  LEFT JOIN chat_reads cr
+			    ON cr.dm_room_id = m.dm_room_id AND cr.user_id = ?
+			 WHERE m.deleted_at IS NULL
+			   AND m.dm_room_id IN ?
+			   AND m.sender_id <> ?
+			   AND m.created_at > COALESCE(cr.last_read_at, 'epoch'::timestamptz)
+			 GROUP BY m.dm_room_id
+		)
+		SELECT ri.dm_room_id,
+		       l.content,
+		       l.sender_id,
+		       l.created_at,
+		       COALESCE(u.unread_count, 0) AS unread_count
+		  FROM room_ids ri
+		  LEFT JOIN latest l ON l.dm_room_id = ri.dm_room_id
+		  LEFT JOIN unread u ON u.dm_room_id = ri.dm_room_id
+	`, dmRoomIDs, dmRoomIDs, hostID, dmRoomIDs, hostID).Scan(&dmSummaries).Error
+	dmSummaryByRoom := make(map[string]dmSummaryRow, len(dmSummaries))
+	for _, r := range dmSummaries {
+		dmSummaryByRoom[r.DMRoomID] = r
 	}
 
 	out := make([]fiber.Map, 0, len(pending))
@@ -1073,11 +1269,15 @@ func pendingRequestRowsForHost(hostID uuid.UUID, rides []models.Ride) []fiber.Ma
 			"ride_end_location":             ride.EndLocation,
 			"ride_start_time":               ride.StartTime.Format(time.RFC3339),
 			"requested_at":                  p.CreatedAt.Format(time.RFC3339),
-			"unread_count":                  unreadByRoom[rid],
+			"unread_count":                  dmSummaryByRoom[rid].UnreadCount,
 		}
-		if last, ok := latestByRoom[rid]; ok {
+		if last := dmSummaryByRoom[rid]; last.SenderID != nil && last.CreatedAt != nil {
+			content := ""
+			if last.Content != nil {
+				content = *last.Content
+			}
 			row["last_message"] = fiber.Map{
-				"content":   last.Content,
+				"content":   content,
 				"sender_id": last.SenderID.String(),
 				"timestamp": last.CreatedAt.Format(time.RFC3339),
 			}
@@ -1137,9 +1337,10 @@ func canAccessDMRoom(userID uuid.UUID, roomID string) (uuid.UUID, bool, error) {
 		otherID = a
 	}
 
-	var count int64
+	var allowed bool
 	err = database.Database.Db.Raw(`
-		SELECT COUNT(*)
+		SELECT EXISTS (
+			SELECT 1
 		  FROM bookings b
 		  JOIN rides r ON r.id = b.ride_id
 		 WHERE b.deleted_at IS NULL
@@ -1148,11 +1349,13 @@ func canAccessDMRoom(userID uuid.UUID, roomID string) (uuid.UUID, bool, error) {
 		        (r.host_user_id = ? AND b.passenger_id = ?)
 		     OR (r.host_user_id = ? AND b.passenger_id = ?)
 		   )
-	`, userID, otherID, otherID, userID).Scan(&count).Error
+		 LIMIT 1
+		)
+	`, userID, otherID, otherID, userID).Scan(&allowed).Error
 	if err != nil {
 		return otherID, false, err
 	}
-	return otherID, count > 0, nil
+	return otherID, allowed, nil
 }
 
 // ----------------------------------------------------------------------
@@ -1335,11 +1538,7 @@ func MarkRideRead(c *fiber.Ctx) error {
 	}
 	// Upsert (UserID, RideID) — bumps the timestamp if a row already
 	// exists, inserts otherwise.
-	if err := database.Database.Db.Exec(`
-		INSERT INTO chat_reads (id, user_id, ride_id, last_read_at, created_at, updated_at)
-		VALUES (gen_random_uuid(), ?, ?, ?, ?, ?)
-		ON CONFLICT (user_id, ride_id) DO UPDATE SET last_read_at = EXCLUDED.last_read_at, updated_at = EXCLUDED.updated_at
-	`, read.UserID, rideUUID, now, now, now).Error; err != nil {
+	if err := upsertRideReadCursor(read.UserID, rideUUID, now); err != nil {
 		log.Printf("MarkRideRead failed: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to mark read"})
 	}
@@ -1372,12 +1571,7 @@ func MarkDMRead(c *fiber.Ctx) error {
 	// dm_room_id rows (the ride-chat case) hit the separate
 	// idx_chat_reads_user_ride constraint and never reach this
 	// handler.
-	if err := database.Database.Db.Exec(`
-		INSERT INTO chat_reads (id, user_id, dm_room_id, last_read_at, created_at, updated_at)
-		VALUES (gen_random_uuid(), ?, ?, ?, ?, ?)
-		ON CONFLICT (user_id, dm_room_id)
-		DO UPDATE SET last_read_at = EXCLUDED.last_read_at, updated_at = EXCLUDED.updated_at
-	`, user.ID, dmRoomID, now, now, now).Error; err != nil {
+	if err := upsertDMReadCursor(user.ID, dmRoomID, now); err != nil {
 		log.Printf("MarkDMRead failed: %v", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to mark read"})
 	}

@@ -26,7 +26,9 @@ func GetRideSettings(c *fiber.Ctx) error {
 	}
 
 	var ride models.Ride
-	if err := database.Database.Db.First(&ride, rideUUID).Error; err != nil {
+	if err := database.Database.Db.
+		Select("id, host_user_id, settings").
+		First(&ride, rideUUID).Error; err != nil {
 		log.Printf("Error finding ride %s: %v", rideID, err)
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error": "Ride not found",
@@ -35,11 +37,14 @@ func GetRideSettings(c *fiber.Ctx) error {
 
 	isHost := ride.HostUserID == user.ID
 	isPassenger := false
-	
+
 	if !isHost {
 		var booking models.Booking
-		err := database.Database.Db.Where("ride_id = ? AND passenger_id = ? AND request_status = ?", 
-			rideUUID, user.ID, "accepted").First(&booking).Error
+		err := database.Database.Db.
+			Select("id").
+			Where("ride_id = ? AND passenger_id = ? AND request_status = ?", rideUUID, user.ID, "accepted").
+			Limit(1).
+			First(&booking).Error
 		isPassenger = (err == nil)
 	}
 
@@ -71,7 +76,9 @@ func UpdateRideSettings(c *fiber.Ctx) error {
 	}
 
 	var ride models.Ride
-	if err := database.Database.Db.First(&ride, rideUUID).Error; err != nil {
+	if err := database.Database.Db.
+		Select("id, host_user_id, settings").
+		First(&ride, rideUUID).Error; err != nil {
 		log.Printf("Error finding ride %s: %v", rideID, err)
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"error": "Ride not found",
@@ -80,11 +87,14 @@ func UpdateRideSettings(c *fiber.Ctx) error {
 
 	isHost := ride.HostUserID == user.ID
 	isPassenger := false
-	
+
 	if !isHost {
 		var booking models.Booking
-		err := database.Database.Db.Where("ride_id = ? AND passenger_id = ? AND request_status = ?", 
-			rideUUID, user.ID, "accepted").First(&booking).Error
+		err := database.Database.Db.
+			Select("id").
+			Where("ride_id = ? AND passenger_id = ? AND request_status = ?", rideUUID, user.ID, "accepted").
+			Limit(1).
+			First(&booking).Error
 		isPassenger = (err == nil)
 	}
 
@@ -123,7 +133,7 @@ func UpdateRideSettings(c *fiber.Ctx) error {
 	}
 
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"message": "Ride settings updated successfully",
+		"message":  "Ride settings updated successfully",
 		"settings": updatedSettings,
 	})
 }
