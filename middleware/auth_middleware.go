@@ -60,6 +60,65 @@ func normalizeAuthEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
+func fallbackAuthNameFromEmail(email string) string {
+	email = normalizeAuthEmail(email)
+	if strings.HasSuffix(email, "@privaterelay.appleid.com") {
+		return "Apple User"
+	}
+	local, _, ok := strings.Cut(email, "@")
+	if !ok {
+		local = email
+	}
+	local = strings.TrimSpace(strings.NewReplacer(".", " ", "_", " ", "-", " ").Replace(local))
+	if local == "" {
+		return "UniPool User"
+	}
+	return local
+}
+
+func firstStringValue(value any) string {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []string:
+		for _, item := range v {
+			if s := strings.TrimSpace(item); s != "" {
+				return s
+			}
+		}
+	case []interface{}:
+		for _, item := range v {
+			if s := firstStringValue(item); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func authTokenEmail(decoded *firebaseauth.Token) string {
+	if decoded == nil {
+		return ""
+	}
+	if email := firstStringValue(decoded.Claims["email"]); email != "" {
+		return normalizeAuthEmail(email)
+	}
+	if email := firstStringValue(decoded.Firebase.Identities["email"]); email != "" {
+		return normalizeAuthEmail(email)
+	}
+	return ""
+}
+
+func authTokenUID(decoded *firebaseauth.Token) string {
+	if decoded == nil {
+		return ""
+	}
+	if uid := strings.TrimSpace(decoded.UID); uid != "" {
+		return uid
+	}
+	return strings.TrimSpace(decoded.Subject)
+}
+
 func authTokenCacheKey(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
@@ -104,25 +163,8 @@ func pruneAuthTokenCacheLocked(now time.Time) {
 	}
 }
 
-func storeVerifiedToken(token string, decoded *firebaseauth.Token) authTokenCacheEntry {
+func cacheVerifiedToken(token string, entry authTokenCacheEntry) authTokenCacheEntry {
 	now := time.Now()
-	expiresAt := time.Unix(decoded.Expires, 0)
-	if maxExpiresAt := now.Add(authTokenCacheMaxTTL); expiresAt.After(maxExpiresAt) {
-		expiresAt = maxExpiresAt
-	}
-
-	entry := authTokenCacheEntry{
-		expiresAt: expiresAt.Add(-authTokenCacheExpirySkew),
-	}
-	if email, ok := decoded.Claims["email"].(string); ok {
-		entry.email = email
-	}
-	if name, ok := decoded.Claims["name"].(string); ok {
-		entry.name = name
-	}
-	if picture, ok := decoded.Claims["picture"].(string); ok {
-		entry.profilePicture = picture
-	}
 	if entry.email == "" || !entry.expiresAt.After(now) {
 		return entry
 	}
@@ -138,6 +180,22 @@ func storeVerifiedToken(token string, decoded *firebaseauth.Token) authTokenCach
 	return entry
 }
 
+func storeVerifiedToken(token string, decoded *firebaseauth.Token) authTokenCacheEntry {
+	now := time.Now()
+	expiresAt := time.Unix(decoded.Expires, 0)
+	if maxExpiresAt := now.Add(authTokenCacheMaxTTL); expiresAt.After(maxExpiresAt) {
+		expiresAt = maxExpiresAt
+	}
+
+	entry := authTokenCacheEntry{
+		expiresAt: expiresAt.Add(-authTokenCacheExpirySkew),
+	}
+	entry.email = authTokenEmail(decoded)
+	entry.name = firstStringValue(decoded.Claims["name"])
+	entry.profilePicture = firstStringValue(decoded.Claims["picture"])
+	return cacheVerifiedToken(token, entry)
+}
+
 func verifyAuthTokenClaims(ctx context.Context, token string) (authTokenCacheEntry, error) {
 	if cached, ok := cachedVerifiedToken(token); ok {
 		return cached, nil
@@ -150,10 +208,30 @@ func verifyAuthTokenClaims(ctx context.Context, token string) (authTokenCacheEnt
 	if err != nil {
 		return authTokenCacheEntry{}, err
 	}
-	if decodedToken == nil || decodedToken.Claims == nil || decodedToken.Claims["email"] == nil {
+	if decodedToken == nil {
 		return authTokenCacheEntry{}, errors.New("invalid token claims")
 	}
-	return storeVerifiedToken(token, decodedToken), nil
+
+	entry := storeVerifiedToken(token, decodedToken)
+	if entry.email == "" {
+		if uid := authTokenUID(decodedToken); uid != "" {
+			record, err := client.GetUser(ctx, uid)
+			if err == nil && record != nil {
+				entry.email = normalizeAuthEmail(record.Email)
+				if entry.name == "" {
+					entry.name = strings.TrimSpace(record.DisplayName)
+				}
+				if entry.profilePicture == "" {
+					entry.profilePicture = strings.TrimSpace(record.PhotoURL)
+				}
+				entry = cacheVerifiedToken(token, entry)
+			}
+		}
+	}
+	if entry.email == "" {
+		return authTokenCacheEntry{}, errors.New("invalid token claims")
+	}
+	return entry, nil
 }
 
 func cachedAuthUser(email string) (models.User, bool) {
@@ -205,18 +283,18 @@ func loadAuthUserByEmail(ctx context.Context, email string) (models.User, error)
 	}
 
 	value, err, _ := authUserLookupGroup.Do(key, func() (any, error) {
-		if user, ok := cachedAuthUser(email); ok {
+		if user, ok := cachedAuthUser(key); ok {
 			return user, nil
 		}
 
 		var user models.User
 		if err := database.Database.Db.WithContext(ctx).
 			Select("id", "email", "name", "profile_picture_url", "contact_number", "gender", "yob", "default_address", "institute_id", "is_email_verified", "institute_email", "upi_vpa", "created_at", "updated_at").
-			Where("email = ?", email).
+			Where("LOWER(email) = ?", key).
 			Take(&user).Error; err != nil {
 			return models.User{}, err
 		}
-		storeAuthUser(email, user)
+		storeAuthUser(key, user)
 		return user, nil
 	})
 	if err != nil {
@@ -352,9 +430,9 @@ func Authenticate(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"error": "Invalid token"})
 	}
 
-	name := claims.name
+	name := strings.TrimSpace(claims.name)
 	if strings.TrimSpace(name) == "" {
-		return c.Status(401).JSON(fiber.Map{"error": "Please check your privacy settings and allow us to access your name"})
+		name = fallbackAuthNameFromEmail(email)
 	}
 
 	profilePicture := claims.profilePicture
