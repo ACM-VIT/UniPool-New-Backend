@@ -192,8 +192,18 @@ func ManifestHandler(c *fiber.Ctx) error {
 	}
 
 	body := manifestBody{
-		ID:             updateID,
-		CreatedAt:      createdAt.UTC().Format(time.RFC3339Nano),
+		ID: updateID,
+		// Millisecond precision is REQUIRED. The expo-updates native
+		// clients parse createdAt with formatters that accept exactly
+		// three fractional-second digits: iOS RCTConvert.nsDate uses
+		// "yyyy-MM-dd'T'HH:mm:ss.SSSZZZZZ" and Android parseDateString
+		// uses "...ss.SSS'Z'". Go's time.RFC3339Nano emits up to nine
+		// digits (e.g. .446041554Z); that fails to parse, the update's
+		// commitTime ends up nil/wrong, the update never finalizes, and
+		// the client re-downloads the same bundle on every launch
+		// without ever applying it. Format with .000 to force exactly
+		// three digits.
+		CreatedAt:      createdAt.UTC().Format("2006-01-02T15:04:05.000Z07:00"),
 		RuntimeVersion: runtimeVersion,
 		LaunchAsset:    launch,
 		Assets:         assets,
