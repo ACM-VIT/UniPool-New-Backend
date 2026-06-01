@@ -391,8 +391,8 @@ func UploadHandler(c *fiber.Ctx) error {
 		_ = os.WriteFile(filepath.Join(staging, "message.txt"), []byte(message), 0o644)
 	}
 
-		// Atomic flip: manifest requests keep seeing the current update until
-		// the staging directory is renamed into place.
+	// Atomic flip: manifest requests keep seeing the current update until
+	// the staging directory is renamed into place.
 	if err := os.Rename(staging, target); err != nil {
 		_ = os.RemoveAll(staging)
 		log.Printf("ota: finalize rename %s -> %s: %v", staging, target, err)
