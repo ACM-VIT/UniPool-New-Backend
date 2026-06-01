@@ -65,13 +65,8 @@ func GetActiveTripCard(c *fiber.Ctx) error {
 // should see on the home screen: upcoming-within-12h takes priority
 // over recent-undismissed-within-7d.
 //
-// Performance: pre-fix this fanned out to up to SIX sequential
-// round-trips for a viewer with no active trip (two findCandidate
-// calls × {booking, ride, host} each). Now it's a single JOINed SQL
-// statement that pulls a bucketed row for each candidate window,
-// projects only the columns we actually emit on the card, and orders
-// "upcoming" ahead of "recent". LIMIT 1 gives us the winner straight
-// from the DB — zero per-bucket follow-ups, zero per-host follow-ups.
+// Uses one joined query for both candidate windows, projecting only the fields
+// emitted on the card and ordering upcoming trips ahead of recent ones.
 func BuildActiveTripCard(userID uuid.UUID) *TripCard {
 	now := time.Now()
 	soon := now.Add(12 * time.Hour)

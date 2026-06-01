@@ -68,7 +68,6 @@ func DeleteUser(c *fiber.Ctx) error {
 		})
 	}
 
-	// Finally delete the user
 	if err := tx.Delete(&user).Error; err != nil {
 		tx.Rollback()
 		log.Println("Error deleting user:", err)
@@ -78,7 +77,6 @@ func DeleteUser(c *fiber.Ctx) error {
 		})
 	}
 
-	// Commit the transaction
 	if err := tx.Commit().Error; err != nil {
 		log.Println("Error committing transaction:", err)
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -246,13 +244,7 @@ func handlePassengerBookings(tx *gorm.DB, userID uuid.UUID) error {
 }
 
 func handleUserMessages(tx *gorm.DB, userID uuid.UUID) error {
-	// Option 1: Delete all messages sent by the user
-	// if err := tx.Where("sender_id = ?", userID).Delete(&models.Message{}).Error; err != nil {
-	//     return err
-	// }
-
-	// Option 2: Keep messages but mark sender as deleted (recommended for chat history)
-	// Create a "deleted user" placeholder if it doesn't exist
+	// Preserve chat history while removing the deleted user's identity.
 	deletedUser := models.User{
 		BaseModel:     models.BaseModel{ID: uuid.New()},
 		Name:          "Deleted User",
@@ -284,7 +276,6 @@ func handleUserMessages(tx *gorm.DB, userID uuid.UUID) error {
 }
 
 func handleUserMetadata(tx *gorm.DB, userID uuid.UUID) error {
-	// Delete user metadata records
 	if err := tx.Where("user_id = ?", userID).Delete(&models.UserMetadata{}).Error; err != nil {
 		return err
 	}

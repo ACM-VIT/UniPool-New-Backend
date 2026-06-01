@@ -8,7 +8,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-// GetPassengers returns a list of users the authenticated user has travelled with
+// GetPassengers returns users the authenticated user has completed trips with.
 func GetPassengers(c *fiber.Ctx) error {
 
 	userInterface := c.Locals("user")

@@ -7,9 +7,8 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-// Function to get details of any user by ID (public endpoint for getting passenger info)
+// GetUserByID returns the public profile fields needed for passenger info.
 func GetUserByID(c *fiber.Ctx) error {
-	// Get user ID from URL params
 	userID := c.Params("id")
 	if userID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -18,7 +17,6 @@ func GetUserByID(c *fiber.Ctx) error {
 		})
 	}
 
-	// Find user in database
 	var user models.User
 	result := database.Database.Db.
 		Select("id, name, email, profile_picture_url, gender, created_at").
@@ -31,7 +29,6 @@ func GetUserByID(c *fiber.Ctx) error {
 		})
 	}
 
-	// Return public user information (no sensitive data)
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
 		"id":                  user.ID,
 		"name":                user.Name,

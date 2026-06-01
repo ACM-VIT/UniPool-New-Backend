@@ -1,22 +1,16 @@
 package helpers
 
-// Single source of truth for seat semantics across the UniPool
-// backend. Every route handler that gates bookings, computes "seats
-// left", or projects capacity should go through this package
-// instead of inlining `booked_seats < total_seats - 1` or similar.
-// Keeping the predicate in one place stops the kind of slow drift
-// where one handler enforces the new contract and another keeps
-// the old one — which IS what happened pre-migration when
-// total_seats meant "passenger seats" everywhere but the unequal
-// split UI silently dropped the host's contribution.
+// Seat semantics for the backend. Route handlers that gate bookings, compute
+// "seats left", or project capacity should use this package instead of
+// inlining total_seats/booked_seats arithmetic.
 //
 // The contract (as of migration 00003_seats_include_host):
 //
-//   total_seats   — total people in the car, including the host
+//   total_seats   - total people in the car, including the host
 //                   driver. Migration 00003 bumped every existing
 //                   row by +1 so the meaning is consistent across
 //                   pre- and post-migration data.
-//   booked_seats  — confirmed passenger bookings only. The host is
+//   booked_seats  - confirmed passenger bookings only. The host is
 //                   NEVER counted here; their "seat" is implicit
 //                   from being the host.
 //   passenger capacity = total_seats - 1
@@ -24,11 +18,8 @@ package helpers
 //   per-seat fare = total_fare / total_seats  (host pays a share
 //   out of pocket; passengers reimburse the rest)
 //
-// SQL helpers live alongside the Go helpers so query-builders can
-// drop the same predicate string into a Where() without rebuilding
-// it from raw column references. If you change the meaning of
-// either column in the future, change it here and grep for
-// references — every handler should be touching this package.
+// SQL helpers live alongside the Go helpers so query-builders can use the same
+// predicates in Where() clauses.
 
 // PassengerCapacity returns how many passenger seats a ride has,
 // given the total_seats value from the DB. Returns 0 for an
@@ -86,12 +77,5 @@ const MinSeatsLeftPredicate = "(total_seats - 1 - booked_seats) >= ?"
 // the ride pointless. Enforced at /ride/create.
 const MinTotalSeats uint = 2
 
-// MaxTotalSeats is a sanity cap — set at 20 to cover everything
-// from a hatchback up to a full-size Tempo Traveller / minibus
-// (driver + ~19 passengers). 20 is also the threshold at which
-// the CreateRide stepper lands on the UFO Easter-egg art, so it's
-// the largest count the host can post from the app. The number
-// isn't strictly enforced today (the create form's stepper handles
-// UX bounds) but the constant lives here so a future server-side
-// validator can reference it without picking a different number.
+// MaxTotalSeats is the largest car size the app exposes today.
 const MaxTotalSeats uint = 20

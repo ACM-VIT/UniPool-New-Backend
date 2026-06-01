@@ -23,18 +23,13 @@ import (
 	"gorm.io/gorm"
 )
 
-// Tunables for the verify flow. Kept here so they're easy to find;
-// the values mirror what 6-digit-code flows at other consumer apps
-// (Stripe, Linear, Cash App) settle on — short window, small attempt
-// budget, but generous enough that a user fat-fingering once doesn't
-// have to ask for a new email.
+// Tunables for the verify flow: short-lived codes, limited attempts, and a
+// resend cooldown to protect email delivery reputation.
 const (
 	verifyCodeTTL     = 10 * time.Minute
 	verifyMaxAttempts = 5
-	// Once a row is sent, don't accept another /verify/start for the
-	// same target email until the cooldown elapses. Prevents bursting
-	// SES quota on a flaky network and gives spam filters fewer
-	// reasons to flag us.
+	// Do not accept another /verify/start for the same target until the
+	// cooldown elapses.
 	verifyResendCooldown = 45 * time.Second
 	// Custom URL scheme registered in app.json. The magic-link
 	// confirms the same row a code would.
@@ -43,7 +38,7 @@ const (
 
 // generateCode returns a uniformly-distributed 6-digit numeric code
 // as a zero-padded string. Uses crypto/rand so a leaked code can't
-// be predicted from a previous one.
+// be predicted from another code.
 func generateCode() (string, error) {
 	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
 	if err != nil {
@@ -99,21 +94,13 @@ func StartEmailVerification(c *fiber.Ctx) error {
 	}
 
 	target := strings.ToLower(strings.TrimSpace(body.Email))
-	// `target` must be of the form `local@domain` with both halves
-	// non-empty. The client validates this too but a malformed value
-	// can still arrive from older app versions or hand-crafted
-	// requests; without this gate SES rejects with a cryptic "Missing
-	// local name" failure that surfaces in the logs but never gives
-	// the client a clean signal. Observed twice in the wild for an
-	// empty-local email that came through the institute prefill path.
+	// Require `local@domain` before handing the address to SES.
 	atIdx := strings.Index(target, "@")
 	if atIdx <= 0 || atIdx == len(target)-1 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "please enter a valid email"})
 	}
 
-	// Only let people verify against a known institute domain — the
-	// whole point of the badge is institute affiliation. Unknown
-	// domain → no row created, no email sent.
+	// Only known institute domains can receive verification challenges.
 	if _, recognized := resolveInstituteFromEmail(target); !recognized {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "we don't recognise this institute yet — pick a university from the list",
@@ -171,9 +158,7 @@ func StartEmailVerification(c *fiber.Ctx) error {
 	magicLink := fmt.Sprintf("%s?t=%s", verifyDeeplinkScheme, token)
 	if err := helpers.SendVerificationCode(target, code, magicLink); err != nil {
 		log.Printf("StartEmailVerification: SES send to %s failed: %v", target, err)
-		// Roll back the row so the user can retry without hitting the
-		// cooldown. Better to surface the failure than to silently
-		// time them out.
+		// Roll back the row so the user can retry without hitting cooldown.
 		database.Database.Db.WithContext(ctx).Delete(&row)
 		return c.Status(fiber.StatusBadGateway).JSON(fiber.Map{
 			"error": "couldn't send the email — try again in a moment",
@@ -315,7 +300,5 @@ func ConfirmEmailVerification(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": "verified"})
 }
 
-// Compile-time assertion that the uuid package is used (avoids the
-// "imported and not used" linter shout if the route ever stops
-// referencing it directly).
+// Compile-time assertion for the uuid import.
 var _ = uuid.Nil

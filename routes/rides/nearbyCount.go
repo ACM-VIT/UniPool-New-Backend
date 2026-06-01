@@ -119,19 +119,9 @@ func LoadNearbyRides(ctx context.Context, lat, lng, radius float64, limit int, e
 			booked_seats,
 			total_price
 		`).
-		// Strict inequality (`>`, not `>=`) so a ride whose scheduled
-		// start_time has been reached drops out of the home-map pin
-		// set immediately. A ride pin only makes sense to surface
-		// while the trip is still in the future — once the host has
-		// (or should have) left, the pickup point is a stale waypoint
-		// the user can't act on. is_ongoing handles the
-		// host-explicitly-started case; this clause covers the much
-		// more common "host scheduled it and the clock just ticked
-		// past" case where nobody flipped a flag.
+		// Only future rides should appear on the nearby map and list.
 		Where("start_time > ?", time.Now()).
-		// Predicate from helpers/seats.go — discounts the host's
-		// seat from total_seats so a ride with `booked_seats ==
-		// total_seats - 1` is treated as full.
+		// Exclude rides with no passenger seats left.
 		Where(helpers.PassengerSeatsLeftPredicate).
 		Where("is_ongoing = 0").
 		Where("start_longitude IS NOT NULL AND start_latitude IS NOT NULL").
@@ -139,14 +129,7 @@ func LoadNearbyRides(ctx context.Context, lat, lng, radius float64, limit int, e
 		Where("start_longitude BETWEEN ? AND ?", bounds.minLng, bounds.maxLng)
 	q = applyNearbyRadiusFilter(q, lat, lng, radius)
 
-	// Authenticated callers pass their own user ID so their own ride
-	// pins drop out of the result set server-side. Hiding their own
-	// rides client-side was racy: a fresh /rides/nearby response can
-	// land before the user-context resolves, leaving the user's own
-	// pins on the map until the next pan re-runs the memo. Filtering
-	// here eliminates the window entirely. Unauthenticated callers
-	// (or guests on the public landing) leave the param empty and
-	// see every ride as before.
+	// Authenticated callers can exclude their own hosted rides server-side.
 	if excludeHostUserID != "" {
 		q = q.Where("host_user_id <> ?", excludeHostUserID)
 	}
@@ -193,24 +176,15 @@ func NearbyRidesCount(c *fiber.Ctx) error {
 	filterRadius := conservativeCoordinateRadius(radius)
 	bounds := boundsForNearby(lat, lng, filterRadius)
 
-	// PUBLIC endpoint — a slow PostGIS plan or a DB hiccup must not
-	// be able to pile up requests against the unauthenticated route
-	// and exhaust the connection pool. NearbyRides already has a 5s
-	// cap; this mirrors that posture.
+	// Bound DB time so unauthenticated traffic cannot tie up the pool.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var count int64
 	q := database.Database.Db.WithContext(ctx).Model(&models.Ride{}).
-		// Matches the strict `>` filter used by NearbyRides above for
-		// the same reason — a ride that has reached its scheduled
-		// start_time should drop out of the count too, otherwise the
-		// "carpools within 5km" pill on Home would over-count by
-		// every just-departed ride.
+		// Match LoadNearbyRides: started rides no longer count as nearby.
 		Where("start_time > ?", time.Now()).
-		// Predicate from helpers/seats.go — discounts the host's
-		// seat from total_seats so a ride with `booked_seats ==
-		// total_seats - 1` is treated as full.
+		// Exclude rides with no passenger seats left.
 		Where(helpers.PassengerSeatsLeftPredicate).
 		Where("is_ongoing = 0").
 		Where("start_longitude IS NOT NULL AND start_latitude IS NOT NULL").
@@ -251,11 +225,7 @@ func NearbyRides(c *fiber.Ctx) error {
 	radius, _ := strconv.ParseFloat(c.Query("radius"), 64)
 
 	limit, _ := strconv.Atoi(c.Query("limit"))
-	// Optional. When the caller is authenticated and passes their own
-	// user id here, the server skips rides hosted by that user so
-	// they don't see their own pins on the map / in the list. See
-	// LoadNearbyRides for why this moved server-side from the older
-	// client-side filter.
+	// Optional viewer filter for excluding self-hosted rides.
 	excludeHostUserID := c.Query("exclude_host_user_id")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
