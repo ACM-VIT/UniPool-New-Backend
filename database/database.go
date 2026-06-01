@@ -44,20 +44,11 @@ func ConnectToDB() {
 
 	log.Println("Connecting to database...")
 
-	// Configure GORM. PrepareStmt caches plan-resolved statements
-	// across calls, which is the single biggest CockroachDB Cloud win
-	// because the wire-protocol parse step is what dominates a fast
-	// query's latency.
+	// Configure GORM. PrepareStmt keeps repeated CockroachDB queries from
+	// paying the parse/prepare cost on every call.
 	//
-	// SlowThreshold sits at 300ms intentionally. The app server runs
-	// in the same AWS region as the CockroachDB Cloud cluster but
-	// over a separate VPC, so a freshly-opened connection
-	// (TLS+handshake+pool resolution) routinely lands in the
-	// 200-280ms band on the first query of its lifetime. Logging at
-	// 100ms was drowning out genuine slow paths under that handshake
-	// noise. 300ms keeps signal-to-noise honest while still flagging
-	// any real query regression like the PostGIS bug we caught
-	// recently.
+	// 300ms avoids logging normal first-query connection setup while still
+	// surfacing slow application queries.
 	config := &gorm.Config{
 		PrepareStmt: true,
 		Logger: logger.New(
@@ -87,11 +78,7 @@ func ConnectToDB() {
 		maxIdleConns = maxOpenConns
 	}
 	connMaxLifetimeMinutes := envInt("DB_CONN_MAX_LIFETIME_MINUTES", 30)
-	// 15 minutes is intentional: the notification scheduler ticks every
-	// 10 minutes and was always coming back to a closed connection,
-	// paying TLS+handshake of ~500-700ms on every tick (visible in the
-	// slow-query log). With a 15m idle window the scheduler's
-	// connection survives across ticks.
+	// Keep idle connections through the 10-minute notification scheduler tick.
 	connMaxIdleMinutes := envInt("DB_CONN_MAX_IDLE_MINUTES", 15)
 
 	sqlDB.SetMaxOpenConns(maxOpenConns)
@@ -153,11 +140,7 @@ func createIndexes(db *gorm.DB) error {
 	}
 	log.Printf("Installed %d/%d extensions successfully", extensionCount, len(extensions))
 
-	// chat_reads table + its unique indexes are now created by GORM
-	// AutoMigrate from the model's `uniqueIndex:` tags (idx_chat_reads_user_ride
-	// and idx_chat_reads_user_dm). The old inline CREATE-TABLE-IF-NOT-EXISTS
-	// bootstrap is gone — keeping the schema definition in one place
-	// (the model) instead of split between model + database.go.
+	// chat_reads and its unique indexes are created from model tags.
 
 	indexes := []struct {
 		name string

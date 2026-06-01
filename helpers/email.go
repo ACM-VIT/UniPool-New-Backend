@@ -15,14 +15,12 @@ import (
 	"github.com/aws/aws-sdk-go/service/ses"
 )
 
-// SES configuration. The AWS account this maps to has verified the
-// `acmvit.in` domain. `unipool@acmvit.in` is the product-facing
-// identity; replies hit a real-ish inbox instead of vanishing.
+// SES sender configuration for UniPool verification email.
 const (
 	sesVerifySender = "UniPool <unipool@acmvit.in>"
 	awsRegion       = "ap-south-1"
 
-	// Trap-Bold wordmark on Azure blob. SAS read-only through 2027-05-20.
+	// Public wordmark asset used by email templates.
 	emailWordmarkURL = "https://examcookerdevsi.blob.core.windows.net/exam-assets/unipool-email/wordmark.png?se=2027-05-20T00%3A00Z&sp=r&spr=https&sv=2026-02-06&sr=b&sig=7XpecwI5sxlV2UQxtHfoH%2FrS6c8w3TYs%2Fyms%2F7ZvSeY%3D"
 )
 
@@ -32,18 +30,16 @@ var (
 	sesErr    error
 )
 
-// ensureSES does a lazy session bring-up the first time we need to
-// send. Doing it in main() would couple the whole backend's startup
-// to AWS being reachable; emails are best-effort and we'd rather
-// fail one call than crash boot.
+// ensureSES initializes the SES client lazily so email availability does not
+// control service startup.
 //
 // Credential precedence:
 //
-//   1. AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY [+ AWS_SESSION_TOKEN]
-//      from the environment / .env. Cheapest, no subprocess.
-//   2. `aws configure export-credentials --format process` shell-out.
-//      Works without static creds when `aws sso login` is fresh.
-//   3. SDK default chain (instance profile, web identity, etc.).
+//  1. AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY [+ AWS_SESSION_TOKEN]
+//     from the environment / .env.
+//  2. `aws configure export-credentials --format process` shell-out.
+//     Works without static creds when `aws sso login` is fresh.
+//  3. SDK default chain (instance profile, web identity, etc.).
 func ensureSES() error {
 	sesOnce.Do(func() {
 		region := os.Getenv("AWS_REGION")
@@ -73,9 +69,8 @@ func ensureSES() error {
 	return sesErr
 }
 
-// loadEnvCreds pulls static creds out of the process environment.
-// Returns (_, false) if AccessKeyID is unset — SessionToken is
-// optional for permanent IAM-user keys.
+// loadEnvCreds pulls static credentials out of the process environment.
+// SessionToken is optional for permanent IAM-user keys.
 func loadEnvCreds() (*awsCLICreds, bool) {
 	ak := os.Getenv("AWS_ACCESS_KEY_ID")
 	sk := os.Getenv("AWS_SECRET_ACCESS_KEY")
@@ -110,9 +105,7 @@ func loadAWSCLICreds() (*awsCLICreds, error) {
 	return &c, nil
 }
 
-// SendVerificationCode emails the user a one-tap magic link and the
-// matching numeric code as a fallback. Either path lands on the same
-// row in `email_verifications`; confirm by token or by code.
+// SendVerificationCode emails a magic link and fallback numeric code.
 //
 // `magicLink` should be the fully-formed deeplink (`unipool://verify?t=<token>`)
 // so the email body just renders it verbatim into the CTA's href.
@@ -193,8 +186,7 @@ func buildOTPDigitsHTML(code string) string {
 	return b.String()
 }
 
-// Email template. Five `%s` slots: wordmark URL, recipient email,
-// magic link (x2), OTP HTML. Wordmark is Trap-Bold PNG on Azure blob.
+// Email template slots: wordmark URL, recipient email, magic link twice, OTP HTML.
 const emailTemplate = `<!doctype html>
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml">
 <head>

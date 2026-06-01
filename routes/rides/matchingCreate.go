@@ -225,10 +225,8 @@ func FindStrictRouteMatches(ctx context.Context, p StrictMatchParams) ([]Matchin
 			)
 		`, p.ExcludeUserID)
 	}
-	// CockroachDB doesn't accept SELECT aliases inside an arithmetic ORDER BY
-	// expression. Inline the cheap distance expressions so the sort preserves
-	// the previous "combined pickup+drop distance" behavior without per-row
-	// geography construction.
+	// CockroachDB does not accept SELECT aliases inside this arithmetic
+	// ORDER BY, so inline the cheap pickup/drop distance expressions.
 	// Coordinate floats come from the caller (validated upstream) so
 	// fmt.Sprintf has no SQL-injection surface.
 	orderBy := fmt.Sprintf(`

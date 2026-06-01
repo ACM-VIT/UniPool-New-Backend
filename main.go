@@ -1,9 +1,5 @@
-// Package main is the prod entrypoint. Subcommands (`migrate`,
-// `migrate-status`, `serve`) all wire to helpers in the `server`
-// package so the integration test harness can drive the same route
-// table without re-implementing it. Anything beyond arg dispatch +
-// process-level init (Firebase, FCM, websocket hub, /health) lives
-// here; everything route-table-shaped lives in `server/`.
+// Package main is the production entrypoint. CLI subcommands delegate to the
+// server and database packages so tests can reuse the same route wiring.
 package main
 
 import (
@@ -23,9 +19,7 @@ import (
 )
 
 func main() {
-	// Subcommand dispatch. Anything other than `serve` (the default)
-	// runs and exits without spinning up Fiber, the websocket hub, or
-	// the FCM scheduler.
+	// Migration subcommands run and exit without starting Fiber.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "migrate":
@@ -39,7 +33,7 @@ func main() {
 			}
 			return
 		case "serve":
-			// fall through to normal startup
+			// Continue to normal startup.
 		default:
 			log.Fatalf("unknown subcommand %q (expected: serve, migrate, migrate-status)", os.Args[1])
 		}
@@ -53,27 +47,18 @@ func main() {
 	services.InitNotificationScheduler()
 	initializer.InitializeWebsocket()
 
-	// Bridge the WebSocket chat persist path into the FCM fan-out
-	// helpers in routes/chat. Without this wire-up, every chat/DM
-	// message persists silently with zero push notifications (the
-	// existing HTTP /chat/:id/message + /dm/:id/message endpoints
-	// have fan-out, but the frontend sends every message over WS,
-	// so the HTTP path is unreachable for real user traffic).
+	// WebSocket chat sends persist outside the HTTP handlers, so wire their
+	// persisted-message hook into the same notification fanout.
 	initializer.OnChatMessagePersisted = chat.NotifyAfterPersistedChatMessage
 
 	app := server.NewApp()
 	server.SetupMiddleware(app)
 	database.ConnectToDB()
 
-	// Idempotent — guarantees the launch institutes (e.g. VIT) exist
-	// in the institutes / institute_domains tables, so a user signing
-	// in with a known student-email domain auto-resolves to a
-	// verified profile on first login.
+	// Idempotently seed launch institutes and their verified email domains.
 	users.SeedDefaultInstitutes()
 
-	// Health probe sits in main rather than server.WireRoutes so the
-	// binary owns its own liveness surface independent of route
-	// wiring concerns. Tests don't need it.
+	// Keep liveness separate from the application route table.
 	app.Get("/health", func(c *fiber.Ctx) error {
 		sqlDB, err := database.Database.Db.DB()
 		if err != nil {

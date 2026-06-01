@@ -9,7 +9,6 @@ import (
 )
 
 func GetAllUsers(c *fiber.Ctx) error {
-	// Fetch all users from the database
 	var users []models.User
 
 	if err := database.Database.Db.

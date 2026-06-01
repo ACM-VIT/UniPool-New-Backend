@@ -227,9 +227,7 @@ func TestMatchingCreate_IgnoresStaleBookedSeatsCounter(t *testing.T) {
 	host := SeedUser(t, db, "Host", "drift-host@vitstudent.ac.in", &inst.ID)
 
 	startT := time.Now().Add(2 * time.Hour).UTC()
-	// Cached counter says the ride is full (3 / 3) but there are
-	// no actual accepted bookings. Pre-fix this was a false
-	// negative; post-fix it matches because the live count is 0.
+	// Cached counter says full (3 / 3), but live accepted bookings are 0.
 	target := SeedRide(t, db, host, RideOpts{
 		StartLat: FloatPtr(12.9692), StartLon: FloatPtr(79.1559),
 		EndLat: FloatPtr(12.9698), EndLon: FloatPtr(79.1370),
@@ -246,7 +244,9 @@ func TestMatchingCreate_IgnoresStaleBookedSeatsCounter(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	var body struct {
-		Matches []struct{ ID string `json:"id"` } `json:"matches"`
+		Matches []struct {
+			ID string `json:"id"`
+		} `json:"matches"`
 	}
 	ReadJSON(t, resp, &body)
 	if len(body.Matches) != 1 || body.Matches[0].ID != target.ID.String() {
@@ -287,7 +287,9 @@ func TestMatchingCreate_ExcludesRidesUserAlreadyBooked(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	var body struct{ Count int `json:"count"` }
+	var body struct {
+		Count int `json:"count"`
+	}
 	ReadJSON(t, resp, &body)
 	if body.Count != 0 {
 		t.Errorf("expected 0 (rides with my existing bookings filtered out), got %d", body.Count)

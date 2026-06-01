@@ -50,13 +50,9 @@ var (
 	httpClient = &http.Client{Timeout: 650 * time.Millisecond}
 )
 
-// curatedLocations holds the seed list of places that show up in
-// empty-query "popular" suggestions and outrank free-text matches via
-// the priority bonus. India-only by design: this is an Indian student
-// carpool product, and surfacing San Francisco / Berkeley / Stanford
-// to a user in Vellore (which is what the previous US seed entries
-// did before they were resolved against a real GPS fix) makes the
-// selector look broken.
+// curatedLocations feeds empty-query popular suggestions and gets a
+// priority bonus over free-text matches. The list is India-first by
+// product scope.
 var curatedLocations = []locationCandidate{
 	{Name: "VIT Vellore", City: "Vellore", Country: "India", Lat: 12.9692, Lon: 79.1559, Category: "university", Priority: 120},
 	{Name: "Katpadi Junction", City: "Vellore", Country: "India", Lat: 12.9726, Lon: 79.1372, Category: "station", Priority: 115},

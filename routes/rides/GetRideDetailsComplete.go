@@ -147,12 +147,8 @@ func GetRideDetailsComplete(c *fiber.Ctx) error {
 		PassengerInstituteName     *string   `gorm:"column:passenger_institute_name"`
 	}
 
-	// The hot detail-open path now has two parallel DB round-trips:
-	//   1. ride + host + host institute
-	//   2. bookings + passenger + passenger institute
-	// The previous version needed ride, bookings, host, then passenger
-	// batch hydration. Keeping the projections explicit also avoids
-	// GORM model hydration for columns the mobile screen never reads.
+	// Keep the detail-open path to two parallel queries: ride+host and
+	// bookings+passengers. Explicit projections avoid unused model hydration.
 	var (
 		rideHost    rideHostRow
 		bookingRows []bookingPassengerRow

@@ -13,21 +13,17 @@ import (
 	"github.com/google/uuid"
 )
 
-// allowedReasons keeps the report categories explicit so the wire
-// stays clean. New categories require a code change — intentional,
-// since the moderation team has to know what each category means.
+// allowedReasons keeps moderation categories explicit on the API boundary.
 var allowedReasons = map[string]bool{
-	"safety":      true,
-	"harassment":  true,
-	"spam":        true,
+	"safety":        true,
+	"harassment":    true,
+	"spam":          true,
 	"inappropriate": true,
-	"scam":        true,
-	"other":       true,
+	"scam":          true,
+	"other":         true,
 }
 
-// CreateReport accepts a user-submitted report from the chat settings
-// sheet. Saved to the `reports` table with status=`pending` so the
-// moderation tools can pick it up off the server.
+// CreateReport accepts a user-submitted moderation report.
 //
 // Body shape:
 //
@@ -69,8 +65,7 @@ func CreateReport(c *fiber.Ctx) error {
 		})
 	}
 
-	// Require at least *something* to report — a user, a ride, or a
-	// chat room. Otherwise the report has no target and is noise.
+	// Reports need at least one target to be actionable.
 	if body.ReportedUserID == "" && body.RideID == "" && body.ChatRoomID == "" {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": "Report needs a target (reported_user_id, ride_id, or chat_room_id).",
@@ -91,8 +86,7 @@ func CreateReport(c *fiber.Ctx) error {
 				"error": "Invalid reported_user_id",
 			})
 		}
-		// Self-reports are almost always a bug or abuse of the form —
-		// reject loudly so the client can show a clear error.
+		// A report cannot target its own reporter.
 		if uid == user.ID {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 				"error": "You can't report yourself.",
