@@ -62,26 +62,15 @@ type Ride struct {
 	// verification — it's a free safety/usability signal.
 	VehicleInfo string `gorm:"type:varchar(200)" json:"vehicle_info,omitempty"`
 
-	// Cooldown stamp for the "ride was updated" push. The
-	// /ride/update handler skips fan-out if this is within the
-	// last 5 minutes (host editing a typo three times in two
-	// minutes shouldn't ping every passenger three times), and
-	// stamps it on every successful fan-out. Migration:
-	// 00006_email_dedup_rework.sql.
+	// Cooldown stamp for the "ride was updated" push. /ride/update skips
+	// fan-out when the last successful send was within 5 minutes.
 	UpdateNotifLastSentAt *time.Time `gorm:"column:update_notif_last_sent_at" json:"-"`
 }
 
 // TripTodayEmailSent records that a specific (ride, user) pair has
-// already been emailed about the day-before trip. Replaces the
-// earlier rides.trip_today_email_sent_at single-marker approach,
-// which couldn't handle late-accepted passengers (a passenger
-// accepted after the host's email already went out would be
-// silently skipped on every subsequent tick).
+// already been emailed about the day-before trip.
 //
-// The PK is the dedup lease: scheduler INSERTs with ON CONFLICT
-// DO NOTHING; a 1-row RowsAffected means we won the race and
-// should send, 0 means someone (another tick / a previous run)
-// already sent. See services/notification_scheduler.go.
+// The primary key is the dedup lease used by the scheduler's INSERT.
 type TripTodayEmailSent struct {
 	RideID uuid.UUID `gorm:"primaryKey;column:ride_id"`
 	UserID uuid.UUID `gorm:"primaryKey;column:user_id"`

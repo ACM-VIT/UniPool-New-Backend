@@ -6,10 +6,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// Notification categories. Keep these strings stable — they're the
-// keys clients send/receive when toggling preferences, and any
-// drift will silently leave users with broken settings until a
-// migration patches their rows.
+// Notification category strings are persisted and exchanged with clients.
 const (
 	NotifChatMessages   = "chat_messages"
 	NotifDirectMessages = "direct_messages"
@@ -18,10 +15,7 @@ const (
 	NotifRatingPrompts  = "rating_prompts"
 )
 
-// AllNotifCategories is the canonical list the settings UI walks.
-// Order is presentation order, not severity. DMs surface separately
-// from group ride chat so a user can mute the group without losing
-// 1:1 host-to-passenger threads (and vice versa).
+// AllNotifCategories is the settings presentation order.
 var AllNotifCategories = []string{
 	NotifChatMessages,
 	NotifDirectMessages,
@@ -30,22 +24,15 @@ var AllNotifCategories = []string{
 	NotifRatingPrompts,
 }
 
-// FilterAllowedRecipients runs the same gate as IsNotificationAllowed
-// but for a slice of users in two batched queries (global category +
-// per-ride overrides), instead of 2 queries per user. Returns the
-// subset of `userIDs` whose pref resolves to allowed.
+// FilterAllowedRecipients resolves notification preferences for many users in
+// batched queries.
 //
-// Used by FCM fan-out (chat / ride-update) where N recipients
-// otherwise meant 2N DB round-trips just to decide who to push to.
-// Fails open: any DB error is treated as "allowed" (matching the
-// single-user variant's posture — we'd rather over-notify than
-// silently drop on a transient DB hiccup).
+// It fails open to match the single-user variant's delivery posture.
 func FilterAllowedRecipients(userIDs []uuid.UUID, category string, rideID uuid.UUID) []uuid.UUID {
 	if len(userIDs) == 0 || category == "" {
 		return userIDs
 	}
-	// Default-allowed map. Each layer below tightens the decision
-	// when a pref row exists; absence keeps the user allowed.
+	// Absence of a preference row means notifications are allowed.
 	decision := make(map[uuid.UUID]bool, len(userIDs))
 	for _, id := range userIDs {
 		decision[id] = true
@@ -56,7 +43,7 @@ func FilterAllowedRecipients(userIDs []uuid.UUID, category string, rideID uuid.U
 		Enabled bool      `gorm:"column:enabled"`
 	}
 
-	// 1) Global category prefs — applied first as baseline.
+	// Global category prefs are the baseline.
 	var globals []prefRow
 	if err := database.Database.Db.
 		Table("notification_preferences").
@@ -68,7 +55,7 @@ func FilterAllowedRecipients(userIDs []uuid.UUID, category string, rideID uuid.U
 		}
 	}
 
-	// 2) Per-ride overrides — wins over global if present.
+	// Per-ride overrides win over global prefs.
 	if rideID != uuid.Nil {
 		var perRide []prefRow
 		if err := database.Database.Db.
@@ -91,18 +78,14 @@ func FilterAllowedRecipients(userIDs []uuid.UUID, category string, rideID uuid.U
 	return allowed
 }
 
-// IsNotificationAllowed resolves the user's preference for a given
-// (category, ride) push. Per-ride row wins if present; otherwise
-// the global row decides; absence of any row = allowed.
+// IsNotificationAllowed resolves one user's preference for a category/ride push.
+// Per-ride row wins, then global row, then default allowed.
 //
 // `rideID` is optional — pass uuid.Nil for non-ride-scoped pushes
 // (e.g. account-level notifications), and the per-ride lookup is
 // skipped.
 //
-// Errors from the DB are surfaced via the second return so the
-// caller can decide whether to fail open (send anyway, log) or
-// fail closed (drop). Current call sites fail open — we'd rather
-// over-notify than silently drop on a transient DB hiccup.
+// DB errors are returned so call sites can choose fail-open or fail-closed.
 //
 // For multi-recipient fan-outs prefer FilterAllowedRecipients —
 // resolves N users in 2 batched queries instead of 2N.

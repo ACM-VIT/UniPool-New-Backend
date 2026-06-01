@@ -6,17 +6,8 @@ import (
 	"github.com/google/uuid"
 )
 
-// EmailVerification holds a pending email-ownership challenge. When a
-// user wants to prove they own an institute email address (typically
-// because they signed in with a personal Google account but actually
-// study somewhere), we hash a 6-digit code into one of these rows and
-// SES the plaintext to the target address. The user types the code
-// back; if it hashes to the stored value and hasn't expired or been
-// over-attempted, we mark the user as verified.
-//
-// Codes are short-lived (10 minutes) and self-throttling: each row
-// counts wrong submissions and is consumed on success, so a single
-// row can't be brute-forced indefinitely.
+// EmailVerification holds one pending institute-email ownership challenge.
+// Codes are hashed, short-lived, attempt-limited, and consumed on success.
 type EmailVerification struct {
 	BaseModel
 

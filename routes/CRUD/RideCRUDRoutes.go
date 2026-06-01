@@ -312,21 +312,9 @@ func UpdateRideByID(c *fiber.Ctx) error {
 		})
 	}
 
-	// Notify every accepted passenger if the host changed something
-	// material. Builds a short human summary ("time, fare") so the
-	// push doesn't just say "ride updated" with no context.
-	//
-	// 5-MIN COOLDOWN: a host correcting a typo in three rapid edits
-	// shouldn't ping every passenger three times. update_notif_last_
-	// sent_at on the ride row is the gate — we'll skip the fan-out
-	// if a push already went out in the last 5 minutes, and stamp
-	// it on every send. The change-detection itself still happens
-	// (so a single big edit that lands inside the cooldown window
-	// still gets one push if the cooldown has expired by the time
-	// the next material change arrives).
-	//
-	// Async + best-effort — fire-and-forget so the API response
-	// isn't held hostage by the FCM round-trip.
+	// Notify accepted passengers for material host edits. A 5-minute
+	// cooldown on the ride row prevents rapid edit bursts from spamming FCM.
+	// Send best-effort so the API response is not held by FCM latency.
 	prevNotifSent := ride.UpdateNotifLastSentAt
 	go func(rideID uuid.UUID, route string) {
 		var changes []string
@@ -362,10 +350,8 @@ func UpdateRideByID(c *fiber.Ctx) error {
 			log.Printf("ride-updated notif: bookings lookup %s: %v", rideID, err)
 			return
 		}
-		// Stamp the cooldown column FIRST so two near-simultaneous
-		// updates (in-flight overlap) don't both pass the gate
-		// above and double-fire. Marking before send mirrors the
-		// trip-today dedup posture: spam-free > resend-on-failure.
+		// Stamp the cooldown column before sending so overlapping updates
+		// cannot both pass the notification gate.
 		now := time.Now()
 		if err := database.Database.Db.Model(&models.Ride{}).
 			Where("id = ?", rideID).

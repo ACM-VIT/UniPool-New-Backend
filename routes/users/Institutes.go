@@ -10,20 +10,10 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-// SeedDefaultInstitutes guarantees the launch institutes exist. Called
-// from main on startup (idempotent — uses ON-CONFLICT semantics via
-// "WHERE NOT EXISTS"). New institutes are added by editing the slice
-// below + redeploying. Long-term, admins create them via a dashboard.
-//
-// Also runs a small purge step for domains we explicitly DON'T want
-// surfaced any more (`legacyDomainExclusions` below) — that keeps the
-// student-only invariant on every boot even when a SWOT re-seed or
-// hand-edit slips a blocked domain back in.
+// SeedDefaultInstitutes keeps launch institutes and allowed student domains
+// present. It is idempotent and runs during startup.
 func SeedDefaultInstitutes() {
-	// Domains that should never appear in the picker. The faculty
-	// `vit.ac.in` lives here because the verification flow is for
-	// students; surfacing the faculty domain made it the obvious
-	// auto-fill choice and silently gated everyone behind it.
+	// Domains that should never appear in student verification choices.
 	legacyDomainExclusions := []string{"vit.ac.in"}
 	for _, d := range legacyDomainExclusions {
 		if err := database.Database.Db.
@@ -42,9 +32,7 @@ func SeedDefaultInstitutes() {
 		{
 			Name:    "Vellore Institute of Technology",
 			Country: "India",
-			// vit.ac.in intentionally absent — it's the faculty
-			// domain, not student. vitstudent.ac.in is the canonical
-			// student domain and the one the picker should default to.
+			// Faculty domains stay excluded; verification is student-only.
 			Domains: []string{"vitstudent.ac.in", "vitap.ac.in", "vitbhopal.ac.in"},
 		},
 	}
@@ -67,10 +55,7 @@ func SeedDefaultInstitutes() {
 			var existing models.InstituteDomain
 			err := database.Database.Db.Where("domain = ?", d).First(&existing).Error
 			if err == nil {
-				// Re-link instead of skipping. The previous "skip if
-				// exists" path left swot-seeded domains pointed at a
-				// stale `institutes` row, which is why VIT's search
-				// result was showing up with no domains attached.
+				// Re-link domains that exist but point at a stale institute row.
 				if existing.InstituteID != inst.ID {
 					if upErr := database.Database.Db.
 						Model(&existing).
@@ -90,9 +75,7 @@ func SeedDefaultInstitutes() {
 	}
 }
 
-// ListInstitutes returns the small public catalogue — used by the
-// frontend to display institute names on profile / ride cards. No
-// auth required; the data is non-sensitive.
+// ListInstitutes returns the public institute catalog used by profile and ride cards.
 func ListInstitutes(c *fiber.Ctx) error {
 	var list []models.Institute
 	if err := database.Database.Db.Order("name asc").Find(&list).Error; err != nil {
@@ -103,45 +86,19 @@ func ListInstitutes(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"institutes": list})
 }
 
-// SearchInstitutes powers the university picker in the verify flow.
-// `q` is the typeahead query; we want short, fast responses while
-// the user is typing, so the limit is small (20) and we shortcut
-// empty queries.
-//
-// Response shape:
-//
-//	{
-//	  "institutes": [
-//	    {"id":"…", "name":"Vellore Institute of Technology",
-//	     "country":"India",
-//	     "domains":["vit.ac.in","vitstudent.ac.in", …]}
-//	    , …
-//	  ]
-//	}
-//
-// Domains are returned inline so the frontend can:
-//
-//   1. Pre-fill an `@<domain>` placeholder on the email input
-//   2. Validate the entered email before hitting /verify/start
-//      (saving a server round-trip on obvious mismatches)
+// SearchInstitutes powers the verification-flow university picker. It returns
+// a compact typeahead result set with domains included for email validation.
 func SearchInstitutes(c *fiber.Ctx) error {
 	q := strings.ToLower(strings.TrimSpace(c.Query("q")))
 	if q == "" {
 		return c.JSON(fiber.Map{"institutes": []any{}})
 	}
 
-	// Match against three different fields so users can find their
-	// institute by whatever they remember:
-	//   1) Natural-name substring ("vellore", "indian institute")
-	//   2) Acronym from uppercase letters in the name ("VIT", "IIT-D")
-	//   3) Email domain prefix/substring ("vitstudent" → VIT, "iitb"
-	//      → IIT Bombay). Domains are stored in institute_domains —
-	//      we join via EXISTS so each institute appears once even if
-	//      multiple domains match.
+	// Match by name, acronym, or email domain while keeping each institute
+	// de-duplicated through EXISTS joins.
 	pattern := "%" + q + "%"
 	prefixPattern := q + "%"
-	// Strip non-letters from the raw query before treating it as an
-	// acronym attempt — handles "I.I.T.", "IIT-D", "vit ", etc.
+	// Strip punctuation before treating short queries as acronyms.
 	var letters []rune
 	for _, r := range strings.ToUpper(q) {
 		if r >= 'A' && r <= 'Z' {
@@ -155,20 +112,8 @@ func SearchInstitutes(c *fiber.Ctx) error {
 		acronymPattern = acronym + "%"
 	}
 
-	// Relevance ordering — tightest match wins:
-	//   1) exact acronym match
-	//   2) acronym prefix
-	//   3) name starts with query
-	//   4) ANY domain starts with query
-	//   5) name contains query
-	//   6) (default) — must be a domain substring match
-	// Within a tier, shorter names rank first so canonical entries
-	// like "Vellore Institute of Technology" beat the longer
-	// "Vellore Institute of Technology, Vellore" variant.
-	//
-	// Limited to 15 — 20 was scrollable noise, 15 fits the visible
-	// list comfortably while still covering acronym-ambiguous queries
-	// (e.g. "IIT" matches every campus).
+	// Relevance favors acronym/domain prefix matches, then name matches.
+	// Shorter names win ties, and the limit keeps typeahead results compact.
 	var institutes []models.Institute
 	var sql string
 	var args []any
@@ -195,12 +140,7 @@ func SearchInstitutes(c *fiber.Ctx) error {
 					WHEN LOWER(i.name) LIKE ? THEN 5
 					ELSE 6
 				END ASC,
-				-- Secondary tiebreaker: within the same tier, prefer
-				-- schools whose actual student domain starts with the
-				-- query ("vit" → Vellore's vitstudent.ac.in beats
-				-- Vemana / Vishnu who share the same VIT acronym but
-				-- don't have vit-prefixed domains). Caught the
-				-- Vellore-buried-under-Vemana case.
+				-- Prefer institutes whose student domain starts with the query.
 				CASE
 					WHEN EXISTS (
 					  SELECT 1 FROM institute_domains d
@@ -275,10 +215,7 @@ func SearchInstitutes(c *fiber.Ctx) error {
 	var domains []models.InstituteDomain
 	if err := database.Database.Db.
 		Where("institute_id IN ?", ids).
-		// Prefer the student-facing domain (e.g. `vitstudent.ac.in`)
-		// over the institutional one when an institute has multiple.
-		// The picker uses index 0 to pre-fill the email placeholder,
-		// so this directly drives the default that 90%+ of users want.
+		// Put student-facing domains first because the picker uses index 0.
 		Order(`
 			CASE
 				WHEN LOWER(domain) LIKE '%student%' THEN 0

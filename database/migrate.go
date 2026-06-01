@@ -1,21 +1,7 @@
 package database
 
-// Schema migrations powered by goose.
-//
-// Design intent: migrations are NOT run automatically on service
-// startup. The service binary opens the DB connection and assumes the
-// schema matches the model definitions; if it doesn't, that's a deploy
-// mistake and the operator should run `unipool-backend migrate` before
-// bringing the new code online.
-//
-// The previous setup ran GORM's AutoMigrate on every boot, which
-// (a) executed unreviewed DDL against a live production DB on every
-// service restart, (b) was non-idempotent in subtle ways (GORM kept
-// emitting DROP CONSTRAINT for legacy-named uniques that had already
-// been dropped), and (c) gave us nothing in terms of versioning,
-// rollback, or migration history. goose replaces all of that with
-// numbered .sql files in `migrations/`, a tracked `goose_db_version`
-// table, and an explicit `up` / `down` / `status` CLI.
+// Schema migrations powered by goose. Migrations are run explicitly via the
+// CLI, not automatically on service startup.
 
 import (
 	"context"
@@ -29,9 +15,7 @@ import (
 	"github.com/pressly/goose/v3"
 )
 
-// migrationsDir is the path inside the embedded FS where the .sql files
-// live. main.go owns the embed directive and hands us the FS so the
-// embed pattern can be relative to the project root.
+// migrationsDir is the path inside the embedded FS where SQL files live.
 const migrationsDir = "migrations"
 
 // RunMigrations applies any pending goose migrations against the
@@ -49,11 +33,7 @@ func RunMigrations(migrationsFS fs.FS) error {
 		return fmt.Errorf("setting goose dialect: %w", err)
 	}
 
-	// Bootstrap a pre-goose DB. If goose's bookkeeping table is missing
-	// but the application schema clearly already exists, mark the
-	// baseline migration as applied without actually running it. This
-	// is what lets us roll goose out against the existing production
-	// DB without re-creating tables.
+	// Stamp the baseline for pre-goose databases that already have the app schema.
 	if err := bootstrapIfPreGoose(context.Background(), sqlDB); err != nil {
 		return fmt.Errorf("bootstrapping goose state: %w", err)
 	}
@@ -102,23 +82,10 @@ func openMigrateDB() (*sql.DB, error) {
 	return sqlDB, nil
 }
 
-// bootstrapIfPreGoose detects the "we're rolling goose out against a
-// database that was previously schema-managed by GORM AutoMigrate"
-// case, and stamps the baseline migration as applied without running
-// it.
-//
-// The check is "does the application schema already exist, and does
-// goose not yet know about it?" rather than "does the goose tracking
-// table exist?" — because goose creates `goose_db_version` lazily on
-// its first read (e.g. `migrate-status`) before any migration has
-// actually been applied. Keying off the tracking table's existence
-// would miss the case where someone ran `migrate-status` first and
-// then `migrate`, which is exactly what an operator does the first
-// time they want to know what's pending.
+// bootstrapIfPreGoose stamps the baseline migration for databases that already
+// have the app schema but no applied goose baseline.
 func bootstrapIfPreGoose(ctx context.Context, db *sql.DB) error {
-	// Has the application schema been created by some prior tool
-	// (i.e. GORM AutoMigrate before we cut over)? If not, this is a
-	// fresh database and goose.Up should run the baseline normally.
+	// Fresh databases should run the baseline normally.
 	var schemaExists bool
 	if err := db.QueryRowContext(ctx, `SELECT to_regclass('public.users') IS NOT NULL`).Scan(&schemaExists); err != nil {
 		return fmt.Errorf("checking users table existence: %w", err)
@@ -127,11 +94,7 @@ func bootstrapIfPreGoose(ctx context.Context, db *sql.DB) error {
 		return nil
 	}
 
-	// Does goose already think the baseline is applied? Two cases:
-	//   1. goose_db_version doesn't exist at all → definitely not applied
-	//   2. it exists but max(version_id) < 1 → still not applied
-	// In either case, we need to stamp version 1. Otherwise it's
-	// already tracked and we're done.
+	// Stamp version 1 only when goose has not already tracked the baseline.
 	var gooseTableExists bool
 	if err := db.QueryRowContext(ctx, `SELECT to_regclass('public.goose_db_version') IS NOT NULL`).Scan(&gooseTableExists); err != nil {
 		return fmt.Errorf("checking goose_db_version existence: %w", err)

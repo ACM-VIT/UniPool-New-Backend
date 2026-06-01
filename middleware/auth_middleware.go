@@ -343,12 +343,8 @@ func firebaseAuthClient(ctx context.Context) (*firebaseauth.Client, error) {
 	return next, nil
 }
 
-// UserFromBearerToken verifies a Firebase ID token and resolves the
-// matching database user through the same token/user caches used by
-// HTTP middleware. WebSocket handlers cannot run Fiber middleware
-// during the upgraded connection, so this keeps chat socket opens from
-// paying a fresh Firebase verification + users lookup every time a
-// conversation is reopened.
+// UserFromBearerToken verifies a Firebase ID token and resolves the matching
+// database user through the same caches used by HTTP middleware.
 func UserFromBearerToken(ctx context.Context, token string) (models.User, error) {
 	claims, err := verifyAuthTokenClaims(ctx, token)
 	if err != nil {
@@ -362,16 +358,10 @@ func UserFromBearerToken(ctx context.Context, token string) (models.User, error)
 	return loadAuthUserByEmail(ctx, email)
 }
 
-// OptionalAuthenticate mirrors Authenticate but never short-circuits
-// with a 401. If the request carries a valid Firebase token AND an
-// existing user row, c.Locals("user") is populated exactly as the
-// hard middleware would; if anything is missing or invalid, the
-// handler still runs — c.Locals("user") just returns nil.
+// OptionalAuthenticate populates c.Locals("user") when a valid token and user
+// row are present, but never blocks public endpoints.
 //
-// Used for public read endpoints (search, nearby) where we want the
-// signed-in user to get personalized results (their own rides
-// filtered out, viewer_state populated) but guests can still hit
-// the same endpoint without an account.
+// Used by public reads that can personalize responses for signed-in users.
 func OptionalAuthenticate(c *fiber.Ctx) error {
 	authHeader := c.Get("Authorization")
 	if authHeader == "" {
@@ -395,12 +385,11 @@ func OptionalAuthenticate(c *fiber.Ctx) error {
 	if err == nil {
 		c.Locals("user", user)
 	}
-	// Whether or not we resolved a user row, never block the request.
 	return c.Next()
 }
 
 func Authenticate(c *fiber.Ctx) error {
-	// Skip authentication for WebSocket handshake – token will be validated inside chat logic.
+	// WebSocket handshakes validate the token after upgrade.
 	if c.Path() == "/ws" {
 		return c.Next()
 	}
@@ -415,10 +404,7 @@ func Authenticate(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"error": "Token not found"})
 	}
 
-	// Verify the token using Firebase. Successful verifications are
-	// cached until token expiry (capped to a short TTL) so a screen
-	// that fans out five authenticated requests doesn't redo the same
-	// JWT verification five times.
+	// Verified token claims are cached briefly to reduce repeated Firebase calls.
 	claims, err := verifyAuthTokenClaims(context.Background(), token)
 	if err != nil {
 		log.Println("Invalid token:", err)
@@ -437,7 +423,6 @@ func Authenticate(c *fiber.Ctx) error {
 
 	profilePicture := claims.profilePicture
 
-	// Check if the user exists in the database (without global activation scope)
 	var user models.User
 	if authDebugLogs {
 		log.Printf("Searching for user with email: %s", email)
@@ -451,17 +436,15 @@ func Authenticate(c *fiber.Ctx) error {
 		return c.Next()
 	}
 
-	// Increase timeout to 5 seconds and add retry logic
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Add retry logic for database queries
 	maxRetries := 3
 
 	for i := 0; i < maxRetries; i++ {
 		if i > 0 {
 			log.Printf("Retrying database query for user: %s (attempt %d/%d)", email, i+1, maxRetries)
-			time.Sleep(time.Duration(i) * 100 * time.Millisecond) // Progressive backoff
+			time.Sleep(time.Duration(i) * 100 * time.Millisecond)
 		}
 
 		user, err = loadAuthUserByEmail(ctx, email)
@@ -496,7 +479,6 @@ func Authenticate(c *fiber.Ctx) error {
 		}
 	}
 
-	// If all retries failed with timeout
 	if errors.Is(err, context.DeadlineExceeded) {
 		log.Printf("Database query failed after %d retries for user: %s", maxRetries, email)
 		return c.Status(500).JSON(fiber.Map{"error": "Database timeout - please try again later"})

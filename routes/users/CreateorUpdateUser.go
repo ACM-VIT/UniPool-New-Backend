@@ -37,14 +37,13 @@ func resolveInstituteFromEmail(email string) (*uuid.UUID, bool) {
 	return &id, true
 }
 
-// Function to create or update a user in the DB after authentication
+// CreateOrUpdateUser creates a profile for new Firebase users or refreshes the
+// stored FCM token for returning users.
 func CreateOrUpdateUser(c *fiber.Ctx) error {
-	// Extract user info from locals
 	localUser, ok := c.Locals("newuser").(map[string]interface{})
 	var existingUser models.User
 
 	if ok {
-		// Parse the request body for additional fields
 		var requestBody struct {
 			ContactNumber string `json:"contact_number"`
 			Gender        string `json:"gender"`
@@ -55,7 +54,6 @@ func CreateOrUpdateUser(c *fiber.Ctx) error {
 			return &fiber.Error{Code: 400, Message: "Invalid JSON body"}
 		}
 
-		// Combine data from locals and request body to create a new user object
 		newUser := models.User{
 			Name:              localUser["name"].(string),
 			Email:             localUser["email"].(string),
@@ -65,9 +63,7 @@ func CreateOrUpdateUser(c *fiber.Ctx) error {
 			YOB:               requestBody.YOB,
 		}
 
-		// Institute matching by email domain — silent. Known domain
-		// → user.institute_id set + is_email_verified=true. Unknown
-		// domain just creates an unverified user.
+		// Known institute domains are auto-linked and marked verified.
 		if instituteID, verified := resolveInstituteFromEmail(newUser.Email); verified {
 			newUser.InstituteID = instituteID
 			newUser.IsEmailVerified = true
@@ -85,7 +81,6 @@ func CreateOrUpdateUser(c *fiber.Ctx) error {
 			return &fiber.Error{Code: 500, Message: "Error creating user"}
 		}
 
-		// Create user metadata with FCM token
 		userMetadata = models.UserMetadata{
 			UserID:   newUser.ID,
 			FCMToken: UserFCM,
@@ -106,13 +101,11 @@ func CreateOrUpdateUser(c *fiber.Ctx) error {
 		existingUser = user
 		UserFCM := c.Get("FCMToken")
 
-		// Update user metadata with the new FCM token
 		existingUserMetadata := models.UserMetadata{
 			UserID:   existingUser.ID,
 			FCMToken: UserFCM,
 		}
 
-		// Save the FCM token update for existing user
 		if err := database.Database.Db.Where("user_id = ?", existingUser.ID).Save(&existingUserMetadata).Error; err != nil {
 			log.Println("Error updating user metadata:", err)
 			return &fiber.Error{Code: 500, Message: "Error updating user metadata"}
@@ -125,7 +118,6 @@ func CreateOrUpdateUser(c *fiber.Ctx) error {
 		})
 	}
 
-	// If neither newuser nor user exists in locals, return an error
 	return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 		"error":   true,
 		"message": "User data not found in locals",

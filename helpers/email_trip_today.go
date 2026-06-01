@@ -1,10 +1,6 @@
 package helpers
 
-// Trip-today / day-before email. Fires from the notification
-// scheduler at ~8pm local for any ride scheduled the next calendar
-// day. Bundles a .ics calendar attachment so the recipient can
-// one-tap "Add to Calendar" from the email — Gmail/Apple Mail both
-// auto-detect text/calendar attachments and offer the action inline.
+// Trip reminder email with an .ics calendar attachment.
 
 import (
 	"bytes"
@@ -21,10 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/ses"
 )
 
-// TripTodayEmailParams is the data envelope for the day-before email.
-// Kept as a struct (not positional args) because every field is a
-// short string and a 6-arg call site is harder to read than a
-// labelled literal.
+// TripTodayEmailParams is the data envelope for trip reminder email.
 type TripTodayEmailParams struct {
 	ToEmail       string
 	ToName        string
@@ -35,23 +28,14 @@ type TripTodayEmailParams struct {
 	HostName      string
 	HostFirst     string
 	TotalPrice    uint
-	// IsHost flips the headline + tone — host emails read "Your
-	// passengers are riding with you tomorrow", passenger emails
-	// read "You're riding with {host} tomorrow". Keeps the same
-	// template shell, different copy at the top.
+	// IsHost selects host-specific copy while reusing the same template.
 	IsHost bool
 }
 
-// SendTripTodayEmail composes + sends the day-before trip email
-// over SES SendRawEmail (needed for the .ics attachment — the
-// simple SendEmail API doesn't support attachments). Multipart
-// layout: multipart/mixed { multipart/alternative { text, html },
-// text/calendar attachment }. Standard layout, plays nicely with
-// Gmail, Apple Mail, Outlook.
+// SendTripTodayEmail composes and sends the trip reminder over SES SendRawEmail.
+// SendRawEmail is required for the .ics attachment.
 //
-// Best-effort: log + return on any failure. The trip itself isn't
-// affected if the email doesn't send — the in-app trip card still
-// surfaces on the day-of.
+// Email delivery is best-effort; trip state is not affected by send failures.
 func SendTripTodayEmail(p TripTodayEmailParams) error {
 	if err := ensureSES(); err != nil {
 		return fmt.Errorf("ses init: %w", err)
@@ -59,8 +43,7 @@ func SendTripTodayEmail(p TripTodayEmailParams) error {
 
 	subject := "Your UniPool ride is tomorrow"
 	if !p.StartTime.After(time.Now()) {
-		// Same template for "today" emails if we ever shift the
-		// schedule from day-before to morning-of.
+		// Reuse the template if the scheduler sends on the day of the trip.
 		subject = "Your UniPool ride is today"
 	}
 
@@ -121,15 +104,10 @@ func SendTripTodayEmail(p TripTodayEmailParams) error {
 }
 
 // buildRideICS renders a minimal RFC5545 VEVENT for the ride.
-// DTEND is start + 90m as a default ride length — UniPool doesn't
-// store end times today, and 90 minutes is a reasonable Vellore-
-// area carpool default. Calendar UIs that show the full duration
-// (Google Calendar agenda view) will display a 90m block; users
-// who care can drag the event edge after they accept.
+// UniPool does not store end times, so DTEND defaults to start + 90 minutes.
 func buildRideICS(p TripTodayEmailParams) string {
-	// All-day ICS spec uses UTC with the trailing Z. Folding lines
-	// at 75 chars is technically required but every modern parser
-	// accepts unfolded — keeping it readable.
+	// Calendar times are UTC with trailing Z. The short generated lines stay
+	// readable and work with the clients we target.
 	utcStart := p.StartTime.UTC()
 	utcEnd := utcStart.Add(90 * time.Minute)
 	stamp := time.Now().UTC()
@@ -167,8 +145,7 @@ func buildRideICS(p TripTodayEmailParams) string {
 	}, "\r\n")
 }
 
-// buildMultipartEmail assembles the RFC822/MIME message SES
-// SendRawEmail expects. Two-level multipart:
+// buildMultipartEmail assembles the RFC822/MIME message SES SendRawEmail expects:
 //
 //	multipart/mixed
 //	├── multipart/alternative
@@ -176,9 +153,7 @@ func buildRideICS(p TripTodayEmailParams) string {
 //	│   └── text/html
 //	└── text/calendar  (the .ics attachment)
 //
-// `mime/multipart` could do this with NewWriter but the boundary
-// + header juggling for nested parts becomes its own ball of yarn;
-// hand-assembling is more predictable for a single fixed shape.
+// Hand assembly keeps the fixed nested shape explicit.
 func buildMultipartEmail(from, to, subject, text, html, icsBody, icsName string) ([]byte, error) {
 	mixedBoundary := mimeBoundary("mixed")
 	altBoundary := mimeBoundary("alt")
@@ -201,18 +176,15 @@ func buildMultipartEmail(from, to, subject, text, html, icsBody, icsName string)
 	}
 	buf.WriteString("\r\n")
 
-	// --- multipart/alternative wrapper (plain + html) ---
 	fmt.Fprintf(&buf, "--%s\r\n", mixedBoundary)
 	fmt.Fprintf(&buf, "Content-Type: multipart/alternative; boundary=\"%s\"\r\n\r\n", altBoundary)
 
-	// text/plain part
 	fmt.Fprintf(&buf, "--%s\r\n", altBoundary)
 	buf.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
 	buf.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
 	buf.WriteString(text)
 	buf.WriteString("\r\n")
 
-	// text/html part
 	fmt.Fprintf(&buf, "--%s\r\n", altBoundary)
 	buf.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
 	buf.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
@@ -221,7 +193,6 @@ func buildMultipartEmail(from, to, subject, text, html, icsBody, icsName string)
 
 	fmt.Fprintf(&buf, "--%s--\r\n\r\n", altBoundary)
 
-	// --- text/calendar attachment ---
 	fmt.Fprintf(&buf, "--%s\r\n", mixedBoundary)
 	buf.WriteString("Content-Type: text/calendar; charset=UTF-8; method=PUBLISH; name=\"" + icsName + "\"\r\n")
 	buf.WriteString("Content-Disposition: attachment; filename=\"" + icsName + "\"\r\n")
@@ -253,10 +224,7 @@ func icsEscape(s string) string {
 	return s
 }
 
-// htmlEscape — minimal HTML entity escape for values dropped into the
-// email template's text nodes. Names and place strings come from
-// user input so we don't want a `<script>` slipping into a mail
-// preview.
+// htmlEscape applies minimal entity escaping for values placed in template text.
 func htmlEscape(s string) string {
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")
@@ -265,9 +233,7 @@ func htmlEscape(s string) string {
 	return s
 }
 
-// safeFirst returns the first non-empty string from the args, or
-// the final fallback. Used by the templates to handle "host name
-// not populated" cases without an `if` thicket inline.
+// safeFirst returns the first non-empty string from the args.
 func safeFirst(opts ...string) string {
 	for _, o := range opts {
 		if strings.TrimSpace(o) != "" {

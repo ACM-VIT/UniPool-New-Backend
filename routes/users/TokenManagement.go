@@ -16,7 +16,7 @@ type TokenRequest struct {
 	DeviceID string `json:"deviceId"`
 }
 
-// UpdateUserToken updates the user's FCM token
+// UpdateUserToken stores the active device token used for push delivery.
 func UpdateUserToken(c *fiber.Ctx) error {
 	userInterface := c.Locals("user")
 	if userInterface == nil {
@@ -40,11 +40,9 @@ func UpdateUserToken(c *fiber.Ctx) error {
 		})
 	}
 
-	// Add context timeout for database operations
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Update user's FCM token, platform, and device ID
 	updates := map[string]interface{}{
 		"fcm_token": tokenReq.Token,
 		"platform":  tokenReq.Platform,
@@ -67,7 +65,7 @@ func UpdateUserToken(c *fiber.Ctx) error {
 	})
 }
 
-// RemoveUserToken removes the user's FCM token (for logout)
+// RemoveUserToken clears push metadata on logout.
 func RemoveUserToken(c *fiber.Ctx) error {
 	userInterface := c.Locals("user")
 	if userInterface == nil {
@@ -83,11 +81,9 @@ func RemoveUserToken(c *fiber.Ctx) error {
 		})
 	}
 
-	// Add context timeout for database operations
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Clear FCM token
 	if err := database.Database.Db.WithContext(ctx).Model(&user).Updates(map[string]interface{}{
 		"fcm_token": "",
 		"platform":  "",

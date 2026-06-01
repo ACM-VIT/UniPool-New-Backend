@@ -12,20 +12,8 @@ import (
 	"unipool-backend/models"
 )
 
-// OnChatMessagePersisted is the bridge from the WebSocket layer
-// (which lives in this package, the lowest in the dep graph) to the
-// FCM fan-out logic (which lives in services + routes/chat, both
-// higher up). main.go wires this at startup after services init.
-//
-// Why a hook variable: chat messages are sent over WS, not HTTP, so
-// the existing fanOutRideNotifications / fanOutDMNotification calls
-// in the HTTP handlers (routes/chat/chat.go) never actually run for
-// real user messages. Without this hook, every chat / DM message
-// silently persists with zero push notifications fired — which is
-// exactly the "I don't get DM notifications" bug users reported.
-//
-// nil-safe: handleChatMessage no-ops if the hook hasn't been wired,
-// so tests + isolated initializer use stays clean.
+// OnChatMessagePersisted bridges WebSocket-persisted chat messages to the
+// notification fanout layer. main wires it after services initialize.
 var OnChatMessagePersisted func(messageID, roomID, senderID, content string)
 
 const (
@@ -61,7 +49,6 @@ func (c *Client) readPump() {
 			break
 		}
 
-		// Parse the incoming message to determine its type
 		var baseMsg map[string]interface{}
 		if err := json.Unmarshal(message, &baseMsg); err != nil {
 			log.Printf("Error parsing base message: %v", err)
@@ -164,9 +151,7 @@ func (c *Client) handleChatMessage(message []byte) {
 			c.Hub.BroadcastToRoom(c.RoomID, updatedMessage)
 		}
 
-		// FCM fan-out. Routes/chat owns the recipient resolution +
-		// preference gating logic; we just hand it the persisted
-		// message's roomID + sender so it can decide who to push.
+		// Routes/chat owns recipient resolution and preference gating.
 		if OnChatMessagePersisted != nil {
 			OnChatMessagePersisted(msg.ID.String(), m.RoomID, m.SenderID, m.Content)
 		}
@@ -183,7 +168,6 @@ func (c *Client) handleMessageStatus(message []byte) {
 	statusMsg.UserID = c.UserID
 	statusMsg.Type = "message_status"
 
-	// Broadcast status update to all clients in the room
 	if statusBytes, err := json.Marshal(statusMsg); err == nil {
 		c.Hub.BroadcastToRoom(c.RoomID, statusBytes)
 	}

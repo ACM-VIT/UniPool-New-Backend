@@ -9,10 +9,10 @@ import (
 )
 
 type SendNotificationRequest struct {
-	TargetToken    string            `json:"targetToken"`
-	Notification   NotificationData  `json:"notification"`
-	Data           map[string]string `json:"data"`
-	Platform       string            `json:"platform"`
+	TargetToken  string            `json:"targetToken"`
+	Notification NotificationData  `json:"notification"`
+	Data         map[string]string `json:"data"`
+	Platform     string            `json:"platform"`
 }
 
 type NotificationData struct {
@@ -21,13 +21,13 @@ type NotificationData struct {
 }
 
 type SendToUserRequest struct {
-	UserID       string            `json:"userId" validate:"required"`
-	Title        string            `json:"title" validate:"required"`
-	Body         string            `json:"body" validate:"required"`
-	Data         map[string]string `json:"data"`
+	UserID string            `json:"userId" validate:"required"`
+	Title  string            `json:"title" validate:"required"`
+	Body   string            `json:"body" validate:"required"`
+	Data   map[string]string `json:"data"`
 }
 
-// SendNotification sends a notification via FCM (for direct token usage)
+// SendNotification is a diagnostic endpoint for sending a push-shaped payload.
 func SendNotification(c *fiber.Ctx) error {
 	userInterface := c.Locals("user")
 	if userInterface == nil {
@@ -51,8 +51,8 @@ func SendNotification(c *fiber.Ctx) error {
 		})
 	}
 
-	// For direct token usage, we'll create a temporary user ID
-	// This is mainly for testing or admin purposes
+	// The FCM service currently resolves tokens by user ID, so diagnostics use
+	// a temporary ID and still exercise the same send path.
 	tempUserID := uuid.New()
 	if err := fcmService.SendNotification(tempUserID, req.Notification.Title, req.Notification.Body, req.Data); err != nil {
 		log.Printf("Error sending notification: %v", err)
@@ -66,7 +66,7 @@ func SendNotification(c *fiber.Ctx) error {
 	})
 }
 
-// SendNotificationToUser sends a notification to a specific user by ID
+// SendNotificationToUser sends a push notification to a specific user ID.
 func SendNotificationToUser(c *fiber.Ctx) error {
 	userInterface := c.Locals("user")
 	if userInterface == nil {

@@ -24,7 +24,7 @@ import (
 )
 
 // ----------------------------------------------------------------------
-// Shared helpers
+// Shared helpers.
 // ----------------------------------------------------------------------
 
 const (
@@ -90,15 +90,9 @@ func getRideViewerRole(userID, rideID uuid.UUID) (role string, hostID uuid.UUID,
 	return roleNone, hostID, nil
 }
 
-// transformMessage serialises a `models.Message` into the wire shape the
-// frontend expects. Kept in one place so every endpoint emits identical
-// keys — the old code had four different shapes which forced the JS
-// client to normalise six field name variants.
+// transformMessage serializes a models.Message into the frontend wire shape.
 func transformMessage(msg *models.Message) fiber.Map {
-	// `kind` defaults to "user" — clients dispatch their render on
-	// this value (text bubble vs system card). `metadata` is the
-	// non-'user' card payload; always emitted so clients can rely on
-	// the field existing.
+	// Clients use kind to choose text bubbles vs system cards.
 	kind := msg.Kind
 	if kind == "" {
 		kind = models.MessageKindUser
@@ -233,7 +227,7 @@ func upsertDMReadCursor(userID uuid.UUID, dmRoomID string, now time.Time) error 
 }
 
 // ----------------------------------------------------------------------
-// Message history (paginated)
+// Message history (paginated).
 // ----------------------------------------------------------------------
 
 // GetRideMessages returns at most `limit` messages older than `before`
@@ -285,10 +279,8 @@ func GetRideMessages(c *fiber.Ctx) error {
 	}
 	args = append(args, limit)
 
-	// Resolve membership and load the first message page in one DB
-	// statement. The LEFT JOIN keeps one role row even for empty
-	// chats, so authorized no-message rooms still return 200/count 0
-	// and unauthorized viewers still get the same 403 as before.
+	// Resolve membership and page messages in one statement; the LEFT JOIN keeps
+	// authorized empty chats distinguishable from unauthorized viewers.
 	var rows []rideMessagePageRow
 	if err := database.Database.Db.Raw(`
 		WITH membership AS (
@@ -596,7 +588,7 @@ func GetDMMessages(c *fiber.Ctx) error {
 }
 
 // ----------------------------------------------------------------------
-// Send
+// Send.
 // ----------------------------------------------------------------------
 
 // SendMessage persists a ride chat message, broadcasts it to connected
@@ -646,12 +638,10 @@ func SendMessage(c *fiber.Ctx) error {
 	}
 	msg.Sender = user // we already have the sender — skip the round-trip Preload
 
-	// Broadcast over the websocket so anyone with the chat open sees
-	// the message before the HTTP response even returns to the sender.
+	// Broadcast before returning so open chat clients receive the message promptly.
 	broadcastChatMessage(rideID, &msg, body.TempID, user)
 
-	// Async fan-out of push notifications. We snapshot just the IDs we
-	// need so the goroutine doesn't hold references to the request ctx.
+	// Async push fan-out must not retain request context references.
 	go fanOutRideNotifications(rideUUID, user, body.Content)
 
 	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
@@ -659,12 +649,8 @@ func SendMessage(c *fiber.Ctx) error {
 	})
 }
 
-// PostSystemMessage inserts a non-'user' message into a ride group
-// chat, broadcasts it over the websocket, and fires push fan-out to
-// every accepted participant. Used by non-chat handlers (currently
-// the payment lifecycle in routes/bookings) to make state changes
-// visible in the chat without forcing every consumer to re-implement
-// the broadcast + FCM plumbing.
+// PostSystemMessage inserts a non-user message into a ride group chat,
+// broadcasts it, and optionally fans out push notifications.
 //
 // `senderID` is the user the system message is attributed to. For
 // payment_marker that's the passenger; for payment_ack that's the
@@ -722,12 +708,8 @@ func PostSystemMessage(
 	return &msg, nil
 }
 
-// fanOutRideNotificationsSystem is the system-message twin of
-// fanOutRideNotifications. Same recipient resolution (host +
-// accepted passengers, minus the actor), same per-user notification
-// preference gate, same batched FCM send — just with a configurable
-// payload so payment markers / acks can use their own title/body
-// instead of the chat-message default.
+// fanOutRideNotificationsSystem sends ride-scoped system-message pushes to
+// host and accepted passengers, excluding the actor.
 func fanOutRideNotificationsSystem(rideUUID uuid.UUID, actorID uuid.UUID, title, body string, data map[string]string) {
 	fcm := services.GetFCMService()
 	if fcm == nil {
@@ -790,9 +772,7 @@ func fanOutRideNotificationsSystem(rideUUID uuid.UUID, actorID uuid.UUID, title,
 	fcm.SendBatch(tokens, title, body, data)
 }
 
-// SendDMMessage mirrors SendMessage for direct messages between two
-// users. The room ID encodes both UUIDs (`dm_<a>_<b>`); we extract the
-// recipient and FCM them.
+// SendDMMessage mirrors SendMessage for direct-message rooms.
 func SendDMMessage(c *fiber.Ctx) error {
 	dmRoomID := c.Params("dm_room_id")
 	user, ok := c.Locals("user").(models.User)
@@ -876,12 +856,7 @@ func fanOutRideNotifications(rideUUID uuid.UUID, sender models.User, content str
 		return
 	}
 
-	// Two independent reads — ride row + accepted bookings — kicked
-	// off concurrently. Pre-fix this was sequential (~50ms wall
-	// time) AND the ride preload pulled a full HostUser including
-	// the 500-char FCMToken which is never used here. Dropping that
-	// preload + parallelising both queries saves ~25ms and ~1KB per
-	// chat-message send before the FCM goroutines even spin up.
+	// Ride row and accepted bookings are independent, so load them concurrently.
 	var (
 		ride        models.Ride
 		bookings    []models.Booking
@@ -928,22 +903,13 @@ func fanOutRideNotifications(rideUUID uuid.UUID, sender models.User, content str
 		}
 	}
 
-	// Batched recipient pipeline. Pre-fix this loop spawned one
-	// goroutine per recipient and each one did preference + token
-	// reads on its own. Now preference resolution and token loading
-	// are one set-oriented query, followed by one batched FCM call.
+	// Resolve notification preferences and tokens as one set-oriented batch.
 	recipientIDs := make([]uuid.UUID, 0, len(recipients))
 	for uid := range recipients {
 		recipientIDs = append(recipientIDs, uid)
 	}
 
-	// Drop anyone currently looking at this ride's chat. ChatMessages
-	// opens a WebSocket on mount and closes it on unmount, so an
-	// active socket to the ride room IS the signal that the recipient
-	// is staring at the conversation right now. Pushing a banner for
-	// a message that just animated into their list is the canonical
-	// "noisy app" moment; suppress it server-side so we also save
-	// the FCM round-trip.
+	// Suppress push banners for recipients currently connected to the room.
 	if hub := initializer.GetChatHub(); hub != nil {
 		recipientStrs := make([]string, 0, len(recipientIDs))
 		for _, id := range recipientIDs {
@@ -1041,17 +1007,8 @@ func fanOutDMNotification(dmRoomID string, sender models.User, content string) {
 	})
 }
 
-// NotifyAfterPersistedChatMessage is the post-WS-persist hook
-// registered with initializer.OnChatMessagePersisted at boot.
-// Chat messages are sent over WebSocket, not HTTP, so the existing
-// HTTP-side fan-out functions never actually fire for real user
-// messages. This bridges the WS persist path to the same fan-out
-// logic, so DMs and ride chat both push the same way the HTTP
-// endpoints (kept around as fallbacks) already would.
-//
-// Idempotent + cheap: a single User lookup, then dispatch to the
-// existing fanOutDMNotification / fanOutRideNotifications which
-// own preference gating and FCM delivery.
+// NotifyAfterPersistedChatMessage bridges WebSocket-persisted messages into
+// the same FCM fan-out path used by HTTP fallback send endpoints.
 func NotifyAfterPersistedChatMessage(messageID, roomID, senderIDStr, content string) {
 	senderID, err := uuid.Parse(senderIDStr)
 	if err != nil {
@@ -1078,26 +1035,19 @@ func NotifyAfterPersistedChatMessage(messageID, roomID, senderIDStr, content str
 }
 
 // ----------------------------------------------------------------------
-// Chat list
+// Chat list.
 // ----------------------------------------------------------------------
 
-// GetUserChats returns every ride chat the caller participates in
-// (hosting OR booked as an accepted passenger), each annotated with the
-// most recent message — all in two queries, not 1 + N like before.
-//
-// Fixes a long-standing bug where the previous version looked up
-// `bookings.user_id` (which doesn't exist; the column is
-// `passenger_id`), so passengers never saw their own chats.
+// GetUserChats returns every ride chat the caller participates in, each
+// annotated with latest message, unread state, and pending-request metadata.
 func GetUserChats(c *fiber.Ctx) error {
 	user, ok := c.Locals("user").(models.User)
 	if !ok {
 		return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "User not authenticated or found"})
 	}
 
-	// 1) Every ride the user touches — hosting OR pending/accepted
-	//    booking — joined to the tiny host projection the chat list
-	//    emits. This replaces GORM Preload's two SQL statements with
-	//    one set query and still preserves the exact response shape.
+	// Every hosted or requested ride, joined to the host projection needed by
+	// the chat list.
 	type chatRideRow struct {
 		ID                    uuid.UUID
 		CreatedAt             time.Time
@@ -1194,11 +1144,8 @@ func GetUserChats(c *fiber.Ctx) error {
 		rideIDs = append(rideIDs, row.ID)
 	}
 
-	// 2) Per-ride chat summary in one round trip: latest message,
-	//    viewer booking status, unread count, and mute state. The
-	//    previous implementation issued four independent queries for
-	//    these maps after loading rides; this keeps all lookups
-	//    set-oriented and returns one row per chat.
+	// Per-ride chat summary: latest message, viewer booking status, unread
+	// count, and mute state in one set-oriented query.
 	type chatSummaryRow struct {
 		RideID          uuid.UUID
 		MessageID       *uuid.UUID
@@ -1294,8 +1241,7 @@ func GetUserChats(c *fiber.Ctx) error {
 		summaryByRide[r.RideID] = r
 	}
 
-	// 4) Assemble the response. Sorted by latest activity (newest
-	//    chats first) which is the obvious sort for a chat list.
+	// Assemble the response sorted by latest activity.
 	type roomEntry struct {
 		Room    fiber.Map
 		SortKey time.Time
@@ -1303,10 +1249,7 @@ func GetUserChats(c *fiber.Ctx) error {
 	rooms := make([]roomEntry, 0, len(rides))
 	for _, ride := range rides {
 		summary := summaryByRide[ride.ID]
-		// Compute viewer_role from host + (cached) booking status —
-		// the chat-list client renders directly off this string so
-		// it doesn't have to do its own "am I host? am I confirmed?"
-		// math (same pattern as viewer_state for ride endpoints).
+		// The client renders directly from viewer_role.
 		viewerRole := "passenger"
 		if ride.HostUserID == user.ID {
 			viewerRole = "host"
@@ -1434,9 +1377,7 @@ func pendingRequestRowsForHost(hostID uuid.UUID, rides []models.Ride) []fiber.Ma
 		return []fiber.Map{}
 	}
 
-	// Batch-fetch latest DM message + unread count per requester in
-	// one query. Pre-fix this pending-host section did separate
-	// latest/unread scans after loading pending bookings.
+	// Batch-fetch latest DM message and unread count per requester.
 	dmRoomIDs := make([]string, 0, len(pending))
 	for _, p := range pending {
 		rid := dmRoomID(hostID, p.PassengerID)
@@ -1599,7 +1540,7 @@ func canAccessDMRoom(userID uuid.UUID, roomID string) (uuid.UUID, bool, error) {
 }
 
 // ----------------------------------------------------------------------
-// WebSocket handler & debug
+// WebSocket handler and debug endpoints.
 // ----------------------------------------------------------------------
 
 func WebSocketHandler(c *websocket.Conn) {
@@ -1707,7 +1648,7 @@ func GetActiveConnections(c *fiber.Ctx) error {
 }
 
 // ----------------------------------------------------------------------
-// Mark-as-read
+// Mark-as-read.
 // ----------------------------------------------------------------------
 
 // MarkRideRead bumps the caller's `last_read_at` for a ride chat to
@@ -1725,14 +1666,7 @@ func MarkRideRead(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "invalid ride id"})
 	}
 
-	// Membership check: only ride participants (host + accepted +
-	// pending requesters) get to bump the read cursor. Without this
-	// gate an attacker who knows a ride_id can spam read-marks
-	// against arbitrary rides — harmless in isolation but it (a)
-	// leaks "the caller is acknowledged in this ride" through the
-	// upsert side effect, and (b) lets a stranger silently dirty
-	// the read-state table for arbitrary users. Mirrors the same
-	// guard SendMessage and the WebSocket attach already use.
+	// Only participants can create read cursors for a ride.
 	role, _, roleErr := getRideViewerRole(user.ID, rideUUID)
 	if roleErr != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "membership lookup failed"})

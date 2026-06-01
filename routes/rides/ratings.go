@@ -16,12 +16,8 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// Ratings open up 12h after a ride's scheduled start time. Earlier
-// is too soon to know how the trip went; later means the memory's
-// stale. Direct rating stays open until 30 days post-trip so people
-// who open a specific old trip can still leave feedback, but the
-// persistent "rate this trip" prompt is capped at 7 days so one
-// missing counterpart does not pin a stale pill for a month.
+// Ratings open 12h after a ride starts. Direct rating remains available for
+// 30 days, while persistent prompts disappear after 7 days.
 const (
 	ratingEligibleAfter = 12 * time.Hour
 	ratingEligibleUntil = 30 * 24 * time.Hour
@@ -60,8 +56,7 @@ type PendingRatingRide struct {
 }
 
 // GetUserRatingSummary returns the public aggregate for one user.
-// Individual comments stay private for now; surfaces only need the
-// average + count to show useful trust context without leaking detail.
+// Individual comments stay private; public surfaces only need average + count.
 func GetUserRatingSummary(c *fiber.Ctx) error {
 	userID, err := uuid.Parse(c.Params("id"))
 	if err != nil {

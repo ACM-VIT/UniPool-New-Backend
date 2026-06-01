@@ -24,7 +24,7 @@ func dmRoomID(a, b uuid.UUID) string {
 	return "dm_" + ids[0] + "_" + ids[1]
 }
 
-// InitFCMService initializes the FCM service
+// InitFCMService initializes the singleton Firebase Cloud Messaging client.
 func InitFCMService() error {
 	if initializer.FirebaseApp == nil {
 		return fmt.Errorf("Firebase app not initialized")
@@ -40,12 +40,12 @@ func InitFCMService() error {
 	return nil
 }
 
-// GetFCMService returns the singleton FCM service instance
+// GetFCMService returns the singleton FCM service instance.
 func GetFCMService() *FCMService {
 	return fcmService
 }
 
-// SendNotification sends a push notification to a specific user
+// SendNotification sends a push notification to a specific user.
 func (f *FCMService) SendNotification(userID uuid.UUID, title, body string, data map[string]string) error {
 	type row struct {
 		ID       uuid.UUID `gorm:"column:id"`
@@ -97,7 +97,6 @@ func (f *FCMService) SendNotification(userID uuid.UUID, title, body string, data
 
 	response, err := f.client.Send(context.Background(), message)
 	if err != nil {
-		// Check if token is invalid and clear it from database
 		if messaging.IsInvalidArgument(err) || messaging.IsRegistrationTokenNotRegistered(err) {
 			log.Printf("Invalid FCM token for user %s, clearing from database", userID)
 			database.Database.Db.Table("users").Where("id = ?", userID).Update("fcm_token", "")
@@ -109,12 +108,10 @@ func (f *FCMService) SendNotification(userID uuid.UUID, title, body string, data
 	return nil
 }
 
-// SendNotificationToMultipleUsers sends notifications to multiple users
+// SendNotificationToMultipleUsers sends notifications to multiple users.
 //
-// Deprecated: this fans out N goroutines each doing its own
-// First(&user) lookup and its own messaging.Send() HTTP call. Use
-// SendBatch instead — one DB round-trip + one batched FCM call,
-// regardless of recipient count.
+// Deprecated: use SendBatch to avoid one database lookup and one FCM request
+// per recipient.
 func (f *FCMService) SendNotificationToMultipleUsers(userIDs []uuid.UUID, title, body string, data map[string]string) {
 	for _, userID := range userIDs {
 		go func(id uuid.UUID) {
@@ -133,15 +130,8 @@ type FCMRecipient struct {
 	Token  string
 }
 
-// LoadFCMTokens returns one FCMRecipient per user ID that has a
-// non-empty fcm_token, in a single DB round-trip. Users with no token
-// (notifications never enabled, or token cleared after an invalid
-// send) are omitted silently — matching SendNotification's existing
-// "no token is not an error" posture.
-//
-// Pre-fix every push call site paid a First(&user) per recipient
-// just to read the FCMToken column. For a 10-person chat fan-out
-// that's ten 25ms round-trips before any FCM HTTP fires.
+// LoadFCMTokens returns one FCMRecipient per user ID with a non-empty token.
+// Users without tokens are omitted, matching SendNotification's behavior.
 func LoadFCMTokens(userIDs []uuid.UUID) ([]FCMRecipient, error) {
 	if len(userIDs) == 0 {
 		return nil, nil
@@ -165,10 +155,7 @@ func LoadFCMTokens(userIDs []uuid.UUID) ([]FCMRecipient, error) {
 	return out, nil
 }
 
-// LoadAllowedFCMTokens merges notification preference resolution and
-// token loading into one DB query. It replaces the older
-// FilterAllowedRecipients + LoadFCMTokens pair that paid two or
-// three round-trips before every chat fan-out.
+// LoadAllowedFCMTokens resolves notification preferences and FCM tokens in one query.
 func LoadAllowedFCMTokens(userIDs []uuid.UUID, category string, rideID uuid.UUID) ([]FCMRecipient, error) {
 	if len(userIDs) == 0 {
 		return nil, nil
@@ -340,19 +327,15 @@ func LoadAllowedFCMTokensByRide(rideUserIDs map[uuid.UUID][]uuid.UUID, category 
 	return out, nil
 }
 
-// SendBatch fans the same notification out to every recipient in ONE
-// FCM HTTP call via messaging.SendEach. Firebase caps each call at
-// 500 messages — we chunk above that to stay safe, although every
-// current call site (chat fan-out, accept/reject) is well under.
+// SendBatch fans the same notification out with messaging.SendEach, chunked at
+// Firebase's 500-message limit.
 //
 // Tokens that come back as IsRegistrationTokenNotRegistered (the
 // user uninstalled the app, or the token aged out) are cleared
 // from the users table in a single batched UPDATE so future sends
 // skip them.
 //
-// Returns nothing — push is best-effort. Errors and per-token
-// failures are logged but never propagated; callers fire-and-forget
-// just like SendNotification's existing per-token call sites.
+// Push delivery is best-effort; errors are logged but not propagated.
 func (f *FCMService) SendBatch(recipients []FCMRecipient, title, body string, data map[string]string) {
 	if f == nil || len(recipients) == 0 {
 		return
@@ -396,8 +379,7 @@ func (f *FCMService) SendBatch(recipients []FCMRecipient, title, body string, da
 			continue
 		}
 
-		// Collect the user IDs whose tokens are dead so we can wipe
-		// them in a single UPDATE rather than per-row.
+		// Clear invalid tokens in one update after the chunk send completes.
 		var deadUserIDs []uuid.UUID
 		for i, r := range resp.Responses {
 			if r.Success {
@@ -422,7 +404,7 @@ func (f *FCMService) SendBatch(recipients []FCMRecipient, title, body string, da
 	}
 }
 
-// Notification types and helper methods
+// Notification helper methods.
 func (f *FCMService) SendBookingRequestNotification(rideOwnerID uuid.UUID, passengerID uuid.UUID, passengerName, rideRoute string, rideID uuid.UUID, bookingID uuid.UUID) error {
 	title := "New Ride Request"
 	body := fmt.Sprintf("%s wants to join your ride to %s", passengerName, rideRoute)
@@ -462,12 +444,8 @@ func (f *FCMService) SendBookingRejectedNotification(passengerID uuid.UUID, ride
 	return f.SendNotification(passengerID, title, body, data)
 }
 
-// SendBookingRemovedByHostNotification is sent to the PASSENGER
-// when the host removes them from an accepted booking. Different
-// from SendBookingRejectedNotification (used for declining a
-// still-pending request) — this user had a confirmed seat and now
-// doesn't, so the wording acknowledges that. Action sends them to
-// search so they can rebook quickly.
+// SendBookingRemovedByHostNotification tells a confirmed passenger their seat
+// was removed by the host.
 func (f *FCMService) SendBookingRemovedByHostNotification(passengerID uuid.UUID, rideRoute string, rideID uuid.UUID, bookingID uuid.UUID) error {
 	title := "You were removed from a ride"
 	body := fmt.Sprintf("The host removed your seat on the ride to %s. Tap to find another.", rideRoute)
@@ -480,13 +458,8 @@ func (f *FCMService) SendBookingRemovedByHostNotification(passengerID uuid.UUID,
 	return f.SendNotification(passengerID, title, body, data)
 }
 
-// SendBookingWithdrawnNotification is sent to the HOST when an
-// accepted passenger backs out before the ride happens. Same data
-// shape as the other booking-event pushes so the client's notification
-// router can deep-link to the ride details page cleanly.
-//
-// Wording avoids blame ("can't make it" rather than "cancelled"):
-// the goal is a graceful release, not a shame signal.
+// SendBookingWithdrawnNotification tells a host that an accepted passenger
+// backed out before the ride.
 func (f *FCMService) SendBookingWithdrawnNotification(rideOwnerID uuid.UUID, passengerID uuid.UUID, passengerName, rideRoute string, rideID uuid.UUID, bookingID uuid.UUID) error {
 	title := "A passenger can't make it"
 	body := fmt.Sprintf("%s let you know they can't ride to %s. The seat is open again.", passengerName, rideRoute)
