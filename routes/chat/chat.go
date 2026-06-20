@@ -1066,6 +1066,12 @@ func GetUserChats(c *fiber.Ctx) error {
 		HostIsEmailVerified   bool
 	}
 	var rideRows []chatRideRow
+	// Hide chats for rides that are already over, matching the trips list
+	// (involvedRides): a ride drops off once it's >24h past its start time
+	// and isn't flagged ongoing. Filtering the source ride set here covers
+	// BOTH the active chat rooms and the host's pending requests, since
+	// both are derived from `rides` below.
+	oneDayAgo := time.Now().UTC().Add(-24 * time.Hour)
 	if err := database.Database.Db.Raw(`
 		WITH viewer_ride_ids AS (
 			SELECT r.id AS ride_id
@@ -1101,8 +1107,9 @@ func GetUserChats(c *fiber.Ctx) error {
 		  FROM viewer_ride_ids v
 		  JOIN rides r ON r.id = v.ride_id
 		  JOIN users u ON u.id = r.host_user_id
+		 WHERE (r.is_ongoing = 1 OR r.start_time > ?)
 		 ORDER BY r.start_time DESC
-	`, user.ID, user.ID).Scan(&rideRows).Error; err != nil {
+	`, user.ID, user.ID, oneDayAgo).Scan(&rideRows).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch chats"})
 	}
 
