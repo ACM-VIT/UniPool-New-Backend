@@ -436,10 +436,35 @@ func appendCoordinateDistanceArgs(args []interface{}, lat, lon float64) []interf
 	return append(args, lat, lat, lon, cosLat, lon, cosLat)
 }
 
+// applyDirectionFilter keeps only rides oriented the same way as the search.
+//
+// A ride is a "forward" match when it is closer to the search in its own
+// orientation than reversed: dist(ride.start, search.start) + dist(ride.end,
+// search.end) <= dist(ride.start, search.end) + dist(ride.end, search.start).
+// Without this, a VIT→Katpadi ride surfaces for a Katpadi→VIT search whenever
+// the two points sit within the search radius of each other (they are ~8km
+// apart, well inside the 10km+ radius), which is the "shows the opposite
+// direction" bug. Only meaningful when BOTH endpoints are coordinates.
+func applyDirectionFilter(tx *gorm.DB, startLat, startLon, endLat, endLon float64) *gorm.DB {
+	startDist := coordinateDistanceKmExpression("start_latitude", "start_longitude")
+	endDist := coordinateDistanceKmExpression("end_latitude", "end_longitude")
+	clause := fmt.Sprintf("(%s + %s) <= (%s + %s)", startDist, endDist, startDist, endDist)
+
+	var args []interface{}
+	args = appendCoordinateDistanceArgs(args, startLat, startLon) // aligned: ride.start -> search.start
+	args = appendCoordinateDistanceArgs(args, endLat, endLon)     // aligned: ride.end   -> search.end
+	args = appendCoordinateDistanceArgs(args, endLat, endLon)     // reversed: ride.start -> search.end
+	args = appendCoordinateDistanceArgs(args, startLat, startLon) // reversed: ride.end   -> search.start
+	return tx.Where(clause, args...)
+}
+
 func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon float64, hasStartCoord, hasEndCoord bool) (*gorm.DB, float64) {
 	if !hasStartCoord && !hasEndCoord {
 		return tx, 0
 	}
+
+	// A directional match is only possible when both ends are coordinates.
+	directional := hasStartCoord && hasEndCoord
 
 	radiusOptions := []float64{5000, 10000, 20000, 50000} // 5km, 10km, 20km, 50km
 
@@ -454,6 +479,9 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 		if hasEndCoord {
 			testTx = applyCoordinateRadiusFilter(testTx, endLat, endLon, radius, false)
 		}
+		if directional {
+			testTx = applyDirectionFilter(testTx, startLat, startLon, endLat, endLon)
+		}
 
 		testTx.Count(&count)
 		if count >= 5 { // Found enough results
@@ -463,6 +491,9 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 			}
 			if hasEndCoord {
 				finalTx = applyCoordinateRadiusFilter(finalTx, endLat, endLon, radius, false)
+			}
+			if directional {
+				finalTx = applyDirectionFilter(finalTx, startLat, startLon, endLat, endLon)
 			}
 			return finalTx, radius / 1000 // Return radius in km
 		}
@@ -475,6 +506,9 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 	}
 	if hasEndCoord {
 		finalTx = applyCoordinateRadiusFilter(finalTx, endLat, endLon, 50000, false)
+	}
+	if directional {
+		finalTx = applyDirectionFilter(finalTx, startLat, startLon, endLat, endLon)
 	}
 	return finalTx, 50.0
 }

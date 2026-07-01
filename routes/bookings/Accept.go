@@ -2,6 +2,7 @@ package bookings
 
 import (
 	"log"
+	"time"
 	"unipool-backend/database"
 	"unipool-backend/helpers"
 	"unipool-backend/models"
@@ -40,13 +41,16 @@ func AcceptRoute(c *fiber.Ctx) error {
 	}()
 
 	type bookingRideRow struct {
-		BookingID     uuid.UUID `gorm:"column:booking_id"`
-		RideID        uuid.UUID `gorm:"column:ride_id"`
-		PassengerID   uuid.UUID `gorm:"column:passenger_id"`
-		RequestStatus string    `gorm:"column:request_status"`
-		HostUserID    uuid.UUID `gorm:"column:host_user_id"`
-		StartLocation string    `gorm:"column:start_location"`
-		EndLocation   string    `gorm:"column:end_location"`
+		BookingID      uuid.UUID `gorm:"column:booking_id"`
+		RideID         uuid.UUID `gorm:"column:ride_id"`
+		PassengerID    uuid.UUID `gorm:"column:passenger_id"`
+		RequestStatus  string    `gorm:"column:request_status"`
+		HostUserID     uuid.UUID `gorm:"column:host_user_id"`
+		StartLocation  string    `gorm:"column:start_location"`
+		EndLocation    string    `gorm:"column:end_location"`
+		StartTime      time.Time `gorm:"column:start_time"`
+		PassengerName  string    `gorm:"column:passenger_name"`
+		PassengerEmail string    `gorm:"column:passenger_email"`
 	}
 
 	var row bookingRideRow
@@ -58,9 +62,13 @@ func AcceptRoute(c *fiber.Ctx) error {
 			b.request_status,
 			r.host_user_id,
 			r.start_location,
-			r.end_location
+			r.end_location,
+			r.start_time,
+			p.name AS passenger_name,
+			p.email AS passenger_email
 		  FROM bookings b
 		  JOIN rides r ON r.id = b.ride_id
+		  JOIN users p ON p.id = b.passenger_id
 		 WHERE b.id = ?
 		   AND b.deleted_at IS NULL
 		   AND r.deleted_at IS NULL
@@ -189,6 +197,16 @@ func AcceptRoute(c *fiber.Ctx) error {
 			}
 		}()
 	}
+	go sendBookingEmailIfAllowed(booking.PassengerID, helpers.BookingEmailParams{
+		Kind:          helpers.BookingEmailAccepted,
+		ToEmail:       row.PassengerEmail,
+		ToName:        row.PassengerName,
+		ActorName:     user.Name,
+		StartLocation: row.StartLocation,
+		EndLocation:   row.EndLocation,
+		StartTime:     row.StartTime,
+		RideID:        ride.ID.String(),
+	})
 
 	log.Printf("Booking with ID %v accepted successfully\n", bookingID)
 	return c.Status(200).JSON(fiber.Map{
