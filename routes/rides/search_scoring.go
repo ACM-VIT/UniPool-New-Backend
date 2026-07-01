@@ -364,13 +364,13 @@ func scoreTextFit(query, value string, maxScore float64) float64 {
 		return maxScore * 0.78
 	}
 
-	words := strings.Fields(q)
+	words := meaningfulLocationWords(q)
 	if len(words) == 0 {
 		return 0
 	}
 	matched := 0
 	for _, word := range words {
-		if len(word) >= 3 && strings.Contains(v, word) {
+		if strings.Contains(v, word) {
 			matched++
 		}
 	}
@@ -468,6 +468,61 @@ func normalizeLocationText(value string) string {
 	value = strings.ReplaceAll(value, "bus stand", "busstand")
 	value = strings.Join(strings.Fields(value), " ")
 	return value
+}
+
+var weakLocationSearchWords = map[string]struct{}{
+	"airport":       {},
+	"international": {},
+	"domestic":      {},
+	"terminal":      {},
+	"india":         {},
+	"indian":        {},
+	"station":       {},
+	"railway":       {},
+	"junction":      {},
+	"bus":           {},
+	"busstand":      {},
+	"stand":         {},
+	"stop":          {},
+	"college":       {},
+	"university":    {},
+	"institute":     {},
+	"technology":    {},
+	"campus":        {},
+	"road":          {},
+	"street":        {},
+	"main":          {},
+	"near":          {},
+	"the":           {},
+	"and":           {},
+}
+
+func meaningfulLocationWords(value string) []string {
+	value = normalizeLocationText(value)
+	value = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == ' ' {
+			return r
+		}
+		return ' '
+	}, value)
+
+	rawWords := strings.Fields(value)
+	words := make([]string, 0, len(rawWords))
+	seen := make(map[string]bool, len(rawWords))
+	for _, word := range rawWords {
+		if len(word) < 3 {
+			continue
+		}
+		if _, weak := weakLocationSearchWords[word]; weak {
+			continue
+		}
+		if seen[word] {
+			continue
+		}
+		seen[word] = true
+		words = append(words, word)
+	}
+	return words
 }
 
 func absInt(v int) int {

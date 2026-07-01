@@ -366,7 +366,7 @@ func buildLocationQuery(tx *gorm.DB, location string, hasCoord bool, lat, lon fl
 		log.Printf("Text search on %s for: %s", locationColumn, normalizedLocation)
 	}
 
-	words := strings.Fields(normalizedLocation)
+	words := meaningfulLocationWords(normalizedLocation)
 
 	conditions := []string{
 		fmt.Sprintf("%s ILIKE ?", locationColumn), // exact match
@@ -377,16 +377,25 @@ func buildLocationQuery(tx *gorm.DB, location string, hasCoord bool, lat, lon fl
 		"%" + normalizedLocation + "%",
 	}
 
-	for _, word := range words {
-		if len(word) > 2 {
-			conditions = append(conditions, fmt.Sprintf("%s ILIKE ?", locationColumn))
+	if len(words) > 0 {
+		wordConditions := make([]string, 0, len(words))
+		for _, word := range words {
+			wordConditions = append(wordConditions, fmt.Sprintf("%s ILIKE ?", locationColumn))
 			values = append(values, "%"+word+"%")
 		}
-	}
+		conditions = append(conditions, "("+strings.Join(wordConditions, " AND ")+")")
 
-	if len(words) > 0 {
-		conditions = append(conditions, fmt.Sprintf("similarity(%s, ?) > ?", locationColumn))
-		values = append(values, location, 0.2)
+		wordConditions = wordConditions[:0]
+		similarityValues := []interface{}{location, 0.35}
+		for _, word := range words {
+			wordConditions = append(wordConditions, fmt.Sprintf("%s ILIKE ?", locationColumn))
+			similarityValues = append(similarityValues, "%"+word+"%")
+		}
+		conditions = append(
+			conditions,
+			fmt.Sprintf("(similarity(%s, ?) > ? AND (%s))", locationColumn, strings.Join(wordConditions, " OR ")),
+		)
+		values = append(values, similarityValues...)
 	}
 
 	whereClause := strings.Join(conditions, " OR ")
@@ -918,13 +927,13 @@ func SearchRides(c *fiber.Ctx) error {
 		useCoordinateSearch = true
 	}
 
-	if params.StartLocation != "" || params.EndLocation != "" {
+	if (params.StartLocation != "" && !params.HasStartCoord) || (params.EndLocation != "" && !params.HasEndCoord) {
 		textTx := buildBaseSearchTx()
 
-		if params.StartLocation != "" {
+		if params.StartLocation != "" && !params.HasStartCoord {
 			textTx = buildLocationQuery(textTx, params.StartLocation, false, 0, 0, 0, true)
 		}
-		if params.EndLocation != "" {
+		if params.EndLocation != "" && !params.HasEndCoord {
 			textTx = buildLocationQuery(textTx, params.EndLocation, false, 0, 0, 0, false)
 		}
 
@@ -960,48 +969,49 @@ func SearchRides(c *fiber.Ctx) error {
 		log.Printf("Query returned %d rides", len(rides))
 	}
 
-	if len(rides) == 0 && (params.StartLocation != "" || params.EndLocation != "") {
+	if len(rides) == 0 && ((params.StartLocation != "" && !params.HasStartCoord) || (params.EndLocation != "" && !params.HasEndCoord)) {
 		if searchDebugLogs {
 			log.Printf("No results found, trying fallback search...")
 		}
 
 		fallbackTx := buildBaseSearchTx()
+		fallbackFiltered := false
 
-		if params.StartLocation != "" {
-			words := strings.Fields(strings.ToLower(params.StartLocation))
+		if params.StartLocation != "" && !params.HasStartCoord {
+			words := meaningfulLocationWords(params.StartLocation)
 			for _, word := range words {
-				if len(word) > 3 {
-					fallbackTx = fallbackTx.Where("LOWER(start_location) LIKE ?", "%"+word+"%")
-					break
-				}
+				fallbackTx = fallbackTx.Where("LOWER(start_location) LIKE ?", "%"+word+"%")
+				fallbackFiltered = true
+				break
 			}
 		}
 
-		if params.EndLocation != "" {
-			words := strings.Fields(strings.ToLower(params.EndLocation))
+		if params.EndLocation != "" && !params.HasEndCoord {
+			words := meaningfulLocationWords(params.EndLocation)
 			for _, word := range words {
-				if len(word) > 3 {
-					fallbackTx = fallbackTx.Where("LOWER(end_location) LIKE ?", "%"+word+"%")
-					break
-				}
+				fallbackTx = fallbackTx.Where("LOWER(end_location) LIKE ?", "%"+word+"%")
+				fallbackFiltered = true
+				break
 			}
 		}
 
-		if loaded, err := loadSearchRideCandidates(
-			fallbackTx,
-			candidateLimit,
-			params.Offset,
-			searchCandidateOrder(params, false),
-		); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			log.Printf("Fallback search error: %v", err)
-			if textSearchErr != nil {
-				return c.Status(500).JSON(fiber.Map{"error": "Error fetching rides"})
+		if fallbackFiltered {
+			if loaded, err := loadSearchRideCandidates(
+				fallbackTx,
+				candidateLimit,
+				params.Offset,
+				searchCandidateOrder(params, false),
+			); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				log.Printf("Fallback search error: %v", err)
+				if textSearchErr != nil {
+					return c.Status(500).JSON(fiber.Map{"error": "Error fetching rides"})
+				}
+			} else if searchDebugLogs {
+				appendUniqueRides(loaded)
+				log.Printf("Fallback search returned %d rides", len(rides))
+			} else {
+				appendUniqueRides(loaded)
 			}
-		} else if searchDebugLogs {
-			appendUniqueRides(loaded)
-			log.Printf("Fallback search returned %d rides", len(rides))
-		} else {
-			appendUniqueRides(loaded)
 		}
 	}
 
@@ -1150,15 +1160,12 @@ func SearchRides(c *fiber.Ctx) error {
 		scored := scoreRideForSearch(ride, params, startDist, endDist)
 		if useCoordinateSearch {
 			if params.HasStartCoord {
-				startTextMatch := scoreTextFit(params.StartLocation, ride.StartLocation, 1) > 0
-				if (startDist == nil || *startDist > params.RadiusKm) && !startTextMatch {
+				if startDist == nil || *startDist > params.RadiusKm {
 					continue
 				}
 			}
 			if params.HasEndCoord {
-				destinationNear := endDist != nil && *endDist <= params.RadiusKm
-				destinationTextMatch := scoreTextFit(params.EndLocation, ride.EndLocation, 1) > 0
-				if !destinationNear && scored.RouteOverlapScore <= 0 && !destinationTextMatch {
+				if endDist == nil || *endDist > params.RadiusKm {
 					continue
 				}
 			}
