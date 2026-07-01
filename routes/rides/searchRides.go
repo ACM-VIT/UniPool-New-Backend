@@ -857,6 +857,7 @@ func SearchRides(c *fiber.Ctx) error {
 	}
 
 	ranCandidateSearch := false
+	var textSearchErr error
 
 	if params.HasStartCoord || params.HasEndCoord {
 		coordinateTx := buildBaseSearchTx()
@@ -899,6 +900,7 @@ func SearchRides(c *fiber.Ctx) error {
 			params.Offset,
 			searchCandidateOrder(params, false),
 		); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			textSearchErr = err
 			log.Printf("Text search error: %v", err)
 		} else {
 			appendUniqueRides(loaded)
@@ -958,6 +960,9 @@ func SearchRides(c *fiber.Ctx) error {
 			searchCandidateOrder(params, false),
 		); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Printf("Fallback search error: %v", err)
+			if textSearchErr != nil {
+				return c.Status(500).JSON(fiber.Map{"error": "Error fetching rides"})
+			}
 		} else if searchDebugLogs {
 			appendUniqueRides(loaded)
 			log.Printf("Fallback search returned %d rides", len(rides))
@@ -978,6 +983,13 @@ func SearchRides(c *fiber.Ctx) error {
 	externalRides := FetchExternalRidesForSearch(ExternalRideSearchParams{
 		StartLocation: params.StartLocation,
 		EndLocation:   params.EndLocation,
+		StartLat:      params.StartLat,
+		StartLon:      params.StartLon,
+		EndLat:        params.EndLat,
+		EndLon:        params.EndLon,
+		HasStartCoord: params.HasStartCoord,
+		HasEndCoord:   params.HasEndCoord,
+		RadiusKm:      usedRadius,
 		HasDateFilter: hasDateFilter,
 		DateStart:     dateStart,
 		DateEnd:       dateEnd,

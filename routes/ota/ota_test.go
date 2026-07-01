@@ -124,6 +124,33 @@ func TestAssetHandlerFallsBackForLegacyRuntimeScopedURLs(t *testing.T) {
 	}
 }
 
+func TestAssetHandlerRejectsRuntimeTraversalWithUpdateID(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("OTA_STORE_DIR", root)
+
+	app := fiber.New()
+	app.Get("/api/assets", AssetHandler)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/assets?asset=passwd&runtimeVersion=..%2F..%2F..%2Fetc&platform=ios&updateId=.",
+		nil,
+	)
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("asset traversal request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read traversal body: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected traversal to be rejected with 400, got status=%d body=%s", resp.StatusCode, body)
+	}
+}
+
 func writeOTAUpdate(t *testing.T, root, runtime, updateID, bundle string, mod time.Time) {
 	t.Helper()
 	writeOTAUpdateWithBundlePath(t, root, runtime, updateID, "_expo/static/js/ios/entry.hbc", bundle, mod)

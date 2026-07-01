@@ -22,14 +22,14 @@ const (
 )
 
 type ExternalRideCard struct {
-	ID             string `json:"id"`
-	Source         string `json:"source"`
-	SourceLabel    string `json:"source_label"`
-	PickupPoint    string `json:"pickup_point"`
-	Destination    string `json:"destination"`
-	DepartureTime  string `json:"departure_time"`
-	HostName       string `json:"host_name"`
-	HostPhone      string `json:"host_phone"`
+	ID            string `json:"id"`
+	Source        string `json:"source"`
+	SourceLabel   string `json:"source_label"`
+	PickupPoint   string `json:"pickup_point"`
+	Destination   string `json:"destination"`
+	DepartureTime string `json:"departure_time"`
+	HostName      string `json:"host_name"`
+	HostPhone     string `json:"host_phone"`
 	// HostEmail is the address the external ride is linked by. It is kept
 	// server-side only (json:"-") so it is never exposed to clients; the
 	// invite endpoint resolves it by ride id to send the "wants to UniPool
@@ -494,6 +494,13 @@ func limitExternalRides(rides []ExternalRideCard, limit int) []ExternalRideCard 
 type ExternalRideSearchParams struct {
 	StartLocation string
 	EndLocation   string
+	StartLat      float64
+	StartLon      float64
+	EndLat        float64
+	EndLon        float64
+	HasStartCoord bool
+	HasEndCoord   bool
+	RadiusKm      float64
 	HasDateFilter bool
 	DateStart     time.Time
 	DateEnd       time.Time
@@ -511,11 +518,61 @@ func parseExternalDepartureTime(raw string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func filterExternalRidesForSearch(rides []ExternalRideCard, params ExternalRideSearchParams) []ExternalRideCard {
-	routed := filterExternalRides(rides, params.StartLocation, params.EndLocation)
-	filtered := make([]ExternalRideCard, 0, len(routed))
+func externalRideIsUpcoming(ride ExternalRideCard, now time.Time) bool {
+	departure, ok := parseExternalDepartureTime(ride.DepartureTime)
+	return ok && departure.After(now)
+}
 
-	for _, ride := range routed {
+func externalSearchRadiusKm(params ExternalRideSearchParams) float64 {
+	if params.RadiusKm <= 0 {
+		return 10
+	}
+	return NormalizeNearbyRadius(params.RadiusKm*1000) / 1000
+}
+
+func externalLocationTextMatch(value, query string) bool {
+	normalize := func(s string) string {
+		return strings.ToLower(strings.Join(strings.Fields(s), ""))
+	}
+	valueNorm := normalize(value)
+	queryNorm := normalize(query)
+	if valueNorm == "" || queryNorm == "" {
+		return false
+	}
+	return strings.Contains(valueNorm, queryNorm) || strings.Contains(queryNorm, valueNorm)
+}
+
+func externalEndpointMatches(label, query string, hasCoord bool, lat, lng, radiusKm float64) bool {
+	if hasCoord {
+		pointLat, pointLng, ok := externalLocationCoords(label)
+		if !ok {
+			return false
+		}
+		return helpers.CalculateDistance(lat, lng, pointLat, pointLng) <= radiusKm
+	}
+	return externalLocationTextMatch(label, query)
+}
+
+func filterExternalRidesForSearch(rides []ExternalRideCard, params ExternalRideSearchParams) []ExternalRideCard {
+	if rides == nil {
+		rides = []ExternalRideCard{}
+	}
+	radiusKm := externalSearchRadiusKm(params)
+	hasStartFilter := params.StartLocation != "" || params.HasStartCoord
+	hasEndFilter := params.EndLocation != "" || params.HasEndCoord
+	now := time.Now()
+	filtered := make([]ExternalRideCard, 0, len(rides))
+
+	for _, ride := range rides {
+		if !externalRideIsUpcoming(ride, now) {
+			continue
+		}
+		if hasStartFilter && !externalEndpointMatches(ride.PickupPoint, params.StartLocation, params.HasStartCoord, params.StartLat, params.StartLon, radiusKm) {
+			continue
+		}
+		if hasEndFilter && !externalEndpointMatches(ride.Destination, params.EndLocation, params.HasEndCoord, params.EndLat, params.EndLon, radiusKm) {
+			continue
+		}
 		if params.HasDateFilter {
 			departure, ok := parseExternalDepartureTime(ride.DepartureTime)
 			if !ok || departure.Before(params.DateStart) || departure.After(params.DateEnd) {
@@ -558,7 +615,14 @@ func FetchAllExternalRides() []ExternalRideCard {
 	if !ok {
 		return []ExternalRideCard{}
 	}
-	return all
+	now := time.Now()
+	filtered := make([]ExternalRideCard, 0, len(all))
+	for _, ride := range all {
+		if externalRideIsUpcoming(ride, now) {
+			filtered = append(filtered, ride)
+		}
+	}
+	return filtered
 }
 
 func FetchExternalRidesForNearby(lat, lng, radiusMeters float64) []ExternalRideCard {
@@ -573,7 +637,11 @@ func FetchExternalRidesForNearby(lat, lng, radiusMeters float64) []ExternalRideC
 		distanceKm float64
 	}
 	matches := make([]nearbyExternalRide, 0)
+	now := time.Now()
 	for _, ride := range all {
+		if !externalRideIsUpcoming(ride, now) {
+			continue
+		}
 		pickupLat, pickupLng, ok := externalLocationCoords(ride.PickupPoint)
 		if !ok {
 			continue

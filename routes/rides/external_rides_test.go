@@ -22,6 +22,10 @@ func uintPtr(v uint) *uint {
 	return &v
 }
 
+func futureDeparture() string {
+	return time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
+}
+
 func waitForVigoRefreshIdle(t *testing.T) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -69,9 +73,10 @@ func TestFetchExternalRidesForSearchUsesFreshCache(t *testing.T) {
 	t.Cleanup(resetVigoCacheForTest)
 
 	vigoCacheMu.Lock()
+	departure := futureDeparture()
 	vigoCache = []ExternalRideCard{
-		{ID: "both", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport"},
-		{ID: "start-only", PickupPoint: "VIT Vellore Main Gate", Destination: "Katpadi Junction"},
+		{ID: "both", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: departure},
+		{ID: "start-only", PickupPoint: "VIT Vellore Main Gate", Destination: "Katpadi Junction", DepartureTime: departure},
 	}
 	vigoCacheTime = time.Now()
 	vigoCacheMu.Unlock()
@@ -109,7 +114,7 @@ func TestFetchExternalRidesForSearchFetchesColdCacheSynchronously(t *testing.T) 
 	oldFetch := fetchVigoRides
 	fetchVigoRides = func() ([]ExternalRideCard, error) {
 		return []ExternalRideCard{
-			{ID: "fresh", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport"},
+			{ID: "fresh", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: futureDeparture()},
 		}, nil
 	}
 	t.Cleanup(func() {
@@ -137,7 +142,7 @@ func TestFetchExternalRidesForSearchServesStaleCacheWhileRefreshing(t *testing.T
 		close(fetchStarted)
 		<-releaseFetch
 		return []ExternalRideCard{
-			{ID: "fresh", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport"},
+			{ID: "fresh", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: futureDeparture()},
 		}, nil
 	}
 	t.Cleanup(func() {
@@ -151,7 +156,7 @@ func TestFetchExternalRidesForSearchServesStaleCacheWhileRefreshing(t *testing.T
 
 	vigoCacheMu.Lock()
 	vigoCache = []ExternalRideCard{
-		{ID: "stale", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport"},
+		{ID: "stale", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: futureDeparture()},
 	}
 	vigoCacheTime = time.Now().Add(-vigoCacheTTL - time.Minute)
 	vigoCacheMu.Unlock()
@@ -176,14 +181,16 @@ func TestFetchExternalRidesForSearchServesStaleCacheWhileRefreshing(t *testing.T
 }
 
 func TestFilterExternalRidesForSearchAppliesDateSeatsAndPrice(t *testing.T) {
-	dateStart := time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)
+	dateStart := time.Date(time.Now().UTC().Year(), time.Now().UTC().Month(), time.Now().UTC().Day(), 0, 0, 0, 0, time.UTC).Add(48 * time.Hour)
 	dateEnd := dateStart.Add(24*time.Hour - time.Nanosecond)
+	matchDeparture := dateStart.Add(10 * time.Hour).Format(time.RFC3339)
+	wrongDateDeparture := dateStart.Add(34 * time.Hour).Format(time.RFC3339)
 	rides := []ExternalRideCard{
-		{ID: "match", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: "2026-07-05T10:00:00Z", AvailableSeats: 2, TotalPrice: uintPtr(400)},
-		{ID: "wrong-date", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: "2026-07-06T10:00:00Z", AvailableSeats: 2, TotalPrice: uintPtr(400)},
-		{ID: "too-few-seats", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: "2026-07-05T10:00:00Z", AvailableSeats: 1, TotalPrice: uintPtr(400)},
-		{ID: "too-expensive", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: "2026-07-05T10:00:00Z", AvailableSeats: 2, TotalPrice: uintPtr(700)},
-		{ID: "unknown-price", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: "2026-07-05T10:00:00Z", AvailableSeats: 2},
+		{ID: "match", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: matchDeparture, AvailableSeats: 2, TotalPrice: uintPtr(400)},
+		{ID: "wrong-date", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: wrongDateDeparture, AvailableSeats: 2, TotalPrice: uintPtr(400)},
+		{ID: "too-few-seats", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: matchDeparture, AvailableSeats: 1, TotalPrice: uintPtr(400)},
+		{ID: "too-expensive", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: matchDeparture, AvailableSeats: 2, TotalPrice: uintPtr(700)},
+		{ID: "unknown-price", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: matchDeparture, AvailableSeats: 2},
 	}
 
 	got := filterExternalRidesForSearch(rides, ExternalRideSearchParams{
@@ -200,11 +207,51 @@ func TestFilterExternalRidesForSearchAppliesDateSeatsAndPrice(t *testing.T) {
 	}
 }
 
-func TestFilterExternalRidesForSearchOrdersPredictably(t *testing.T) {
+func TestFilterExternalRidesForSearchUsesCoordinatesWhenTextEmpty(t *testing.T) {
+	departure := futureDeparture()
 	rides := []ExternalRideCard{
-		{ID: "c", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: "2026-07-05T12:00:00Z"},
-		{ID: "a", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: "2026-07-05T10:00:00Z"},
-		{ID: "b", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: "2026-07-05T10:00:00Z"},
+		{ID: "route-match", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: departure},
+		{ID: "wrong-pickup", PickupPoint: "Bangalore Airport", Destination: "Chennai Airport", DepartureTime: departure},
+		{ID: "wrong-destination", PickupPoint: "VIT Vellore Main Gate", Destination: "Bangalore Airport", DepartureTime: departure},
+		{ID: "unknown-pickup", PickupPoint: "Somewhere Else", Destination: "Chennai Airport", DepartureTime: departure},
+	}
+
+	got := filterExternalRidesForSearch(rides, ExternalRideSearchParams{
+		HasStartCoord: true,
+		StartLat:      12.969193,
+		StartLon:      79.155968,
+		HasEndCoord:   true,
+		EndLat:        12.993374,
+		EndLon:        80.172587,
+		RadiusKm:      5,
+	})
+	if len(got) != 1 || got[0].ID != "route-match" {
+		t.Fatalf("expected only the coordinate-scoped route match, got %#v", got)
+	}
+}
+
+func TestFilterExternalRidesForSearchDropsPastDeparturesFromCache(t *testing.T) {
+	rides := []ExternalRideCard{
+		{ID: "past", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)},
+		{ID: "future", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: futureDeparture()},
+	}
+
+	got := filterExternalRidesForSearch(rides, ExternalRideSearchParams{
+		StartLocation: "VIT Vellore",
+		EndLocation:   "Chennai",
+	})
+	if len(got) != 1 || got[0].ID != "future" {
+		t.Fatalf("expected only the future external ride, got %#v", got)
+	}
+}
+
+func TestFilterExternalRidesForSearchOrdersPredictably(t *testing.T) {
+	firstDeparture := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339)
+	secondDeparture := time.Now().UTC().Add(26 * time.Hour).Format(time.RFC3339)
+	rides := []ExternalRideCard{
+		{ID: "c", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: secondDeparture},
+		{ID: "a", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: firstDeparture},
+		{ID: "b", PickupPoint: "VIT Vellore Main Gate", Destination: "Chennai Airport", DepartureTime: firstDeparture},
 	}
 
 	got := filterExternalRidesForSearch(rides, ExternalRideSearchParams{
@@ -265,6 +312,24 @@ func TestFetchExternalRidesForNearbyRespectsRadius(t *testing.T) {
 	got := FetchExternalRidesForNearby(12.9692, 79.1559, 1000)
 	if len(got) != 1 || got[0].ID != "vit" {
 		t.Fatalf("expected only the pickup within 1km, got %#v", got)
+	}
+}
+
+func TestFetchExternalRidesForNearbyDropsPastCachedDepartures(t *testing.T) {
+	resetVigoCacheForTest()
+	t.Cleanup(resetVigoCacheForTest)
+
+	vigoCacheMu.Lock()
+	vigoCache = []ExternalRideCard{
+		{ID: "past", PickupPoint: "VIT Vellore Main Gate", DepartureTime: time.Now().UTC().Add(-time.Minute).Format(time.RFC3339)},
+		{ID: "future", PickupPoint: "VIT Vellore Main Gate", DepartureTime: futureDeparture()},
+	}
+	vigoCacheTime = time.Now()
+	vigoCacheMu.Unlock()
+
+	got := FetchExternalRidesForNearby(12.9692, 79.1559, 1000)
+	if len(got) != 1 || got[0].ID != "future" {
+		t.Fatalf("expected only the future nearby external ride, got %#v", got)
 	}
 }
 

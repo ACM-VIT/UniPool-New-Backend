@@ -71,6 +71,15 @@ func publicBaseURL() string {
 	return "https://unidev.acmvit.in"
 }
 
+func safeOTASegment(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" &&
+		value != "." &&
+		value != ".." &&
+		!filepath.IsAbs(value) &&
+		!strings.ContainsAny(value, `/\`)
+}
+
 // expoExportMetadata is the on-disk shape produced by `npx expo
 // export`. We only read the fields we need to construct manifests.
 type expoExportMetadata struct {
@@ -130,6 +139,10 @@ func ManifestHandler(c *fiber.Ctx) error {
 	if runtimeVersion == "" {
 		return c.Status(fiber.StatusBadRequest).
 			SendString("expo-runtime-version header is required")
+	}
+	if !safeOTASegment(runtimeVersion) {
+		return c.Status(fiber.StatusBadRequest).
+			SendString("invalid expo-runtime-version header")
 	}
 	if protocol != "" && protocol != "0" && protocol != "1" {
 		return c.Status(fiber.StatusBadRequest).
@@ -265,10 +278,13 @@ func AssetHandler(c *fiber.Ctx) error {
 	if assetPath == "" || runtimeVersion == "" {
 		return c.Status(fiber.StatusBadRequest).SendString("missing asset/runtimeVersion query params")
 	}
+	if !safeOTASegment(runtimeVersion) {
+		return c.Status(fiber.StatusBadRequest).SendString("invalid runtimeVersion query param")
+	}
 	if platform != "" && platform != "ios" && platform != "android" {
 		return c.Status(fiber.StatusBadRequest).SendString("invalid platform query param")
 	}
-	if strings.ContainsAny(updateID, "/\\") || strings.Contains(updateID, "..") {
+	if updateID != "" && !safeOTASegment(updateID) {
 		return c.Status(fiber.StatusBadRequest).SendString("invalid updateId query param")
 	}
 
@@ -321,6 +337,9 @@ func AssetHandler(c *fiber.Ctx) error {
 }
 
 func resolveAssetUpdateDir(runtimeVersion, updateID, assetPath string) (string, bool, error) {
+	if !safeOTASegment(runtimeVersion) || (updateID != "" && !safeOTASegment(updateID)) {
+		return "", false, os.ErrInvalid
+	}
 	if updateID != "" {
 		dir := filepath.Join(storeDir(), runtimeVersion, updateID)
 		if _, err := os.Stat(filepath.Join(dir, assetPath)); err != nil {
@@ -367,7 +386,7 @@ func UploadHandler(c *fiber.Ctx) error {
 	if runtimeVersion == "" {
 		return c.Status(fiber.StatusBadRequest).SendString("runtime_version query param is required")
 	}
-	if strings.ContainsAny(runtimeVersion, "/\\") {
+	if !safeOTASegment(runtimeVersion) {
 		return c.Status(fiber.StatusBadRequest).SendString("invalid runtime_version")
 	}
 
@@ -461,6 +480,9 @@ type updateDirCandidate struct {
 }
 
 func updateDirsNewestFirst(runtime string) ([]updateDirCandidate, error) {
+	if !safeOTASegment(runtime) {
+		return nil, os.ErrInvalid
+	}
 	root := filepath.Join(storeDir(), runtime)
 	entries, err := os.ReadDir(root)
 	if err != nil {
