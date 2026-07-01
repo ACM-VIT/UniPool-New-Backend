@@ -52,12 +52,12 @@ func CreateRide(c *fiber.Ctx) error {
 
 	// Parse the request body into a Ride struct
 	err := c.BodyParser(&ride)
-	   if err != nil {
-			   log.Printf("Error parsing JSON: %v\n", err)
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Error parsing JSON (body parser)",
-			   })
-	   }
+	if err != nil {
+		log.Printf("Error parsing JSON: %v\n", err)
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Error parsing JSON (body parser)",
+		})
+	}
 
 	// Set the host user ID from locals into the Ride struct
 	ride.HostUserID = hostUserID
@@ -65,25 +65,25 @@ func CreateRide(c *fiber.Ctx) error {
 	// Fetch the host user from the database
 	var hostUser models.User
 	result := database.Database.Db.First(&hostUser, hostUserID)
-	   if result.Error == gorm.ErrRecordNotFound {
-			   log.Printf("Host user ID does not exist")
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Host user ID does not exist",
-			   })
-	   } else if result.Error != nil {
-			   log.Printf("Error finding host user: %v\n", result.Error)
-			   return c.Status(502).JSON(fiber.Map{
-					   "error": "Error finding host user",
-			   })
-	   }
+	if result.Error == gorm.ErrRecordNotFound {
+		log.Printf("Host user ID does not exist")
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Host user ID does not exist",
+		})
+	} else if result.Error != nil {
+		log.Printf("Error finding host user: %v\n", result.Error)
+		return c.Status(502).JSON(fiber.Map{
+			"error": "Error finding host user",
+		})
+	}
 
 	// Check if start time is in the future
-	   if ride.StartTime.Before(time.Now().UTC()) {
-			   log.Printf("Start time is in the past")
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Start time is in the past",
-			   })
-	   }
+	if ride.StartTime.Before(time.Now().UTC()) {
+		log.Printf("Start time is in the past")
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Start time is in the past",
+		})
+	}
 
 	// Minimum total_seats is 2 (host + 1 passenger). Anything less
 	// means there's no passenger slot to offer — the ride wouldn't
@@ -124,21 +124,23 @@ func CreateRide(c *fiber.Ctx) error {
 	}
 
 	// Validate ride price
-	   if ride.TotalPrice < 25 || ride.TotalPrice > 10000 {
-			   log.Printf("Price too low")
-			   return c.Status(400).JSON(fiber.Map{
-					   "error": "Price too low!",
-			   })
-	   }
+	if ride.TotalPrice < 25 || ride.TotalPrice > 10000 {
+		log.Printf("Price too low")
+		return c.Status(400).JSON(fiber.Map{
+			"error": "Price too low!",
+		})
+	}
+
+	applyCanonicalRideCoordinates(&ride)
 
 	// Create the ride in the database
 	result = database.Database.Db.Create(&ride)
-	   if result.Error != nil {
-			   log.Printf("Error creating ride: %v\n", result.Error)
-			   return c.Status(500).JSON(fiber.Map{
-					   "error": "Error creating ride - (database creation error)",
-			   })
-	   }
+	if result.Error != nil {
+		log.Printf("Error creating ride: %v\n", result.Error)
+		return c.Status(500).JSON(fiber.Map{
+			"error": "Error creating ride - (database creation error)",
+		})
+	}
 
 	// Create the ride response
 	rideResponse := RideResponse{
@@ -161,4 +163,15 @@ func CreateRide(c *fiber.Ctx) error {
 
 	log.Printf("Ride with id %v created\n", ride.ID)
 	return c.Status(200).JSON(rideResponse)
+}
+
+func applyCanonicalRideCoordinates(ride *models.Ride) {
+	if lat, lon, ok := helpers.CanonicalLocationCoords(ride.StartLocation); ok {
+		ride.StartLatitude = &lat
+		ride.StartLongitude = &lon
+	}
+	if lat, lon, ok := helpers.CanonicalLocationCoords(ride.EndLocation); ok {
+		ride.EndLatitude = &lat
+		ride.EndLongitude = &lon
+	}
 }

@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 	"unipool-backend/database"
+	"unipool-backend/helpers"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -132,8 +133,16 @@ func mergeAndRank(query string, limit int, hasUserLocation bool, userLat, userLo
 			priority = 45
 		}
 		lat, lon := 0.0, 0.0
+		hasCoords := candidate.Lat != nil && candidate.Lon != nil
 		if candidate.Lat != nil && candidate.Lon != nil {
 			lat, lon = *candidate.Lat, *candidate.Lon
+		}
+		if canonicalLat, canonicalLon, ok := helpers.CanonicalLocationCoords(candidate.Name); ok {
+			lat, lon = canonicalLat, canonicalLon
+			hasCoords = true
+			if priority < 80 {
+				priority = 80
+			}
 		}
 		if score := scoreCandidate(candidate.Name, "", priority, query, hasUserLocation, userLat, userLon, lat, lon); score > 0 {
 			result := LocationResult{
@@ -143,11 +152,11 @@ func mergeAndRank(query string, limit int, hasUserLocation bool, userLat, userLo
 				Source:      "ride_history",
 				Score:       score,
 			}
-			if candidate.Lat != nil && candidate.Lon != nil {
-				result.Lat = strconv.FormatFloat(*candidate.Lat, 'f', -1, 64)
-				result.Lon = strconv.FormatFloat(*candidate.Lon, 'f', -1, 64)
+			if hasCoords {
+				result.Lat = strconv.FormatFloat(lat, 'f', -1, 64)
+				result.Lon = strconv.FormatFloat(lon, 'f', -1, 64)
 				if hasUserLocation {
-					result.DistanceKm = haversineKm(userLat, userLon, *candidate.Lat, *candidate.Lon)
+					result.DistanceKm = haversineKm(userLat, userLon, lat, lon)
 				}
 			}
 			results = append(results, result)
