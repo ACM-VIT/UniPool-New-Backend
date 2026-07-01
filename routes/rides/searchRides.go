@@ -527,7 +527,7 @@ func addMatchContextWithHost(card *RideCard, params SearchParams, hostPastRides 
 		reasons = append(reasons, "Close to destination")
 	}
 
-	availableSeats := card.TotalSeats - card.BookedSeats
+	availableSeats := helpers.PassengerSeatsLeft(card.TotalSeats, card.BookedSeats)
 	if availableSeats > 2 {
 		reasons = append(reasons, "Multiple seats available")
 	} else if availableSeats > 1 {
@@ -975,6 +975,15 @@ func SearchRides(c *fiber.Ctx) error {
 	pastRoutes := make(map[string]bool)
 	hostStats := make(map[uuid.UUID]searchHostStats)
 	viewerBookings := map[uuid.UUID]*models.Booking{}
+	externalRides := FetchExternalRidesForSearch(ExternalRideSearchParams{
+		StartLocation: params.StartLocation,
+		EndLocation:   params.EndLocation,
+		HasDateFilter: hasDateFilter,
+		DateStart:     dateStart,
+		DateEnd:       dateEnd,
+		MaxPrice:      params.MaxPrice,
+		MinSeats:      params.MinSeats,
+	})
 
 	hostIDs := make([]uuid.UUID, 0, len(rides))
 	rideIDs := make([]uuid.UUID, 0, len(rides))
@@ -1188,6 +1197,7 @@ func SearchRides(c *fiber.Ctx) error {
 	if len(response) > params.Limit {
 		response = response[:params.Limit]
 	}
+	externalRides = limitExternalRides(externalRides, params.Limit-len(response))
 
 	// Strict matches: surfaced alongside the regular fuzzy results
 	// so clients can render a "best match" badge on overlapping
@@ -1230,8 +1240,9 @@ func SearchRides(c *fiber.Ctx) error {
 
 	return c.Status(200).JSON(fiber.Map{
 		"rides":          response,
+		"external_rides": externalRides,
 		"strict_matches": strictMatches,
-		"total_found":    len(response),
+		"total_found":    len(response) + len(externalRides),
 		"used_radius_km": usedRadius,
 		"sort_by":        params.SortBy,
 		"search_method": func() string {

@@ -23,6 +23,8 @@ import (
 //	{
 //	  "upi_vpa":        "yash@upi",     // optional, max 120 chars
 //	  "contact_number": "9999999999",  // optional, numeric
+//	  "gender":         "Female",      // optional: Male, Female, Other, or "" to clear
+//	  "yob":            2005,          // optional: 1900-current year, or 0 to clear
 //	}
 //
 // Empty string for `upi_vpa` clears the field — used when a host
@@ -39,6 +41,8 @@ func UpdateProfile(c *fiber.Ctx) error {
 	type payload struct {
 		UPIVPA        *string `json:"upi_vpa,omitempty"`
 		ContactNumber *string `json:"contact_number,omitempty"`
+		Gender        *string `json:"gender,omitempty"`
+		YOB           *uint   `json:"yob,omitempty"`
 	}
 	var body payload
 	if err := c.BodyParser(&body); err != nil {
@@ -84,6 +88,34 @@ func UpdateProfile(c *fiber.Ctx) error {
 			}
 		}
 		updates["contact_number"] = num
+	}
+	if body.Gender != nil {
+		gender := strings.TrimSpace(*body.Gender)
+		if gender != "" {
+			switch strings.ToLower(gender) {
+			case "male":
+				gender = "Male"
+			case "female":
+				gender = "Female"
+			case "other":
+				gender = "Other"
+			default:
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+					"error": "gender must be Male, Female, Other, or empty",
+				})
+			}
+		}
+		updates["gender"] = gender
+	}
+	if body.YOB != nil {
+		yob := *body.YOB
+		currentYear := uint(time.Now().Year())
+		if yob != 0 && (yob < 1900 || yob > currentYear) {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "yob must be between 1900 and the current year",
+			})
+		}
+		updates["yob"] = yob
 	}
 
 	if len(updates) == 0 {

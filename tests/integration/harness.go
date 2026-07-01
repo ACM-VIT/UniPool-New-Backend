@@ -175,6 +175,7 @@ func testOptionalAuth(c *fiber.Ctx) error {
 func SetupTestApp(t *testing.T) *fiber.App {
 	t.Helper()
 	_ = ConnectTestDB(t)
+	t.Setenv("UNIPOOL_DISABLE_EXTERNAL_RIDES", "1")
 
 	app := fiber.New(fiber.Config{
 		ReadTimeout:  10 * time.Second,

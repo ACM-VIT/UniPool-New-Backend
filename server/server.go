@@ -11,6 +11,7 @@ import (
 	"unipool-backend/middleware"
 	"unipool-backend/routes/CRUD"
 	"unipool-backend/routes/appstate"
+	authroutes "unipool-backend/routes/auth"
 	"unipool-backend/routes/bookings"
 	"unipool-backend/routes/chat"
 	"unipool-backend/routes/locations"
@@ -63,6 +64,10 @@ func WireRoutes(app *fiber.App, auth fiber.Handler, optionalAuth fiber.Handler) 
 
 	// CreateRide uses this optional-auth probe to suggest matching rides first.
 	app.Get("/ride/matching-create", optionalAuth, rides.MatchingCreate)
+
+	// Web Google Identity Services sign-in. Runs before the auth gate because
+	// it mints the Firebase custom token that the browser will use afterward.
+	app.Post("/auth/google-web", authroutes.GoogleWeb)
 
 	// Expo Updates endpoints run before auth because clients fetch manifests at startup.
 	app.Get("/api/manifest", ota.ManifestHandler)

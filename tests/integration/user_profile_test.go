@@ -85,6 +85,59 @@ func TestUpdateProfile_UPIVPA_EmptyClears(t *testing.T) {
 	}
 }
 
+func TestUpdateProfile_DetailsValidAndClear(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	user := SeedUser(t, db, "Driver", "details-edit@vitstudent.ac.in", &inst.ID)
+	app := SetupTestApp(t)
+
+	resp := Do(t, app, http.MethodPatch, "/user/profile",
+		map[string]any{"gender": "Female", "yob": 2005}, AsUser(user.Email))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	ReadJSON(t, resp, nil)
+	var refreshed models.User
+	db.First(&refreshed, user.ID)
+	if refreshed.Gender != "Female" || refreshed.YOB != 2005 {
+		t.Fatalf("details not persisted: gender=%q yob=%d", refreshed.Gender, refreshed.YOB)
+	}
+
+	resp = Do(t, app, http.MethodPatch, "/user/profile",
+		map[string]any{"gender": "", "yob": 0}, AsUser(user.Email))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 clearing details, got %d", resp.StatusCode)
+	}
+	ReadJSON(t, resp, nil)
+	db.First(&refreshed, user.ID)
+	if refreshed.Gender != "" || refreshed.YOB != 0 {
+		t.Fatalf("details not cleared: gender=%q yob=%d", refreshed.Gender, refreshed.YOB)
+	}
+}
+
+func TestUpdateProfile_DetailsRejectInvalid(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	user := SeedUser(t, db, "Driver", "details-invalid@vitstudent.ac.in", &inst.ID)
+	app := SetupTestApp(t)
+
+	resp := Do(t, app, http.MethodPatch, "/user/profile",
+		map[string]any{"gender": "robot"}, AsUser(user.Email))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid gender, got %d", resp.StatusCode)
+	}
+	ReadJSON(t, resp, nil)
+
+	resp = Do(t, app, http.MethodPatch, "/user/profile",
+		map[string]any{"yob": 1800}, AsUser(user.Email))
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid yob, got %d", resp.StatusCode)
+	}
+	ReadJSON(t, resp, nil)
+}
+
 func TestUpdateProfile_AuthRequired(t *testing.T) {
 	_ = ConnectTestDB(t)
 	ResetDB(t)
