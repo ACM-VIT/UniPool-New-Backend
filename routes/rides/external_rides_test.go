@@ -295,6 +295,9 @@ func TestFetchExternalRidesForNearbyFiltersByPickupDistance(t *testing.T) {
 	if len(got) != 2 || got[0].ID != "vit" || got[1].ID != "katpadi" {
 		t.Fatalf("expected VIT and Katpadi external rides only, got %#v", got)
 	}
+	if got[0].PickupDistanceKm == nil || *got[0].PickupDistanceKm > 0.1 {
+		t.Fatalf("expected nearby external rides to include pickup distance, got %#v", got[0].PickupDistanceKm)
+	}
 }
 
 func TestFetchExternalRidesForNearbyRespectsRadius(t *testing.T) {

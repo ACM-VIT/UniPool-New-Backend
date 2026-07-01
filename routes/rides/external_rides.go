@@ -39,7 +39,10 @@ type ExternalRideCard struct {
 	TotalSeats     int    `json:"total_seats"`
 	AvailableSeats int    `json:"available_seats"`
 	TotalPrice     *uint  `json:"total_price,omitempty"`
-	JourneyNotes   string `json:"journey_notes,omitempty"`
+	// Present for /rides/nearby responses, where the pickup-point distance has
+	// already been computed to filter and sort the external feed.
+	PickupDistanceKm *float64 `json:"pickup_distance_km,omitempty"`
+	JourneyNotes     string   `json:"journey_notes,omitempty"`
 }
 
 type firestoreField struct {
@@ -664,7 +667,10 @@ func FetchExternalRidesForNearby(lat, lng, radiusMeters float64) []ExternalRideC
 
 	out := make([]ExternalRideCard, 0, len(matches))
 	for _, match := range matches {
-		out = append(out, match.ride)
+		ride := match.ride
+		distanceKm := match.distanceKm
+		ride.PickupDistanceKm = &distanceKm
+		out = append(out, ride)
 	}
 	return out
 }

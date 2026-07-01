@@ -26,6 +26,12 @@ type NearbyRideSummary struct {
 	TotalSeats     uint      `json:"total_seats"`
 	BookedSeats    uint      `json:"booked_seats"`
 	TotalPrice     uint      `json:"total_price"`
+	// Host name + avatar, joined from users so nearby cards show who's
+	// driving (matching /ride/search) instead of a "Student host" fallback.
+	// Explicit column tags so the Scan maps the SELECT aliases regardless of
+	// GORM's initialism handling for URL (cf. User.UPIVPA's column tag).
+	HostUserName              string `gorm:"column:host_user_name" json:"host_user_name"`
+	HostUserProfilePictureURL string `gorm:"column:host_user_profile_picture_url" json:"host_user_profile_picture_url"`
 }
 
 type NearbyRidesPayload struct {
@@ -107,19 +113,24 @@ func LoadNearbyRides(ctx context.Context, lat, lng, radius float64, limit int, e
 	q := database.Database.Db.WithContext(ctx).
 		Model(&models.Ride{}).
 		Select(`
-			id,
-			host_user_id,
-			start_location,
-			end_location,
-			start_latitude,
-			start_longitude,
-			end_latitude,
-			end_longitude,
-			start_time,
-			total_seats,
-			booked_seats,
-			total_price
+			rides.id,
+			rides.host_user_id,
+			rides.start_location,
+			rides.end_location,
+			rides.start_latitude,
+			rides.start_longitude,
+			rides.end_latitude,
+			rides.end_longitude,
+			rides.start_time,
+			rides.total_seats,
+			rides.booked_seats,
+			rides.total_price,
+			u.name AS host_user_name,
+			u.profile_picture_url AS host_user_profile_picture_url
 		`).
+		// Join the host so nearby cards carry the driver's name + avatar,
+		// matching /ride/search (INNER JOIN mirrors the search handler).
+		Joins("JOIN users u ON u.id = rides.host_user_id").
 		// Only future rides should appear on the nearby map and list.
 		Where("start_time > ?", time.Now()).
 		// Exclude rides with no passenger seats left.
