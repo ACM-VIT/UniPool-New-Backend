@@ -51,6 +51,9 @@ func WireRoutes(app *fiber.App, auth fiber.Handler, optionalAuth fiber.Handler) 
 
 	// Public share preview exposes a sanitized subset of ride details.
 	app.Get("/ride/preview/:id", rides.GetRidePreview)
+	// Public preview for an external (off-platform) ride, so shared
+	// /ride/<id> links resolve for external rides too.
+	app.Get("/external/preview/:id", rides.GetExternalRidePreview)
 	app.Get("/locations/search", locations.SearchLocations)
 
 	// Public institute catalogue.
