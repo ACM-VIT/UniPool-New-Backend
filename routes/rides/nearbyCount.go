@@ -29,9 +29,10 @@ type NearbyRideSummary struct {
 }
 
 type NearbyRidesPayload struct {
-	Rides  []NearbyRideSummary `json:"rides"`
-	Radius float64             `json:"radius"`
-	Count  int                 `json:"count"`
+	Rides         []NearbyRideSummary `json:"rides"`
+	ExternalRides []ExternalRideCard  `json:"external_rides"`
+	Radius        float64             `json:"radius"`
+	Count         int                 `json:"count"`
 }
 
 type nearbyBounds struct {
@@ -146,10 +147,14 @@ func LoadNearbyRides(ctx context.Context, lat, lng, radius float64, limit int, e
 		rides = []NearbyRideSummary{}
 	}
 
+	external := FetchExternalRidesForNearby(lat, lng, radius)
+	external = limitExternalRides(external, limit-len(rides))
+
 	return NearbyRidesPayload{
-		Rides:  rides,
-		Radius: radius,
-		Count:  len(rides),
+		Rides:         rides,
+		ExternalRides: external,
+		Radius:        radius,
+		Count:         len(rides) + len(external),
 	}, nil
 }
 
@@ -199,8 +204,10 @@ func NearbyRidesCount(c *fiber.Ctx) error {
 		})
 	}
 
+	externalCount := len(FetchExternalRidesForNearby(lat, lng, radius))
+
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{
-		"count":  count,
+		"count":  count + int64(externalCount),
 		"radius": radius,
 	})
 }
@@ -225,7 +232,6 @@ func NearbyRides(c *fiber.Ctx) error {
 	radius, _ := strconv.ParseFloat(c.Query("radius"), 64)
 
 	limit, _ := strconv.Atoi(c.Query("limit"))
-	// Optional viewer filter for excluding self-hosted rides.
 	excludeHostUserID := c.Query("exclude_host_user_id")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

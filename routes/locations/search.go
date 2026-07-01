@@ -266,25 +266,27 @@ func searchNominatim(parent context.Context, query string, limit int, hasUserLoc
 }
 
 func dedupeAndSort(results []LocationResult, query string, limit int, hasUserLocation bool, userLat, userLon float64) []LocationResult {
-	seen := map[string]LocationResult{}
+	out := make([]LocationResult, 0, len(results))
 	for _, result := range results {
-		key := strings.ToLower(strings.TrimSpace(result.Name))
-		if key == "" {
-			key = strings.ToLower(strings.TrimSpace(firstPart(result.DisplayName)))
-		}
-		if result.Lat != "" && result.Lon != "" {
-			key += "|" + result.Lat + "|" + result.Lon
-		}
-		if existing, ok := seen[key]; ok && existing.Score >= result.Score {
+		if canonicalLocationName(result) == "" {
 			continue
 		}
-		seen[key] = result
-	}
 
-	out := make([]LocationResult, 0, len(seen))
-	for _, result := range seen {
+		duplicateIdx := -1
+		for i, existing := range out {
+			if duplicateLocationResult(existing, result) {
+				duplicateIdx = i
+				break
+			}
+		}
+
+		if duplicateIdx >= 0 {
+			out[duplicateIdx] = betterLocationResult(out[duplicateIdx], result)
+			continue
+		}
 		out = append(out, result)
 	}
+
 	sort.SliceStable(out, func(i, j int) bool {
 		if math.Abs(out[i].Score-out[j].Score) > 0.001 {
 			return out[i].Score > out[j].Score
@@ -295,6 +297,81 @@ func dedupeAndSort(results []LocationResult, query string, limit int, hasUserLoc
 		out = out[:limit]
 	}
 	return out
+}
+
+func duplicateLocationResult(a, b LocationResult) bool {
+	if canonicalLocationName(a) != canonicalLocationName(b) {
+		return false
+	}
+
+	// Curated places are canonical product suggestions. If a ride-history or
+	// OSM row has the same human name, keep the curated row even when old ride
+	// data has a drifted coordinate.
+	if a.Source == "curated" || b.Source == "curated" {
+		return true
+	}
+
+	aLat, aLon, aOK := locationCoords(a)
+	bLat, bLon, bOK := locationCoords(b)
+	if !aOK || !bOK {
+		return true
+	}
+
+	// Ride-history coordinates for the same named place can differ by a gate,
+	// centroid, or stale geocode. Collapse campus/city-local duplicates, but
+	// keep genuinely different cities with the same neighborhood name.
+	return haversineKm(aLat, aLon, bLat, bLon) <= 10
+}
+
+func canonicalLocationName(result LocationResult) string {
+	name := strings.TrimSpace(firstPart(result.Name))
+	if name == "" {
+		name = strings.TrimSpace(firstPart(result.DisplayName))
+	}
+
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte(' ')
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+func locationCoords(result LocationResult) (float64, float64, bool) {
+	lat, latErr := strconv.ParseFloat(result.Lat, 64)
+	lon, lonErr := strconv.ParseFloat(result.Lon, 64)
+	if latErr != nil || lonErr != nil {
+		return 0, 0, false
+	}
+	return lat, lon, true
+}
+
+func betterLocationResult(a, b LocationResult) LocationResult {
+	if a.Source == "current" && b.Source != "current" {
+		return a
+	}
+	if b.Source == "current" && a.Source != "current" {
+		return b
+	}
+	if a.Source == "curated" && b.Source != "curated" {
+		return a
+	}
+	if b.Source == "curated" && a.Source != "curated" {
+		return b
+	}
+	if math.Abs(a.Score-b.Score) > 0.001 {
+		if a.Score > b.Score {
+			return a
+		}
+		return b
+	}
+	if len(strings.TrimSpace(a.DisplayName)) <= len(strings.TrimSpace(b.DisplayName)) {
+		return a
+	}
+	return b
 }
 
 func scoreCandidate(name, city string, priority float64, query string, hasUserLocation bool, userLat, userLon, lat, lon float64) float64 {

@@ -71,6 +71,15 @@ func publicBaseURL() string {
 	return "https://unidev.acmvit.in"
 }
 
+func safeOTASegment(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" &&
+		value != "." &&
+		value != ".." &&
+		!filepath.IsAbs(value) &&
+		!strings.ContainsAny(value, `/\`)
+}
+
 // expoExportMetadata is the on-disk shape produced by `npx expo
 // export`. We only read the fields we need to construct manifests.
 type expoExportMetadata struct {
@@ -130,6 +139,10 @@ func ManifestHandler(c *fiber.Ctx) error {
 	if runtimeVersion == "" {
 		return c.Status(fiber.StatusBadRequest).
 			SendString("expo-runtime-version header is required")
+	}
+	if !safeOTASegment(runtimeVersion) {
+		return c.Status(fiber.StatusBadRequest).
+			SendString("invalid expo-runtime-version header")
 	}
 	if protocol != "" && protocol != "0" && protocol != "1" {
 		return c.Status(fiber.StatusBadRequest).
@@ -239,7 +252,9 @@ func ManifestHandler(c *fiber.Ctx) error {
 
 	c.Set("expo-protocol-version", "1")
 	c.Set("expo-sfv-version", "0")
-	c.Set("cache-control", "private, max-age=0, must-revalidate")
+	c.Set("cache-control", "no-store, no-cache, max-age=0, must-revalidate")
+	c.Set("pragma", "no-cache")
+	c.Set("expires", "0")
 	c.Set("Content-Type", "multipart/mixed; boundary="+mw.Boundary())
 	return c.SendString(buf.String())
 }
@@ -259,16 +274,23 @@ func AssetHandler(c *fiber.Ctx) error {
 	assetPath := c.Query("asset")
 	runtimeVersion := c.Query("runtimeVersion")
 	platform := strings.ToLower(c.Query("platform"))
+	updateID := strings.TrimSpace(c.Query("updateId"))
 	if assetPath == "" || runtimeVersion == "" {
 		return c.Status(fiber.StatusBadRequest).SendString("missing asset/runtimeVersion query params")
+	}
+	if !safeOTASegment(runtimeVersion) {
+		return c.Status(fiber.StatusBadRequest).SendString("invalid runtimeVersion query param")
 	}
 	if platform != "" && platform != "ios" && platform != "android" {
 		return c.Status(fiber.StatusBadRequest).SendString("invalid platform query param")
 	}
+	if updateID != "" && !safeOTASegment(updateID) {
+		return c.Status(fiber.StatusBadRequest).SendString("invalid updateId query param")
+	}
 
-	_, updateDir, err := latestUpdateDir(runtimeVersion)
+	updateDir, immutableAsset, err := resolveAssetUpdateDir(runtimeVersion, updateID, assetPath)
 	if err != nil {
-		return c.Status(fiber.StatusNotFound).SendString("no published update")
+		return c.Status(fiber.StatusNotFound).SendString("asset not found")
 	}
 
 	// Reject path traversal explicitly — assetPath should be relative
@@ -292,11 +314,16 @@ func AssetHandler(c *fiber.Ctx) error {
 	}
 	defer f.Close()
 
-	// 1-day cache: bundles are immutable per update-id, but the URL
-	// includes the update-id implicitly via the runtime-version's
-	// latest dir, so we keep the cache window short to avoid stale
-	// assets after a new publish.
-	c.Set("cache-control", "public, max-age=86400")
+	if immutableAsset {
+		// Manifest URLs include updateId, so each asset URL is immutable and
+		// safe to cache aggressively. This prevents stale bundle/cache clashes
+		// after a newer OTA is published for the same runtime.
+		c.Set("cache-control", "public, max-age=31536000, immutable")
+	} else {
+		// Legacy manifests published before updateId was added can still fetch
+		// assets, but those URLs are runtime-scoped and must not be cached long.
+		c.Set("cache-control", "no-cache, max-age=0, must-revalidate")
+	}
 	stat, _ := f.Stat()
 	if stat != nil {
 		c.Set("Content-Length", fmt.Sprintf("%d", stat.Size()))
@@ -307,6 +334,30 @@ func AssetHandler(c *fiber.Ctx) error {
 		return err
 	}
 	return nil
+}
+
+func resolveAssetUpdateDir(runtimeVersion, updateID, assetPath string) (string, bool, error) {
+	if !safeOTASegment(runtimeVersion) || (updateID != "" && !safeOTASegment(updateID)) {
+		return "", false, os.ErrInvalid
+	}
+	if updateID != "" {
+		dir := filepath.Join(storeDir(), runtimeVersion, updateID)
+		if _, err := os.Stat(filepath.Join(dir, assetPath)); err != nil {
+			return "", false, err
+		}
+		return dir, true, nil
+	}
+
+	dirs, err := updateDirsNewestFirst(runtimeVersion)
+	if err != nil {
+		return "", false, err
+	}
+	for _, dir := range dirs {
+		if _, err := os.Stat(filepath.Join(dir.path, assetPath)); err == nil {
+			return dir.path, false, nil
+		}
+	}
+	return "", false, os.ErrNotExist
 }
 
 // UploadHandler implements POST /api/ota/upload. Body is a tar.gz
@@ -335,7 +386,7 @@ func UploadHandler(c *fiber.Ctx) error {
 	if runtimeVersion == "" {
 		return c.Status(fiber.StatusBadRequest).SendString("runtime_version query param is required")
 	}
-	if strings.ContainsAny(runtimeVersion, "/\\") {
+	if !safeOTASegment(runtimeVersion) {
 		return c.Status(fiber.StatusBadRequest).SendString("invalid runtime_version")
 	}
 
@@ -411,16 +462,33 @@ func UploadHandler(c *fiber.Ctx) error {
 // effectively random, so the "latest" semantic comes from mtime
 // rather than name sort.
 func latestUpdateDir(runtime string) (string, string, error) {
-	root := filepath.Join(storeDir(), runtime)
-	entries, err := os.ReadDir(root)
+	cands, err := updateDirsNewestFirst(runtime)
 	if err != nil {
 		return "", "", err
 	}
-	type cand struct {
-		name string
-		mod  time.Time
+	if len(cands) == 0 {
+		return "", "", os.ErrNotExist
 	}
-	cands := make([]cand, 0, len(entries))
+	winner := cands[0]
+	return winner.name, winner.path, nil
+}
+
+type updateDirCandidate struct {
+	name string
+	path string
+	mod  time.Time
+}
+
+func updateDirsNewestFirst(runtime string) ([]updateDirCandidate, error) {
+	if !safeOTASegment(runtime) {
+		return nil, os.ErrInvalid
+	}
+	root := filepath.Join(storeDir(), runtime)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	cands := make([]updateDirCandidate, 0, len(entries))
 	for _, e := range entries {
 		if !e.IsDir() || strings.HasSuffix(e.Name(), ".incoming") {
 			continue
@@ -429,14 +497,15 @@ func latestUpdateDir(runtime string) (string, string, error) {
 		if err != nil {
 			continue
 		}
-		cands = append(cands, cand{name: e.Name(), mod: info.ModTime()})
-	}
-	if len(cands) == 0 {
-		return "", "", os.ErrNotExist
+		name := e.Name()
+		cands = append(cands, updateDirCandidate{
+			name: name,
+			path: filepath.Join(root, name),
+			mod:  info.ModTime(),
+		})
 	}
 	sort.Slice(cands, func(i, j int) bool { return cands[i].mod.After(cands[j].mod) })
-	winner := cands[0].name
-	return winner, filepath.Join(root, winner), nil
+	return cands, nil
 }
 
 // readCreatedAt returns the directory's mtime as the update's
@@ -469,11 +538,12 @@ func buildAsset(updateDir, relPath, contentType, ext, runtimeVersion, platform, 
 	// `key` per the protocol is the md5/sha hash used by the asset
 	// system to cache. We reuse the same sha256 hash; the client
 	// just treats it as opaque.
-	url := fmt.Sprintf("%s/api/assets?asset=%s&runtimeVersion=%s&platform=%s",
+	url := fmt.Sprintf("%s/api/assets?asset=%s&runtimeVersion=%s&platform=%s&updateId=%s",
 		publicBaseURL(),
 		queryEscape(relPath),
 		queryEscape(runtimeVersion),
 		queryEscape(platform),
+		queryEscape(updateID),
 	)
 	asset := manifestAsset{
 		Hash:        hash,

@@ -73,6 +73,8 @@ func Request(c *fiber.Ctx) error {
 		TotalSeats        uint       `gorm:"column:total_seats"`
 		StartLocation     string     `gorm:"column:start_location"`
 		EndLocation       string     `gorm:"column:end_location"`
+		HostName          string     `gorm:"column:host_name"`
+		HostEmail         string     `gorm:"column:host_email"`
 		AcceptedCount     int64      `gorm:"column:accepted_count"`
 		ExistingBookingID *uuid.UUID `gorm:"column:existing_booking_id"`
 	}
@@ -88,6 +90,8 @@ func Request(c *fiber.Ctx) error {
 			r.total_seats,
 			r.start_location,
 			r.end_location,
+			h.name AS host_name,
+			h.email AS host_email,
 			(
 				SELECT COUNT(*)
 				  FROM bookings accepted
@@ -104,6 +108,7 @@ func Request(c *fiber.Ctx) error {
 				 LIMIT 1
 			) AS existing_booking_id
 		  FROM rides r
+		  JOIN users h ON h.id = r.host_user_id
 		 WHERE r.id = ?
 		   AND r.deleted_at IS NULL
 		 LIMIT 1
@@ -164,6 +169,16 @@ func Request(c *fiber.Ctx) error {
 			}
 		}()
 	}
+	go sendBookingEmailIfAllowed(targetRide.HostUserID, helpers.BookingEmailParams{
+		Kind:          helpers.BookingEmailRequested,
+		ToEmail:       targetRide.HostEmail,
+		ToName:        targetRide.HostName,
+		ActorName:     user.Name,
+		StartLocation: targetRide.StartLocation,
+		EndLocation:   targetRide.EndLocation,
+		StartTime:     targetRide.StartTime,
+		RideID:        targetRide.ID.String(),
+	})
 
 	// Create the response
 	bookingResponse := BookingResponse{

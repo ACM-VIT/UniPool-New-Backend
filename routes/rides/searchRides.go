@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -203,11 +204,16 @@ func searchRowsToRides(rows []searchRideRow) []models.Ride {
 	return rides
 }
 
-func loadSearchRideCandidates(tx *gorm.DB, limit, offset int) ([]models.Ride, error) {
+const defaultSearchCandidateOrder = "rides.start_time ASC"
+
+func loadSearchRideCandidates(tx *gorm.DB, limit, offset int, orderBy string) ([]models.Ride, error) {
 	var rows []searchRideRow
+	if strings.TrimSpace(orderBy) == "" {
+		orderBy = defaultSearchCandidateOrder
+	}
 	err := tx.
 		Select(`
-			rides.id,
+				rides.id,
 			rides.created_at,
 			rides.host_user_id,
 			rides.start_location,
@@ -225,9 +231,9 @@ func loadSearchRideCandidates(tx *gorm.DB, limit, offset int) ([]models.Ride, er
 			u.profile_picture_url AS host_profile_picture_url,
 			u.yob AS host_user_yob,
 			u.gender AS host_user_gender
-		`).
+			`).
 		Joins("JOIN users u ON u.id = rides.host_user_id").
-		Order("rides.start_time ASC").
+		Order(orderBy).
 		Limit(limit).
 		Offset(offset).
 		Scan(&rows).Error
@@ -235,6 +241,47 @@ func loadSearchRideCandidates(tx *gorm.DB, limit, offset int) ([]models.Ride, er
 		return nil, err
 	}
 	return searchRowsToRides(rows), nil
+}
+
+func coordinateDistanceKmOrderSQL(latCol, lonCol string, lat, lon float64) string {
+	cosLat := strictMatchCosLat(lat)
+	return fmt.Sprintf(`
+		111.32::float8 * SQRT(
+			((%s::float8 - %.8f::float8) * (%s::float8 - %.8f::float8)) +
+			(((%s::float8 - %.8f::float8) * %.8f::float8) * ((%s::float8 - %.8f::float8) * %.8f::float8))
+		)
+	`, latCol, lat, latCol, lat, lonCol, lon, cosLat, lonCol, lon, cosLat)
+}
+
+func coordinateDistanceKmOrderTerm(latCol, lonCol string, lat, lon float64) string {
+	return "COALESCE(" + coordinateDistanceKmOrderSQL(latCol, lonCol, lat, lon) + ", 999999999)"
+}
+
+func searchCandidateOrder(params SearchParams, coordinateOrder bool) string {
+	if !coordinateOrder {
+		return defaultSearchCandidateOrder
+	}
+
+	terms := []string{}
+	if params.HasStartCoord {
+		terms = append(terms, coordinateDistanceKmOrderTerm("rides.start_latitude", "rides.start_longitude", params.StartLat, params.StartLon))
+	}
+	if params.HasEndCoord {
+		terms = append(terms, coordinateDistanceKmOrderTerm("rides.end_latitude", "rides.end_longitude", params.EndLat, params.EndLon))
+	}
+
+	switch len(terms) {
+	case 0:
+		return defaultSearchCandidateOrder
+	case 1:
+		return terms[0] + " ASC, rides.start_time ASC"
+	default:
+		return fmt.Sprintf("(%s + %s) ASC, %s ASC, rides.start_time ASC", terms[0], terms[1], terms[1])
+	}
+}
+
+func isFiniteCoordinate(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func parseTimeWindow(dateStr string, timeStr string) (time.Time, time.Time, error) {
@@ -319,7 +366,7 @@ func buildLocationQuery(tx *gorm.DB, location string, hasCoord bool, lat, lon fl
 		log.Printf("Text search on %s for: %s", locationColumn, normalizedLocation)
 	}
 
-	words := strings.Fields(normalizedLocation)
+	words := meaningfulLocationWords(normalizedLocation)
 
 	conditions := []string{
 		fmt.Sprintf("%s ILIKE ?", locationColumn), // exact match
@@ -330,16 +377,25 @@ func buildLocationQuery(tx *gorm.DB, location string, hasCoord bool, lat, lon fl
 		"%" + normalizedLocation + "%",
 	}
 
-	for _, word := range words {
-		if len(word) > 2 {
-			conditions = append(conditions, fmt.Sprintf("%s ILIKE ?", locationColumn))
+	if len(words) > 0 {
+		wordConditions := make([]string, 0, len(words))
+		for _, word := range words {
+			wordConditions = append(wordConditions, fmt.Sprintf("%s ILIKE ?", locationColumn))
 			values = append(values, "%"+word+"%")
 		}
-	}
+		conditions = append(conditions, "("+strings.Join(wordConditions, " AND ")+")")
 
-	if len(words) > 0 {
-		conditions = append(conditions, fmt.Sprintf("similarity(%s, ?) > ?", locationColumn))
-		values = append(values, location, 0.2)
+		wordConditions = wordConditions[:0]
+		similarityValues := []interface{}{location, 0.35}
+		for _, word := range words {
+			wordConditions = append(wordConditions, fmt.Sprintf("%s ILIKE ?", locationColumn))
+			similarityValues = append(similarityValues, "%"+word+"%")
+		}
+		conditions = append(
+			conditions,
+			fmt.Sprintf("(similarity(%s, ?) > ? AND (%s))", locationColumn, strings.Join(wordConditions, " OR ")),
+		)
+		values = append(values, similarityValues...)
 	}
 
 	whereClause := strings.Join(conditions, " OR ")
@@ -389,10 +445,35 @@ func appendCoordinateDistanceArgs(args []interface{}, lat, lon float64) []interf
 	return append(args, lat, lat, lon, cosLat, lon, cosLat)
 }
 
+// applyDirectionFilter keeps only rides oriented the same way as the search.
+//
+// A ride is a "forward" match when it is closer to the search in its own
+// orientation than reversed: dist(ride.start, search.start) + dist(ride.end,
+// search.end) <= dist(ride.start, search.end) + dist(ride.end, search.start).
+// Without this, a VIT→Katpadi ride surfaces for a Katpadi→VIT search whenever
+// the two points sit within the search radius of each other (they are ~8km
+// apart, well inside the 10km+ radius), which is the "shows the opposite
+// direction" bug. Only meaningful when BOTH endpoints are coordinates.
+func applyDirectionFilter(tx *gorm.DB, startLat, startLon, endLat, endLon float64) *gorm.DB {
+	startDist := coordinateDistanceKmExpression("start_latitude", "start_longitude")
+	endDist := coordinateDistanceKmExpression("end_latitude", "end_longitude")
+	clause := fmt.Sprintf("(%s + %s) <= (%s + %s)", startDist, endDist, startDist, endDist)
+
+	var args []interface{}
+	args = appendCoordinateDistanceArgs(args, startLat, startLon) // aligned: ride.start -> search.start
+	args = appendCoordinateDistanceArgs(args, endLat, endLon)     // aligned: ride.end   -> search.end
+	args = appendCoordinateDistanceArgs(args, endLat, endLon)     // reversed: ride.start -> search.end
+	args = appendCoordinateDistanceArgs(args, startLat, startLon) // reversed: ride.end   -> search.start
+	return tx.Where(clause, args...)
+}
+
 func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon float64, hasStartCoord, hasEndCoord bool) (*gorm.DB, float64) {
 	if !hasStartCoord && !hasEndCoord {
 		return tx, 0
 	}
+
+	// A directional match is only possible when both ends are coordinates.
+	directional := hasStartCoord && hasEndCoord
 
 	radiusOptions := []float64{5000, 10000, 20000, 50000} // 5km, 10km, 20km, 50km
 
@@ -407,6 +488,9 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 		if hasEndCoord {
 			testTx = applyCoordinateRadiusFilter(testTx, endLat, endLon, radius, false)
 		}
+		if directional {
+			testTx = applyDirectionFilter(testTx, startLat, startLon, endLat, endLon)
+		}
 
 		testTx.Count(&count)
 		if count >= 5 { // Found enough results
@@ -416,6 +500,9 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 			}
 			if hasEndCoord {
 				finalTx = applyCoordinateRadiusFilter(finalTx, endLat, endLon, radius, false)
+			}
+			if directional {
+				finalTx = applyDirectionFilter(finalTx, startLat, startLon, endLat, endLon)
 			}
 			return finalTx, radius / 1000 // Return radius in km
 		}
@@ -428,6 +515,9 @@ func searchWithAdaptiveRadius(tx *gorm.DB, startLat, startLon, endLat, endLon fl
 	}
 	if hasEndCoord {
 		finalTx = applyCoordinateRadiusFilter(finalTx, endLat, endLon, 50000, false)
+	}
+	if directional {
+		finalTx = applyDirectionFilter(finalTx, startLat, startLon, endLat, endLon)
 	}
 	return finalTx, 50.0
 }
@@ -480,7 +570,7 @@ func addMatchContextWithHost(card *RideCard, params SearchParams, hostPastRides 
 		reasons = append(reasons, "Close to destination")
 	}
 
-	availableSeats := card.TotalSeats - card.BookedSeats
+	availableSeats := helpers.PassengerSeatsLeft(card.TotalSeats, card.BookedSeats)
 	if availableSeats > 2 {
 		reasons = append(reasons, "Multiple seats available")
 	} else if availableSeats > 1 {
@@ -566,9 +656,9 @@ func parseSearchParams(c *fiber.Ctx) (SearchParams, error) {
 	}
 
 	if latStr, lonStr := c.Query("start_lat"), c.Query("start_lon"); latStr != "" && lonStr != "" {
-		if v, err := strconv.ParseFloat(latStr, 64); err == nil {
+		if v, err := strconv.ParseFloat(latStr, 64); err == nil && isFiniteCoordinate(v) {
 			params.StartLat = v
-			if v2, err := strconv.ParseFloat(lonStr, 64); err == nil {
+			if v2, err := strconv.ParseFloat(lonStr, 64); err == nil && isFiniteCoordinate(v2) {
 				params.StartLon = v2
 				params.HasStartCoord = true
 			}
@@ -576,9 +666,9 @@ func parseSearchParams(c *fiber.Ctx) (SearchParams, error) {
 	}
 
 	if latStr, lonStr := c.Query("end_lat"), c.Query("end_lon"); latStr != "" && lonStr != "" {
-		if v, err := strconv.ParseFloat(latStr, 64); err == nil {
+		if v, err := strconv.ParseFloat(latStr, 64); err == nil && isFiniteCoordinate(v) {
 			params.EndLat = v
-			if v2, err := strconv.ParseFloat(lonStr, 64); err == nil {
+			if v2, err := strconv.ParseFloat(lonStr, 64); err == nil && isFiniteCoordinate(v2) {
 				params.EndLon = v2
 				params.HasEndCoord = true
 			}
@@ -752,10 +842,13 @@ func SearchRides(c *fiber.Ctx) error {
 		}
 	}
 
-	tx := database.Database.Db.
-		Model(&models.Ride{}).
-		Where(helpers.PassengerSeatsLeftPredicate+" AND start_time > NOW()").
-		Where("host_user_id != ?", params.User.ID)
+	usedRadius := params.RadiusKm
+	var (
+		dateStart           time.Time
+		dateEnd             time.Time
+		hasDateFilter       bool
+		useCoordinateSearch bool
+	)
 
 	if params.Date != "" {
 		startTime, endTime, err := parseTimeWindow(params.Date, searchTimeWindowPreference(params))
@@ -763,73 +856,27 @@ func SearchRides(c *fiber.Ctx) error {
 			log.Printf("Error parsing date %q: %v\n", params.Date, err)
 			return c.Status(400).JSON(fiber.Map{"error": "Invalid date format; expected YYYY-MM-DD"})
 		}
-		tx = tx.Where("start_time BETWEEN ? AND ?", startTime, endTime)
+		dateStart = startTime
+		dateEnd = endTime
+		hasDateFilter = true
 	}
 
-	if params.MaxPrice != nil {
-		tx = tx.Where("total_price <= ?", *params.MaxPrice)
-	}
-
-	if params.MinSeats != nil {
-		tx = tx.Where(helpers.MinSeatsLeftPredicate, *params.MinSeats)
-	}
-
-	usedRadius := params.RadiusKm
-	var useCoordinateSearch bool
-
-	if params.HasStartCoord || params.HasEndCoord {
-		coordinateTx := tx
-
-		if params.HasStartCoord {
-			coordinateTx = applyCoordinateRadiusFilter(coordinateTx, params.StartLat, params.StartLon, usedRadius*1000, true)
-		}
-		if params.HasEndCoord && !params.HasStartCoord {
-			coordinateTx = applyCoordinateRadiusFilter(coordinateTx, params.EndLat, params.EndLon, usedRadius*1000, false)
-		}
-
-		var probe struct {
-			ID uuid.UUID
-		}
-		probeErr := coordinateTx.Select("id").Limit(1).Take(&probe).Error
-		if probeErr == nil && probe.ID != (uuid.UUID{}) {
-			tx = coordinateTx
-			useCoordinateSearch = true
-		} else if errors.Is(probeErr, gorm.ErrRecordNotFound) && params.StartLocation == "" && params.EndLocation == "" {
-			tx = coordinateTx
-			useCoordinateSearch = true
-		} else if probeErr != nil && !errors.Is(probeErr, gorm.ErrRecordNotFound) {
-			log.Printf("Coordinate search probe failed: %v", probeErr)
-		}
-	}
-
-	if !useCoordinateSearch && (params.StartLocation != "" || params.EndLocation != "") {
-		textTx := database.Database.Db.
+	buildBaseSearchTx := func() *gorm.DB {
+		tx := database.Database.Db.
 			Model(&models.Ride{}).
 			Where(helpers.PassengerSeatsLeftPredicate+" AND start_time > NOW()").
 			Where("host_user_id != ?", params.User.ID)
 
-		if params.Date != "" {
-			startTime, endTime, _ := parseTimeWindow(params.Date, searchTimeWindowPreference(params))
-			textTx = textTx.Where("start_time BETWEEN ? AND ?", startTime, endTime)
+		if hasDateFilter {
+			tx = tx.Where("start_time BETWEEN ? AND ?", dateStart, dateEnd)
 		}
 		if params.MaxPrice != nil {
-			textTx = textTx.Where("total_price <= ?", *params.MaxPrice)
+			tx = tx.Where("total_price <= ?", *params.MaxPrice)
 		}
 		if params.MinSeats != nil {
-			textTx = textTx.Where(helpers.MinSeatsLeftPredicate, *params.MinSeats)
+			tx = tx.Where(helpers.MinSeatsLeftPredicate, *params.MinSeats)
 		}
-
-		if params.StartLocation != "" {
-			textTx = buildLocationQuery(textTx, params.StartLocation, false, 0, 0, 0, true)
-		}
-		if params.EndLocation != "" {
-			textTx = buildLocationQuery(textTx, params.EndLocation, false, 0, 0, 0, false)
-		}
-
-		// Use text search if coordinate search failed or supplement it
-		if !useCoordinateSearch {
-			tx = textTx
-		}
+		return tx
 	}
 
 	candidateLimit := params.Limit * 8
@@ -840,60 +887,131 @@ func SearchRides(c *fiber.Ctx) error {
 		candidateLimit = 250
 	}
 
-	var rides []models.Ride
-	if loaded, err := loadSearchRideCandidates(tx, candidateLimit, params.Offset); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		log.Printf("Database error: %v", err)
-		return c.Status(500).JSON(fiber.Map{"error": "Error fetching rides"})
-	} else {
-		rides = loaded
+	rides := make([]models.Ride, 0, candidateLimit)
+	seenRideIDs := make(map[uuid.UUID]bool, candidateLimit)
+	appendUniqueRides := func(next []models.Ride) {
+		for _, ride := range next {
+			if seenRideIDs[ride.ID] {
+				continue
+			}
+			seenRideIDs[ride.ID] = true
+			rides = append(rides, ride)
+		}
+	}
+
+	ranCandidateSearch := false
+	var textSearchErr error
+
+	if params.HasStartCoord || params.HasEndCoord {
+		coordinateTx := buildBaseSearchTx()
+
+		if params.HasStartCoord {
+			coordinateTx = applyCoordinateRadiusFilter(coordinateTx, params.StartLat, params.StartLon, usedRadius*1000, true)
+		}
+		if params.HasEndCoord && !params.HasStartCoord {
+			coordinateTx = applyCoordinateRadiusFilter(coordinateTx, params.EndLat, params.EndLon, usedRadius*1000, false)
+		}
+
+		if loaded, err := loadSearchRideCandidates(
+			coordinateTx,
+			candidateLimit,
+			params.Offset,
+			searchCandidateOrder(params, true),
+		); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			log.Printf("Database error: %v", err)
+			return c.Status(500).JSON(fiber.Map{"error": "Error fetching rides"})
+		} else {
+			appendUniqueRides(loaded)
+		}
+		ranCandidateSearch = true
+		useCoordinateSearch = true
+	}
+
+	if (params.StartLocation != "" && !params.HasStartCoord) || (params.EndLocation != "" && !params.HasEndCoord) {
+		textTx := buildBaseSearchTx()
+
+		if params.StartLocation != "" && !params.HasStartCoord {
+			textTx = buildLocationQuery(textTx, params.StartLocation, false, 0, 0, 0, true)
+		}
+		if params.EndLocation != "" && !params.HasEndCoord {
+			textTx = buildLocationQuery(textTx, params.EndLocation, false, 0, 0, 0, false)
+		}
+
+		if loaded, err := loadSearchRideCandidates(
+			textTx,
+			candidateLimit,
+			params.Offset,
+			searchCandidateOrder(params, false),
+		); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			textSearchErr = err
+			log.Printf("Text search error: %v", err)
+		} else {
+			appendUniqueRides(loaded)
+		}
+		ranCandidateSearch = true
+	}
+
+	if !ranCandidateSearch {
+		if loaded, err := loadSearchRideCandidates(
+			buildBaseSearchTx(),
+			candidateLimit,
+			params.Offset,
+			searchCandidateOrder(params, false),
+		); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			log.Printf("Database error: %v", err)
+			return c.Status(500).JSON(fiber.Map{"error": "Error fetching rides"})
+		} else {
+			appendUniqueRides(loaded)
+		}
 	}
 
 	if searchDebugLogs {
 		log.Printf("Query returned %d rides", len(rides))
 	}
 
-	if len(rides) == 0 && (params.StartLocation != "" || params.EndLocation != "") {
+	if len(rides) == 0 && ((params.StartLocation != "" && !params.HasStartCoord) || (params.EndLocation != "" && !params.HasEndCoord)) {
 		if searchDebugLogs {
 			log.Printf("No results found, trying fallback search...")
 		}
 
-		fallbackTx := database.Database.Db.
-			Model(&models.Ride{}).
-			Where(helpers.PassengerSeatsLeftPredicate+" AND start_time > NOW()").
-			Where("host_user_id != ?", params.User.ID)
+		fallbackTx := buildBaseSearchTx()
+		fallbackFiltered := false
 
-		if params.Date != "" {
-			startTime, endTime, _ := parseTimeWindow(params.Date, searchTimeWindowPreference(params))
-			fallbackTx = fallbackTx.Where("start_time BETWEEN ? AND ?", startTime, endTime)
-		}
-
-		if params.StartLocation != "" {
-			words := strings.Fields(strings.ToLower(params.StartLocation))
+		if params.StartLocation != "" && !params.HasStartCoord {
+			words := meaningfulLocationWords(params.StartLocation)
 			for _, word := range words {
-				if len(word) > 3 {
-					fallbackTx = fallbackTx.Where("LOWER(start_location) LIKE ?", "%"+word+"%")
-					break
-				}
+				fallbackTx = fallbackTx.Where("LOWER(start_location) LIKE ?", "%"+word+"%")
+				fallbackFiltered = true
+				break
 			}
 		}
 
-		if params.EndLocation != "" {
-			words := strings.Fields(strings.ToLower(params.EndLocation))
+		if params.EndLocation != "" && !params.HasEndCoord {
+			words := meaningfulLocationWords(params.EndLocation)
 			for _, word := range words {
-				if len(word) > 3 {
-					fallbackTx = fallbackTx.Where("LOWER(end_location) LIKE ?", "%"+word+"%")
-					break
-				}
+				fallbackTx = fallbackTx.Where("LOWER(end_location) LIKE ?", "%"+word+"%")
+				fallbackFiltered = true
+				break
 			}
 		}
 
-		if loaded, err := loadSearchRideCandidates(fallbackTx, candidateLimit, params.Offset); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			log.Printf("Fallback search error: %v", err)
-		} else if searchDebugLogs {
-			rides = loaded
-			log.Printf("Fallback search returned %d rides", len(rides))
-		} else {
-			rides = loaded
+		if fallbackFiltered {
+			if loaded, err := loadSearchRideCandidates(
+				fallbackTx,
+				candidateLimit,
+				params.Offset,
+				searchCandidateOrder(params, false),
+			); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				log.Printf("Fallback search error: %v", err)
+				if textSearchErr != nil {
+					return c.Status(500).JSON(fiber.Map{"error": "Error fetching rides"})
+				}
+			} else if searchDebugLogs {
+				appendUniqueRides(loaded)
+				log.Printf("Fallback search returned %d rides", len(rides))
+			} else {
+				appendUniqueRides(loaded)
+			}
 		}
 	}
 
@@ -906,6 +1024,22 @@ func SearchRides(c *fiber.Ctx) error {
 	pastRoutes := make(map[string]bool)
 	hostStats := make(map[uuid.UUID]searchHostStats)
 	viewerBookings := map[uuid.UUID]*models.Booking{}
+	externalRides := FetchExternalRidesForSearch(ExternalRideSearchParams{
+		StartLocation: params.StartLocation,
+		EndLocation:   params.EndLocation,
+		StartLat:      params.StartLat,
+		StartLon:      params.StartLon,
+		EndLat:        params.EndLat,
+		EndLon:        params.EndLon,
+		HasStartCoord: params.HasStartCoord,
+		HasEndCoord:   params.HasEndCoord,
+		RadiusKm:      usedRadius,
+		HasDateFilter: hasDateFilter,
+		DateStart:     dateStart,
+		DateEnd:       dateEnd,
+		MaxPrice:      params.MaxPrice,
+		MinSeats:      params.MinSeats,
+	})
 
 	hostIDs := make([]uuid.UUID, 0, len(rides))
 	rideIDs := make([]uuid.UUID, 0, len(rides))
@@ -1023,19 +1157,20 @@ func SearchRides(c *fiber.Ctx) error {
 			card.TotalDistance = card.EndDistance
 		}
 
+		scored := scoreRideForSearch(ride, params, startDist, endDist)
 		if useCoordinateSearch {
 			if params.HasStartCoord {
 				if startDist == nil || *startDist > params.RadiusKm {
 					continue
 				}
-			} else if params.HasEndCoord {
+			}
+			if params.HasEndCoord {
 				if endDist == nil || *endDist > params.RadiusKm {
 					continue
 				}
 			}
 		}
 
-		scored := scoreRideForSearch(ride, params, startDist, endDist)
 		card.RelevanceScore = scored.Score
 		card.MatchReason = scored.MatchReason
 
@@ -1115,6 +1250,7 @@ func SearchRides(c *fiber.Ctx) error {
 	if len(response) > params.Limit {
 		response = response[:params.Limit]
 	}
+	externalRides = limitExternalRides(externalRides, params.Limit-len(response))
 
 	// Strict matches: surfaced alongside the regular fuzzy results
 	// so clients can render a "best match" badge on overlapping
@@ -1157,8 +1293,9 @@ func SearchRides(c *fiber.Ctx) error {
 
 	return c.Status(200).JSON(fiber.Map{
 		"rides":          response,
+		"external_rides": externalRides,
 		"strict_matches": strictMatches,
-		"total_found":    len(response),
+		"total_found":    len(response) + len(externalRides),
 		"used_radius_km": usedRadius,
 		"sort_by":        params.SortBy,
 		"search_method": func() string {

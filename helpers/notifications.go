@@ -13,6 +13,7 @@ const (
 	NotifRideUpdates    = "ride_updates"
 	NotifTripReminders  = "trip_reminders"
 	NotifRatingPrompts  = "rating_prompts"
+	NotifBookingEmails  = "booking_emails"
 )
 
 // AllNotifCategories is the settings presentation order.
@@ -22,6 +23,7 @@ var AllNotifCategories = []string{
 	NotifRideUpdates,
 	NotifTripReminders,
 	NotifRatingPrompts,
+	NotifBookingEmails,
 }
 
 // FilterAllowedRecipients resolves notification preferences for many users in

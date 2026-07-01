@@ -511,6 +511,56 @@ func TestRideSearch_ContextualRouteOverlapBeatsNearbyOffRoute(t *testing.T) {
 	}
 }
 
+func TestRideSearch_DestinationMatchSurvivesBusyPickupArea(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "busy-pickup@vitstudent.ac.in", &inst.ID)
+
+	target := nextLocalSearchTime(t, 21, 0)
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dayStart := time.Date(target.In(loc).Year(), target.In(loc).Month(), target.In(loc).Day(), 6, 0, 0, 0, loc)
+
+	for i := 0; i < 100; i++ {
+		SeedRide(t, db, host, RideOpts{
+			StartLocation: "Puducherry",
+			EndLocation:   "Chennai Central",
+			StartLat:      FloatPtr(11.9416), StartLon: FloatPtr(79.8083),
+			EndLat: FloatPtr(13.0827), EndLon: FloatPtr(80.2707),
+			StartTime: dayStart.Add(time.Duration(i) * 5 * time.Minute).UTC(),
+		})
+	}
+
+	wanted := SeedRide(t, db, host, RideOpts{
+		StartLocation: "Puducherry",
+		EndLocation:   "VIT Vellore",
+		StartLat:      FloatPtr(11.9416), StartLon: FloatPtr(79.8083),
+		EndLat: FloatPtr(12.9692), EndLon: FloatPtr(79.1559),
+		StartTime: target.UTC(),
+	})
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet,
+		"/ride/search?start_location=Puducherry&end_location=VIT%20Vellore"+
+			"&start_lat=11.9416&start_lon=79.8083&end_lat=12.9692&end_lon=79.1559"+
+			"&date="+target.Format("2006-01-02"),
+		nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Rides []map[string]any `json:"rides"`
+	}
+	ReadJSON(t, resp, &body)
+	assertIDPresent(t, body.Rides, wanted.ID.String())
+	if len(body.Rides) > 0 && body.Rides[0]["id"] != wanted.ID.String() {
+		t.Fatalf("destination match should rank first in busy pickup area; order=%v", idsOf(body.Rides))
+	}
+}
+
 func TestRideSearch_CoordinateSearchDoesNotPromoteMissingCoordinateRows(t *testing.T) {
 	db := ConnectTestDB(t)
 	ResetDB(t)

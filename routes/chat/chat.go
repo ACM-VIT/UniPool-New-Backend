@@ -33,7 +33,23 @@ const (
 	// page-by-page as the user scrolls up.
 	defaultMessageLimit = 50
 	maxMessageLimit     = 200
+
+	// One user can send several chat messages in a row, but offline
+	// recipients only need one OS banner telling them to open the room.
+	chatPushThrottleWindow = 2 * time.Minute
 )
+
+type chatPushThrottleKey struct {
+	roomID string
+	userID uuid.UUID
+}
+
+var chatPushThrottle = struct {
+	sync.Mutex
+	lastSent map[chatPushThrottleKey]time.Time
+}{
+	lastSent: map[chatPushThrottleKey]time.Time{},
+}
 
 // Roles a user can have on a ride chat. The chat endpoints branch on
 // this for both auth (none/rejected => 403) and visibility filtering
@@ -45,6 +61,43 @@ const (
 	roleRejected = "rejected"
 	roleNone     = "none"
 )
+
+func filterChatPushThrottle(roomID string, recipients []services.FCMRecipient) []services.FCMRecipient {
+	if len(recipients) == 0 {
+		return recipients
+	}
+	now := time.Now()
+	allowed := make([]services.FCMRecipient, 0, len(recipients))
+	allowedUsers := make(map[chatPushThrottleKey]bool)
+
+	chatPushThrottle.Lock()
+	defer chatPushThrottle.Unlock()
+
+	for _, recipient := range recipients {
+		key := chatPushThrottleKey{roomID: roomID, userID: recipient.UserID}
+		if allowedUsers[key] {
+			allowed = append(allowed, recipient)
+			continue
+		}
+		if last, ok := chatPushThrottle.lastSent[key]; ok && now.Sub(last) < chatPushThrottleWindow {
+			continue
+		}
+		chatPushThrottle.lastSent[key] = now
+		allowedUsers[key] = true
+		allowed = append(allowed, recipient)
+	}
+
+	if len(chatPushThrottle.lastSent) > 10000 {
+		cutoff := now.Add(-10 * chatPushThrottleWindow)
+		for key, last := range chatPushThrottle.lastSent {
+			if last.Before(cutoff) {
+				delete(chatPushThrottle.lastSent, key)
+			}
+		}
+	}
+
+	return allowed
+}
 
 // getRideViewerRole resolves the caller's relationship to a ride in
 // one query. Returns the host_user_id alongside the role so callers
@@ -940,6 +993,10 @@ func fanOutRideNotifications(rideUUID uuid.UUID, sender models.User, content str
 	if len(tokens) == 0 {
 		return
 	}
+	tokens = filterChatPushThrottle(rideUUID.String(), tokens)
+	if len(tokens) == 0 {
+		return
+	}
 
 	// Mirror SendChatMessageNotification's title/body/data shape so
 	// the client routing logic is unchanged.
@@ -990,6 +1047,10 @@ func fanOutDMNotification(dmRoomID string, sender models.User, content string) {
 		log.Printf("notifications: dm token lookup %s -> user %s failed: %v", dmRoomID, otherID, err)
 		return
 	}
+	if len(tokens) == 0 {
+		return
+	}
+	tokens = filterChatPushThrottle(dmRoomID, tokens)
 	if len(tokens) == 0 {
 		return
 	}
@@ -1066,6 +1127,12 @@ func GetUserChats(c *fiber.Ctx) error {
 		HostIsEmailVerified   bool
 	}
 	var rideRows []chatRideRow
+	// Hide chats for rides that are already over, matching the trips list
+	// (involvedRides): a ride drops off once it's >24h past its start time
+	// and isn't flagged ongoing. Filtering the source ride set here covers
+	// BOTH the active chat rooms and the host's pending requests, since
+	// both are derived from `rides` below.
+	oneDayAgo := time.Now().UTC().Add(-24 * time.Hour)
 	if err := database.Database.Db.Raw(`
 		WITH viewer_ride_ids AS (
 			SELECT r.id AS ride_id
@@ -1101,8 +1168,9 @@ func GetUserChats(c *fiber.Ctx) error {
 		  FROM viewer_ride_ids v
 		  JOIN rides r ON r.id = v.ride_id
 		  JOIN users u ON u.id = r.host_user_id
+		 WHERE (r.is_ongoing = 1 OR r.start_time > ?)
 		 ORDER BY r.start_time DESC
-	`, user.ID, user.ID).Scan(&rideRows).Error; err != nil {
+	`, user.ID, user.ID, oneDayAgo).Scan(&rideRows).Error; err != nil {
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "failed to fetch chats"})
 	}
 
