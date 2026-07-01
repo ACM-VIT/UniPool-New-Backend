@@ -30,6 +30,11 @@ type ExternalRideCard struct {
 	DepartureTime  string `json:"departure_time"`
 	HostName       string `json:"host_name"`
 	HostPhone      string `json:"host_phone"`
+	// HostEmail is the address the external ride is linked by. It is kept
+	// server-side only (json:"-") so it is never exposed to clients; the
+	// invite endpoint resolves it by ride id to send the "wants to UniPool
+	// with you" email.
+	HostEmail      string `json:"-"`
 	VehicleType    string `json:"vehicle_type"`
 	TotalSeats     int    `json:"total_seats"`
 	AvailableSeats int    `json:"available_seats"`
@@ -120,6 +125,37 @@ func externalRideTotalPrice(fields map[string]firestoreField) *uint {
 		}
 	}
 	return nil
+}
+
+// externalRideEmail pulls the host's email out of whichever field the source
+// document uses. External sources are not perfectly consistent, so we try the
+// common spellings and take the first that looks like an email.
+func externalRideEmail(fields map[string]firestoreField) string {
+	for _, key := range []string{
+		"driverEmail", "email", "hostEmail", "userEmail",
+		"createdByEmail", "createdBy", "driver_email",
+	} {
+		if v := fieldStr(fields, key); strings.Contains(v, "@") {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// FindExternalRideByID returns the cached external ride with the given id.
+// Used by the invite endpoint to resolve the host email server-side without
+// ever handing it to the client.
+func FindExternalRideByID(id string) (ExternalRideCard, bool) {
+	if id == "" {
+		return ExternalRideCard{}, false
+	}
+	cached, _ := getUsableVigoCache()
+	for _, r := range cached {
+		if r.ID == id {
+			return r, true
+		}
+	}
+	return ExternalRideCard{}, false
 }
 
 type externalLocationPoint struct {
@@ -371,6 +407,7 @@ func fetchVigoRidesFromFirestore() ([]ExternalRideCard, error) {
 				DepartureTime:  depStr,
 				HostName:       fieldStr(doc.Fields, "driverName"),
 				HostPhone:      fieldStr(doc.Fields, "driverPhone"),
+				HostEmail:      externalRideEmail(doc.Fields),
 				VehicleType:    vehicleType,
 				TotalSeats:     totalSeats,
 				AvailableSeats: availableSeats,

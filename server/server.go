@@ -87,6 +87,9 @@ func WireRoutes(app *fiber.App, auth fiber.Handler, optionalAuth fiber.Handler) 
 // SetupRoutes registers authenticated routes. Production callers should use
 // WireRoutes so the auth boundary is installed first.
 func SetupRoutes(app *fiber.App) {
+	// Invite an external ride host to join UniPool ("wants to UniPool with you").
+	app.Post("/external/invite", rides.SendExternalInvite)
+
 	// Ride CRUD routes
 	app.Post("/ride/create", rides.CreateRide)
 	app.Get("/ride/fetch/:id", CRUD.GetRideByID)
