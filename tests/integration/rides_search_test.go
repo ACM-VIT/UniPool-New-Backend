@@ -468,6 +468,65 @@ func TestRideSearch_DateFilterDoesNotLeakFarFutureRides(t *testing.T) {
 	}
 }
 
+func TestRideSearch_DateFilterReturnsOnlyRequestedLocalDay(t *testing.T) {
+	db := ConnectTestDB(t)
+	ResetDB(t)
+	inst := SeedInstitute(t, db, "VIT", "India", "vitstudent.ac.in")
+	host := SeedUser(t, db, "Host", "exact-date@vitstudent.ac.in", &inst.ID)
+
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().In(loc).AddDate(0, 0, 3)
+	selected := time.Date(base.Year(), base.Month(), base.Day(), 9, 0, 0, 0, loc)
+	previousDay := selected.AddDate(0, 0, -1)
+	nextDay := selected.AddDate(0, 0, 1)
+
+	previousRide := SeedRide(t, db, host, RideOpts{
+		StartLocation: "Chennai International Airport",
+		EndLocation:   "VIT Vellore",
+		StartLat:      FloatPtr(12.9941), StartLon: FloatPtr(80.1709),
+		EndLat: FloatPtr(12.9692), EndLon: FloatPtr(79.1559),
+		StartTime: previousDay.UTC(),
+	})
+	selectedRide := SeedRide(t, db, host, RideOpts{
+		StartLocation: "Chennai International Airport",
+		EndLocation:   "VIT Vellore",
+		StartLat:      FloatPtr(12.9941), StartLon: FloatPtr(80.1709),
+		EndLat: FloatPtr(12.9692), EndLon: FloatPtr(79.1559),
+		StartTime: selected.UTC(),
+	})
+	nextRide := SeedRide(t, db, host, RideOpts{
+		StartLocation: "Chennai International Airport",
+		EndLocation:   "VIT Vellore",
+		StartLat:      FloatPtr(12.9941), StartLon: FloatPtr(80.1709),
+		EndLat: FloatPtr(12.9692), EndLon: FloatPtr(79.1559),
+		StartTime: nextDay.UTC(),
+	})
+
+	app := SetupTestApp(t)
+	resp := Do(t, app, http.MethodGet,
+		"/ride/search?start_location=Chennai%20International%20Airport&end_location=VIT%20Vellore"+
+			"&start_lat=12.9941&start_lon=80.1709&end_lat=12.9692&end_lon=79.1559"+
+			"&date="+selected.Format("2006-01-02"),
+		nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body struct {
+		Rides []map[string]any `json:"rides"`
+	}
+	ReadJSON(t, resp, &body)
+	assertIDPresent(t, body.Rides, selectedRide.ID.String())
+	if indexOfID(body.Rides, previousRide.ID.String()) != -1 {
+		t.Fatalf("previous-day ride leaked into selected-date search; order=%v", idsOf(body.Rides))
+	}
+	if indexOfID(body.Rides, nextRide.ID.String()) != -1 {
+		t.Fatalf("next-day ride leaked into selected-date search; order=%v", idsOf(body.Rides))
+	}
+}
+
 func TestRideSearch_ContextualRouteOverlapBeatsNearbyOffRoute(t *testing.T) {
 	db := ConnectTestDB(t)
 	ResetDB(t)

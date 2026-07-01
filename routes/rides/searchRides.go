@@ -891,6 +891,9 @@ func SearchRides(c *fiber.Ctx) error {
 	seenRideIDs := make(map[uuid.UUID]bool, candidateLimit)
 	appendUniqueRides := func(next []models.Ride) {
 		for _, ride := range next {
+			if hasDateFilter && (ride.StartTime.Before(dateStart) || ride.StartTime.After(dateEnd)) {
+				continue
+			}
 			if seenRideIDs[ride.ID] {
 				continue
 			}
@@ -1250,7 +1253,7 @@ func SearchRides(c *fiber.Ctx) error {
 	if len(response) > params.Limit {
 		response = response[:params.Limit]
 	}
-	externalRides = limitExternalRides(externalRides, params.Limit-len(response))
+	externalRides = limitExternalRides(externalRides, params.Limit)
 
 	// Strict matches: surfaced alongside the regular fuzzy results
 	// so clients can render a "best match" badge on overlapping

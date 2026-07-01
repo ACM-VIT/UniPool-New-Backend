@@ -148,7 +148,7 @@ func LoadNearbyRides(ctx context.Context, lat, lng, radius float64, limit int, e
 	}
 
 	external := FetchExternalRidesForNearby(lat, lng, radius)
-	external = limitExternalRides(external, limit-len(rides))
+	external = limitExternalRides(external, limit)
 
 	return NearbyRidesPayload{
 		Rides:         rides,
