@@ -34,7 +34,12 @@ type ExternalRideCard struct {
 	// server-side only (json:"-") so it is never exposed to clients; the
 	// invite endpoint resolves it by ride id to send the "wants to UniPool
 	// with you" email.
-	HostEmail      string `json:"-"`
+	HostEmail string `json:"-"`
+	// HasHostEmail tells clients whether an invite email can be sent for this
+	// ride WITHOUT leaking the address itself. Off-platform sources (e.g. Vigo)
+	// often don't expose an email, so the UI hides the invite CTA and leads
+	// with WhatsApp/phone instead of a dead-end "no email on file".
+	HasHostEmail   bool   `json:"has_host_email"`
 	VehicleType    string `json:"vehicle_type"`
 	TotalSeats     int    `json:"total_seats"`
 	AvailableSeats int    `json:"available_seats"`
@@ -401,6 +406,8 @@ func fetchVigoRidesFromFirestore() ([]ExternalRideCard, error) {
 				vehicleType = "Car"
 			}
 
+			email := externalRideEmail(doc.Fields)
+
 			all = append(all, ExternalRideCard{
 				ID:             id,
 				Source:         "external",
@@ -410,7 +417,8 @@ func fetchVigoRidesFromFirestore() ([]ExternalRideCard, error) {
 				DepartureTime:  depStr,
 				HostName:       fieldStr(doc.Fields, "driverName"),
 				HostPhone:      fieldStr(doc.Fields, "driverPhone"),
-				HostEmail:      externalRideEmail(doc.Fields),
+				HostEmail:      email,
+				HasHostEmail:   email != "",
 				VehicleType:    vehicleType,
 				TotalSeats:     totalSeats,
 				AvailableSeats: availableSeats,
