@@ -218,8 +218,16 @@ func UpdateRideByID(c *fiber.Ctx) error {
 		return c.Status(401).JSON(fiber.Map{"error": "Invalid user data"})
 	}
 
+	// Parse the id into a uuid before querying. Passing the raw string to
+	// First() binds it as a text parameter, and Postgres rejects `uuid = text`
+	// ("Error finding ride" 500) — the same reason GetRidePreview parses first.
+	rideUUID, parseErr := uuid.Parse(rideID)
+	if parseErr != nil {
+		return c.Status(400).JSON(fiber.Map{"error": "Invalid ride ID"})
+	}
+
 	var ride models.Ride
-	result := database.Database.Db.First(&ride, rideID)
+	result := database.Database.Db.Where("id = ?", rideUUID).First(&ride)
 
 	if result.Error == gorm.ErrRecordNotFound {
 		log.Printf("Ride with id %v not found\n", rideID)
